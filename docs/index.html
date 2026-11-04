@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Super Kanban · DSH 智能任务看板</title>
+    <meta name="description" content="Super Kanban — 面向 DeepSeek Harness 的 AI 任务看板插件：从会话自动研判任务目标、进度、完成情况与问题。" />
+    <style>
+      :root { color-scheme: light dark; --bg: #f9fafb; --fg: #151517; --muted: #61666b; --line: #e5e7eb; --card: #ffffff; --accent: #151517; }
+      @media (prefers-color-scheme: dark) { :root { --bg: #151517; --fg: #f9fafb; --muted: #a1a6ad; --line: #2a2b2e; --card: #1c1d20; --accent: #f9fafb; } }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+      main { max-width: 760px; margin: 0 auto; padding: 72px 24px 96px; }
+      header { margin-bottom: 48px; }
+      .kicker { font-size: 12px; letter-spacing: .12em; color: var(--muted); margin: 0 0 12px; }
+      h1 { font-size: 32px; line-height: 1.2; letter-spacing: -.02em; margin: 0 0 12px; font-weight: 600; }
+      p.lede { font-size: 16px; color: var(--muted); margin: 0; max-width: 36em; }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 28px 0 0; }
+      a.button { display: inline-block; padding: 9px 16px; border-radius: 10px; text-decoration: none; font-size: 14px; border: 1px solid var(--line); color: var(--fg); }
+      a.primary { background: var(--accent); color: var(--bg); border-color: transparent; }
+      section { border-top: 1px solid var(--line); padding: 28px 0; }
+      h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
+      ol, ul { margin: 0; padding-left: 20px; color: var(--fg); }
+      li { margin: 6px 0; }
+      code { font: 12.5px/1.5 "SF Mono", Menlo, Consolas, monospace; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+      .muted { color: var(--muted); font-size: 13px; }
+      footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="kicker">DEEPSEEK HARNESS · PLUGIN</p>
+        <h1>Super Kanban · 智能任务看板</h1>
+        <p class="lede">读取你各工作区的 DSH 会话，自动研判任务目标、进度、完成情况与问题；关键事实优先、可追溯、能一键继续任务。全页主面板与右侧边栏双形态。</p>
+        <div class="actions">
+          <a class="primary button" href="https://github.com/topmindspace/dsh-super-kanban">GitHub 仓库</a>
+          <a class="button" href="https://github.com/topmindspace/dsh-super-kanban/blob/main/README.md">使用文档</a>
+          <a class="button" href="https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md">安装指南</a>
+        </div>
+      </header>
+
+      <section>
+        <h2>在 DSH 中安装</h2>
+        <ol>
+          <li>DSH → <strong>插件</strong> → <strong>发现（Discover）</strong>（实验性插件市场需先启用）</li>
+          <li>添加索引源：<code>https://topmindspace.github.io/dsh-super-kanban/index.json</code></li>
+          <li>选择 <strong>Super Kanban</strong> → 安装 → 启用 → <code>Cmd+R</code> 刷新</li>
+        </ol>
+        <p class="muted">也可以使用 npm 包名 <code>dsh-super-kanban</code>、Git 仓库地址或本地目录安装；详见安装指南。</p>
+      </section>
+
+      <section>
+        <h2>市场索引（供 Discover 添加）</h2>
+        <p><a href="./index.json">index.json</a> · format 1 · 当前版本 0.3.0 · MIT</p>
+      </section>
+
+      <footer>
+        Super Kanban 是社区第三方插件，非 DeepSeek 官方产品。只读本机 DSH 会话，数据不出本机。
+      </footer>
+    </main>
+  </body>
+</html>

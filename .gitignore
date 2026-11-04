@@ -29,3 +29,6 @@ dev/
 # build output (none currently, kept for future)
 dist/
 lib/
+
+# package tarballs
+*.tgz
