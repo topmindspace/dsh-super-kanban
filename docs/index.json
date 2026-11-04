@@ -1,0 +1,87 @@
+{
+  "format": 1,
+  "title": {
+    "en": "TopMindSpace DSH plugins",
+    "zh": "TopMindSpace DSH 插件索引"
+  },
+  "description": {
+    "en": "Installable plugins for DeepSeek Harness maintained by TopMindSpace.",
+    "zh": "TopMindSpace 维护的 DeepSeek Harness 可安装插件。"
+  },
+  "metadata": {
+    "categories": {
+      "productivity": {
+        "title": {
+          "en": "Productivity",
+          "zh": "效率"
+        }
+      }
+    },
+    "labels": {
+      "kanban": {
+        "title": {
+          "en": "Kanban",
+          "zh": "看板"
+        }
+      },
+      "ai": {
+        "title": {
+          "en": "AI",
+          "zh": "AI"
+        }
+      }
+    },
+    "sortKeys": {}
+  },
+  "plugins": [
+    {
+      "name": "dsh-super-kanban",
+      "title": {
+        "en": "Super Kanban",
+        "zh": "Super Kanban 任务看板"
+      },
+      "description": {
+        "en": "AI task kanban for DeepSeek Harness: derives task goals, progress, completion and issues from DSH sessions, with key facts, subtasks, artifacts, session hand-off and a dual full-page/right-sidebar UI.",
+        "zh": "面向 DeepSeek Harness 的 AI 任务看板：从会话自动研判任务目标、进度与问题，优先展示关键事实，支持子任务、产物追溯、一键继续任务，以及全页 / 右侧栏双形态界面。"
+      },
+      "icon": "./icon.svg",
+      "author": "topmindspace",
+      "homepage": "https://github.com/topmindspace/dsh-super-kanban#readme",
+      "repository": {
+        "url": "https://github.com/topmindspace/dsh-super-kanban"
+      },
+      "metadata": {
+        "category": "productivity",
+        "keywords": [
+          "dsh",
+          "deepseek-harness",
+          "dsh-plugin",
+          "kanban",
+          "task-tracking",
+          "ai-agent",
+          "session",
+          "productivity"
+        ],
+        "labels": [
+          "kanban",
+          "ai"
+        ],
+        "sortKeys": {}
+      },
+      "versions": [
+        {
+          "version": "0.3.0",
+          "publishTimestamp": 1793816836,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/topmindspace/dsh-super-kanban",
+            "commit": "7a38298587e6890a82f7410a6dbc57db1b3bc97d"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.5 <0.3.0"
+          }
+        }
+      ]
+    }
+  ]
+}
