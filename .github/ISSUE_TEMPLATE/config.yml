@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/topmindspace/dsh-super-kanban/security/advisories/new
+    about: Please report security issues privately through GitHub Security Advisories, never as a public issue.
+  - name: Installation and usage questions
+    url: https://github.com/topmindspace/dsh-super-kanban#readme
+    about: Read the README and docs first — installation, usage, privacy and troubleshooting are covered there.

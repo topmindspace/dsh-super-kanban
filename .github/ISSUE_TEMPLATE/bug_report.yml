@@ -1,0 +1,88 @@
+name: Bug report
+description: Something in Super Kanban does not work as expected.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please **do not paste tokens, credentials or private
+        session content** — remove them from logs and screenshots first. Security issues
+        must be reported privately via the Security Advisory link, not as public issues.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the task board
+        2. Click ...
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Super Kanban version
+      placeholder: e.g. 0.3.0 (see package.json or the plugin market entry)
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DeepSeek Harness version
+      placeholder: e.g. 0.2.1-rc.5
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15 / Windows 11 / Ubuntu 24.04
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Task board / cards
+        - Task drawer
+        - Session analysis (AI or rules)
+        - Session hand-off ("continue this task")
+        - Subtasks / artifacts / goals
+        - Right-sidebar presentation
+        - Settings
+        - Installation / upgrade
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Remove tokens, credentials, personal data and private session content.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I removed tokens, credentials, personal data and private session content from this report.
+          required: true

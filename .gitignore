@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# logs and temp
+*.log
+*.tmp
+*.zst
+.tmp/
+tmp/
+out/
+
+# local runtime data and personal/internal material
+data/
+internal/
+dev/
+.env
+.env.*
+*.local.md
+
+# build output (none currently, kept for future)
+dist/
+lib/

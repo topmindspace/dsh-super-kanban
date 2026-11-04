@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.19", "24"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Show tool versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Syntax check all JavaScript (node --check)
+        run: |
+          files="index.mjs client.js"
+          for dir in server scripts tests; do
+            files="$files $(find "$dir" -type f \( -name '*.mjs' -o -name '*.js' \) | sort | tr '\n' ' ')"
+          done
+          for file in $files; do
+            node --check "$file"
+          done
+          echo "node --check passed for: $files"
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Repository validation (manifest, files, syntax, market index format 1)
+        run: npm run validate
+
+      - name: Privacy scan
+        run: npm run check:privacy
+
+      - name: Package contents (npm pack --dry-run)
+        run: |
+          npm pack --dry-run --json > pack-dry-run.json
+          node --input-type=module - <<'NODE'
+          import fs from "node:fs";
+          const report = JSON.parse(fs.readFileSync("pack-dry-run.json", "utf8"))[0];
+          const files = report.files.map((file) => file.path);
+          const required = [
+            "index.mjs",
+            "client.js",
+            "cordis.patch.yml",
+            "icon.svg",
+            "CHANGELOG.md",
+            "LICENSE",
+            "README.md",
+            "package.json",
+            "server/service.mjs",
+            "server/sessions.mjs",
+            "server/analyzer-rules.mjs",
+            "server/analyzer-llm.mjs",
+            "server/store.mjs",
+          ];
+          const missing = required.filter((entry) => !files.includes(entry));
+          if (missing.length > 0) {
+            console.error(`npm pack is missing required files: ${missing.join(", ")}`);
+            process.exit(1);
+          }
+          console.log(`npm pack contains ${files.length} files; all required entries present.`);
+          NODE

@@ -1,0 +1,62 @@
+name: Feature request
+description: Suggest an idea or improvement for Super Kanban.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please describe the problem first, then the
+        solution you have in mind. Keep examples free of private data.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the workflow or pain point behind the request.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe what you would like Super Kanban to do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds or alternative designs you considered.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Task board / cards
+        - Task drawer
+        - Session analysis (AI or rules)
+        - Session hand-off ("continue this task")
+        - Subtasks / artifacts / goals
+        - Right-sidebar presentation
+        - Settings
+        - Installation / upgrade
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This request works within the local-first, zero-third-party-dependency design of the plugin.
+          required: false

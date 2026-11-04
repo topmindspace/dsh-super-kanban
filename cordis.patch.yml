@@ -1,0 +1,10 @@
+# Super Kanban bundle patch.
+# The bundle is selected through the profile's `dsh.profile.bundles` list; this
+# patch inserts the host half of the plugin. The browser half is discovered from
+# package.json `dsh.client` by @deepseek-ai/dsh-client-modules.
+- insert:
+    - id: super-kanban
+      name: "dsh-super-kanban"
+      config:
+        autoScan: true
+        scanIntervalSeconds: 120
