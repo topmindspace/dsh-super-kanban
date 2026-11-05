@@ -102,7 +102,7 @@ Super Kanban 把这些对话转成一张可持续维护的看板：
 
 DSH → 插件 → 添加插件 → 输入包名 `dsh-super-kanban`（可带版本，如 `dsh-super-kanban@0.3.0`）→ 安装 → 启用 → 刷新窗口。
 
-> npm 包在首个 Release 发布后可用。
+> npm 包已提交发布（v0.3.0）；npm 对首次发布会先进入 **staged release 待批准**状态，包所有者完成 2FA 批准后即可用 `npm` 方式安装。在此之前推荐方式 A（市场索引，Git 源）或方式 C/D。批准方式见 [docs/MARKET.md](docs/MARKET.md#6-发布流程维护者)。
 
 ### 方式 C：Git 仓库
 

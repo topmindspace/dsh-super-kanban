@@ -111,6 +111,18 @@ npm login
 npm publish --access public
 ```
 
+### npm staged release 批准（首次发布/开启 staged publishing 时）
+
+GitHub Actions 的 `npm publish` 成功后，npm 可能先把该版本置为 **staged release**（registry 暂时显示 `0.0.0-stage` 占位、包不可安装），需要包所有者用 2FA 批准后才会上线。批准需要 npm CLI v11+ 与已登录的维护者账号：
+
+```bash
+npx npm@11 login                       # 使用包所有者账号（需 2FA）
+npx npm@11 stage list                  # 列出 staged 包，找到 dsh-super-kanban@0.3.0 的 stage-id
+npx npm@11 stage approve <stage-id>    # 输入 OTP 完成审批，版本即刻上线
+```
+
+批准后验证：`npm view dsh-super-kanban version` 返回 `0.3.0`。若不需要人工审批，可在 npm 包设置中关闭 staged publishing（或改用 trust relationship + `allow-publish`）。在上述批准完成前，市场索引使用 **Git source** 安装，不受影响。
+
 发布后检查：
 
 1. npm：`npm view dsh-super-kanban version`；
