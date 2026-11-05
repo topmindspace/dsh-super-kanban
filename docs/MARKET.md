@@ -32,13 +32,13 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 1. DSH → **插件** → **发现（Discover）**
 2. **添加索引源**，粘贴：`https://topmindspace.github.io/dsh-super-kanban/index.json`
-3. 在列表中选中 **Super Kanban** → **安装** → 启用 → 刷新窗口（`Cmd+R`）
+3. 在列表中选中 **Super Kanban** → 打开详情页（`versions` 里会列出索引中的全部可用版本）→ **安装** 目标版本 → 启用 → 刷新窗口（`Cmd+R`）
 
 > 如果你的 DSH 版本还没有 Discover 能力，直接使用方式 B（npm）或方式 C（Git 仓库）。
 
 ### 方式 B：npm 包名
 
-DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（可带版本，如 `dsh-super-kanban@0.3.0`）→ 安装 → 启用 → 刷新。
+DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.4.1`，升级时推荐）→ 安装 → 启用 → 刷新。
 
 ### 方式 C：Git 仓库
 
@@ -49,6 +49,24 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（可带�
 插件 → 添加插件 → 选择本地目录（本仓库根目录）→ 安装 → 启用 → 刷新；或直接运行仓库内 `./install.sh`。
 
 安装完成后：左侧栏出现「任务看板」；会话右上角出现看板图标（右侧栏形态）。
+
+### 从市场升级（用户视角）
+
+市场（Discover）只负责**展示版本并执行安装**，**没有自动升级动作**：不会在后台替换已安装版本。第三方插件也没有插件页的「更新」按钮（该按钮只给按需安装的官方插件），DSH 对第三方插件的提示是「其他插件请先卸载再安装新版」。
+
+因此从市场升级的流程是：
+
+1. 插件 → 已安装 → Super Kanban → **卸载**；
+2. 插件 → 发现 → 打开 Super Kanban 详情页：`versions` 会列出索引里的全部可用版本（新版本随每次 Release 更新索引后出现）；
+3. 在版本列表里**选择目标版本** → **安装** → **启用** → 刷新窗口（必要时完全退出 DSH 再打开）。
+
+注意：
+
+- 插件页安装 npm/市场来源会用 `pnpm add --save-exact`，把**精确版本**写入 profile 依赖；所以升级需要重新安装目标版本，而不是只点一下刷新。
+- 若 profile 里被人为改成**范围依赖**：`^0.4.0` 可自然解析到 0.4.x 补丁版（0.4.1…），但 `^0.3.0` 永远不会解析到 0.4.x —— 跨 minor 升级必须安装**精确版本**（如 `dsh-super-kanban@0.4.1`）。
+- 市场索引由维护者在每次 Release 后运行 `npm run market:index` 并提交 `docs/index.json`；索引未刷新时，详情页看不到新版本。
+
+更完整的用户升级/验证/回滚步骤见 [INSTALL.md](INSTALL.md#3-更新插件升级)。
 
 ## 4. 市场索引格式（format 1）
 
@@ -74,12 +92,20 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（可带�
       "homepage": "https://github.com/topmindspace/dsh-super-kanban#readme",
       "repository": { "url": "https://github.com/topmindspace/dsh-super-kanban" },
       "metadata": { "category": "productivity", "labels": ["kanban"], "keywords": ["dsh", "kanban"] },
-      "versions": [
+      // 详情页默认展示 versions 中的第一个（按版本号从新到旧排列）；
+      // 也可选填 "defaultVersion": "0.4.0" 指定默认版本。
+      "versions": [                              // 索引中的全部可用版本（新版本由维护者生成）
         {
-          "version": "0.3.0",
+          "version": "0.4.0",
           "publishTimestamp": 1793800000,          // Unix 秒
           "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0" },
           "source": { "type": "npm" }              // 或 { "type": "git", "url": "...", "commit": "<40位 SHA>" }
+        },
+        {
+          "version": "0.3.0",                    // 历史版本保留，便于回滚/固定版本安装
+          "publishTimestamp": 1793600000,
+          "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0" },
+          "source": { "type": "git", "url": "...", "commit": "<40位 SHA>" }
         }
       ]
     }
@@ -93,7 +119,7 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（可带�
 
 ```bash
 # 1. 版本与变更
-npm version 0.3.0            # 更新 package.json / 打 tag（或手动改）
+npm version 0.4.1            # 更新 package.json / 打 tag（版本号以本次发布为准）
 npm test && npm run validate
 
 # 2. 更新市场索引（提交 commit 后）
@@ -104,7 +130,7 @@ git add docs/index.json && git commit -m "chore: refresh market index"
 #  A) 推荐：GitHub Actions 自动发布 npm
 #     - 先在 npmjs.com 创建 Automation token，存为仓库 Secret：NPM_TOKEN
 #     - push tag 触发 .github/workflows/release.yml
-git tag v0.3.0 && git push origin main --tags
+git tag v0.4.1 && git push origin main --tags
 
 #  B) 本地发布
 npm login
@@ -113,20 +139,20 @@ npm publish --access public
 
 ### npm staged release 批准（首次发布/开启 staged publishing 时）
 
-GitHub Actions 的 `npm publish` 成功后，npm 可能先把该版本置为 **staged release**（registry 暂时显示 `0.0.0-stage` 占位、包不可安装），需要包所有者用 2FA 批准后才会上线（通常几分钟内自动放行；若未放行按下面步骤手动批准；v0.3.0 已自动上线）。批准需要 npm CLI v11+ 与已登录的维护者账号：
+GitHub Actions 的 `npm publish` 成功后，npm 可能先把该版本置为 **staged release**（registry 暂时显示 `0.0.0-stage` 占位、包不可安装），需要包所有者用 2FA 批准后才会上线（通常几分钟内自动放行；若未放行按下面步骤手动批准）。批准需要 npm CLI v11+ 与已登录的维护者账号：
 
 ```bash
 npx npm@11 login                       # 使用包所有者账号（需 2FA）
-npx npm@11 stage list                  # 列出 staged 包，找到 dsh-super-kanban@0.3.0 的 stage-id
+npx npm@11 stage list                  # 列出 staged 包，找到 dsh-super-kanban@<version> 的 stage-id
 npx npm@11 stage approve <stage-id>    # 输入 OTP 完成审批，版本即刻上线
 ```
 
-批准后验证：`npm view dsh-super-kanban version` 返回 `0.3.0`。若不需要人工审批，可在 npm 包设置中关闭 staged publishing（或改用 trust relationship + `allow-publish`）。在上述批准完成前，市场索引使用 **Git source** 安装，不受影响。
+批准后验证：`npm view dsh-super-kanban version` 返回本次发布的版本号。若不需要人工审批，可在 npm 包设置中关闭 staged publishing（或改用 trust relationship + `allow-publish`）。在上述批准完成前，市场索引使用 **Git source** 安装，不受影响。
 
 发布后检查：
 
 1. npm：`npm view dsh-super-kanban version`；
-2. Release：GitHub Releases 出现 v0.3.0；
+2. Release：GitHub Releases 出现对应 tag；
 3. 市场：`https://topmindspace.github.io/dsh-super-kanban/index.json` 可访问且 `parseMarketIndex` 校验通过；
 4. 用一个干净的 DSH 环境按「方式 A」安装一次验证。
 

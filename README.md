@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-super-kanban.svg)](https://www.npmjs.com/package/dsh-super-kanban)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE)
 
 一个**生长在 DeepSeek Harness 界面里**的 AI 任务看板：它读取你各个工作区的真实 DSH 会话，自动研判任务的目标、进度、完成情况与问题，也可以完全手动管理。每张任务卡都能追溯到具体会话与具体一句话。
 
@@ -10,11 +10,11 @@
 - **数据**：只读扫描本机 DSH 会话；看板数据保存在本机，不出本机
 - **智能**：复用本机 DSH 已登录账号的模型额度，零配置；关闭后自动降级为本地规则分析
 
-**简体中文** | [English](README.en.md)
+**简体中文** | [English](https://github.com/topmindspace/dsh-super-kanban/blob/main/README.en.md)
 
-![任务看板（浅色）](docs/screenshots/board-light.png)
+![任务看板（浅色）](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-light.png)
 
-![看板 → 任务详情 → 继续任务 演示](docs/screenshots/demo.gif)
+![看板 → 任务详情 → 继续任务 演示](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/demo.gif)
 
 ## 目录
 
@@ -27,6 +27,7 @@
 - [界面截图](#界面截图)
 - [兼容性](#兼容性)
 - [常见问题](#常见问题)
+- [故障排查](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
 - [开发与贡献](#开发与贡献)
 - [License](#license)
 
@@ -46,7 +47,7 @@ Super Kanban 把这些对话转成一张可持续维护的看板：
 | 🤝 会话联动 | 「继续此任务」生成结构化提示词，确认后放入原会话或同工作区新会话输入框，不自动发送 |
 | ✅ 子任务与目标 | 子任务清单（可从会话待办导入、勾选自动回写进度）、任务目标、DSH Session Goal 追踪 |
 | 📦 产物跟踪 | 自动收集会话交付物与写出的文件，点击在 DSH 文档预览中打开 |
-| 🧾 关键事实优先 | 卡片先给一句话目标摘要；抽屉先看 3–6 条关键事实，完整证据默认折叠 |
+| 🧾 关键事实优先 | 卡片只保留标题/元信息/进度三层；抽屉先看 3–6 条关键事实，完整证据默认折叠 |
 | ✍️ 手动维护 | 新建 / 编辑 / 拖拽换列 / 归档 / 删除 / 锁定字段；你改过的字段 AI 不再覆盖 |
 | 🔄 持续维护 | 首次约数秒完成扫描，之后按间隔增量扫描；新会话自动纳入，旧任务自动更新 |
 | 🧠 解释得清 | 每条研判带置信度与一句话理由，避免「黑箱改状态」 |
@@ -64,7 +65,7 @@ Super Kanban 把这些对话转成一张可持续维护的看板：
 
 - 送模型的会话摘要（digest）压到 **≤1.5KB/会话**，只含最近变化与关键信号。
 - 输出结构化：关键事实 ≤6、证据 ≤8、`max_tokens` ≤2200，单个会话解析结果有明确上限。
-- **增量门控**：只在「用户消息增加 / 轮次结束 / 首次 / 手动重新研判」时调用模型；同一活跃 turn 内不重复分析，同一会话有最小间隔。
+- **增量门控**：只在「用户消息增加 / 轮次结束 / 首次分析」时调用模型；同一活跃 turn 内不重复分析，同一会话有最小间隔。
 - **预算可控**：设置里可配「单次扫描 AI 调用上限」与「每日上限」，超限自动降级规则引擎；设置页显示今日调用数与 tokens。
 - 反复全量扫描已分析的会话时，**0 次 AI 调用**。
 
@@ -73,6 +74,12 @@ Super Kanban 把这些对话转成一张可持续维护的看板：
 - 看板数据只写入本机 `~/.dsh/storages/super-kanban/`，无第三方服务器、无遥测。
 - 联网研判只发送**压缩摘要**：不发送完整会话原文、不发送文件内容、不发送账号凭证。
 - 所有 AI 功能可在设置中一键关闭，立即降级为本地规则分析。
+
+### 界面（v0.4）
+
+- 与 DSH 同源的深浅色、字体与间距；"单色为底、克制的强调色"：颜色只出现在状态点、细进度线、优先级小字与类型图标上。
+- 页头常驻常用动作（搜索 / 扫描 / 设置 / 在右侧栏打开 / 新建），「⋯」只保留「导出 JSON」。
+- 更多视觉与交互规则见 [DESIGN.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DESIGN.md)。
 
 ## 两种形态
 
@@ -107,7 +114,7 @@ Super Kanban 把这些对话转成一张可持续维护的看板：
 
 DSH → 插件 → 添加插件 → 输入包名 `dsh-super-kanban`（可附加版本号，如 `dsh-super-kanban@<version>`）→ 安装 → 启用 → 刷新窗口。
 
-> npm 包已发布：`dsh-super-kanban`（https://www.npmjs.com/package/dsh-super-kanban）。发布与索引更新流程见 [docs/MARKET.md](docs/MARKET.md)。
+> npm 包已发布：`dsh-super-kanban`（https://www.npmjs.com/package/dsh-super-kanban）。发布与索引更新流程见 [docs/MARKET.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/MARKET.md)。
 
 ### 方式 C：Git 仓库
 
@@ -125,19 +132,26 @@ cd dsh-super-kanban
 
 或在 DSH 插件页选择「本地目录」指向本仓库根目录。安装完成后刷新窗口，左侧栏出现「任务看板」。
 
-### 升级与卸载
+### 更新插件（重要）
 
-- **升级**：插件市场 / npm / Git 安装的，在插件页更新即可；源码安装的 `git pull` 后刷新窗口。
+第三方插件**没有“自动升级”**：更新 = **卸载旧版 → 安装目标版本**，然后刷新 DSH 窗口（必要时完全退出重开）。
+
+- **跨 minor 必须用精确版本**：`0.3.x → 0.4.x` 要安装 `dsh-super-kanban@0.4.1` 这类精确版本；旧的范围依赖 `^0.3.0` 在语义化版本下**永远不会**解析到 0.4.x（这是“更新后界面仍是旧版”的常见原因）。
+- **0.4.x 内的小版本**：若 profile 依赖写的是 `^0.4.0`，0.4.1、0.4.2 等补丁版可被正常解析；若插件页安装写的是精确版本，则同样需要卸载后安装目标版本。
+- 更新后先按 `Cmd+R`；界面没变则**完全退出 DSH 再打开**，再按 [INSTALL.md 的“验证版本”](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#2-验证安装与版本) 检查实际版本与依赖规格。
+
+### 卸载
+
 - **卸载**：插件页移除，或源码目录执行 `./uninstall.sh -y`。
 - 卸载**不会删除**看板数据；彻底清空请删除 `~/.dsh/storages/super-kanban/`。
 
-更详细的安装、升级、排障说明见 [docs/INSTALL.md](docs/INSTALL.md)。
+更详细的安装、更新、验证、回滚与排障说明见 [docs/INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)；遇到问题见 [docs/TROUBLESHOOTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)。
 
 ## 使用
 
 1. 左侧栏点 **任务看板**（或会话右上角看板图标走右侧栏形态）。
 2. **看板**：四列——待办 / 进行中 / 受阻 / 已完成；列头显示数量与状态色。
-3. **卡片**：状态点、标题与 AI/规则标记、一句话目标摘要、来源工作区与最近活动时间，以及克制的优先级、问题数、产物数、子任务进度与进度线。
+3. **卡片**：状态点、标题与 AI/规则标记、来源工作区与最近活动时间，以及克制的优先级、问题数、产物数、子任务进度与进度线。
 4. **详情抽屉**（点卡片打开）：
    - 一句话状态摘要（点「编辑」可改字段）
    - **关键事实**（3–6 条，来自会话的关键进展 / 决策 / 问题）
@@ -207,27 +221,27 @@ DSH 会话（本机只读）
 
 | 看板（浅色） | 看板（深色） |
 | --- | --- |
-| ![看板-浅色](docs/screenshots/board-light.png) | ![看板-深色](docs/screenshots/board-dark.png) |
+| ![看板-浅色](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-light.png) | ![看板-深色](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-dark.png) |
 
 | 任务详情（浅色） | 任务详情（深色） |
 | --- | --- |
-| ![任务详情-浅色](docs/screenshots/drawer-light.png) | ![任务详情-深色](docs/screenshots/drawer-dark.png) |
+| ![任务详情-浅色](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-light.png) | ![任务详情-深色](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-dark.png) |
 
 | 继续此任务弹窗 | 提示词放入原会话输入框 |
 | --- | --- |
-| ![继续此任务](docs/screenshots/continue-modal.png) | ![提示词放入会话](docs/screenshots/continue-placed.png) |
+| ![继续此任务](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/continue-modal.png) | ![提示词放入会话](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/continue-placed.png) |
 
 | 右侧栏形态（窄） | 右侧栏全屏 |
 | --- | --- |
-| ![右侧栏形态](docs/screenshots/side-panel.png) | ![右侧栏全屏](docs/screenshots/side-fullscreen.png) |
+| ![右侧栏形态](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/side-panel.png) | ![右侧栏全屏](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/side-fullscreen.png) |
 
 | 产物预览入口 | 设置（齿轮常驻） |
 | --- | --- |
-| ![产物](docs/screenshots/drawer-artifacts.png) | ![设置](docs/screenshots/settings-dual.png) |
+| ![产物](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-artifacts.png) | ![设置](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/settings-dual.png) |
 
 | 「⋯」菜单（仅导出 JSON） | 1280 宽窗口 |
 | --- | --- |
-| ![工具栏菜单](docs/screenshots/toolbar-menu.png) | ![1280](docs/screenshots/board-1280.png) |
+| ![工具栏菜单](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/toolbar-menu.png) | ![1280](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-1280.png) |
 
 > 以上截图来自一套完全虚构的演示数据（虚构工作区 / 会话 / 任务），不含任何真实用户或工作区信息。
 
@@ -244,6 +258,9 @@ DSH 会话（本机只读）
 
 ## 常见问题
 
+**Q：更新插件后界面还是旧版 / 看不到新功能？**
+A：最常见原因是 profile 依赖仍是旧范围（如 `^0.3.0`），跨 minor 需要安装**精确版本**（如 `dsh-super-kanban@0.4.1`）。先 `Cmd+R` 刷新，再完全退出 DSH 重开；仍无效则按 [docs/TROUBLESHOOTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md#更新后-ui-未变) 检查实际安装版本与依赖规格。
+
 **Q：左侧栏没有「任务看板」？**
 A：按 `Cmd+R` 刷新窗口；仍没有则重启 DSH。仍没有请查看 DSH 插件页的诊断信息（插件加载失败会提示原因）。
 
@@ -251,7 +268,7 @@ A：按 `Cmd+R` 刷新窗口；仍没有则重启 DSH。仍没有请查看 DSH �
 A：点右上角扫描按钮手动触发；或检查设置中的「自动扫描」是否开启。
 
 **Q：AI 判断错了怎么办？**
-A：点开卡片直接改字段（编辑即锁定）；也可以在卡片菜单里「重新研判」，让 AI 重新分析该任务的来源会话。
+A：点开卡片直接改字段（编辑即锁定），AI 之后不会再覆盖；如需重新判定，在来源会话中继续对话后等待下一次扫描，插件会自动更新这张卡。
 
 **Q：不想让某些工作区进看板？**
 A：看板页头设置齿轮 → 排除工作区（可多选）。
@@ -277,11 +294,12 @@ npm run check:privacy # 扫描个人路径 / 凭证 / 会话 id 等敏感内容
 npm run market:index  # 重新生成 docs/index.json
 ```
 
-- 开发环境搭建、目录结构与调试方法见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
-- 架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，接口契约见 [docs/CONTRACT.md](docs/CONTRACT.md)，视觉规范见 [docs/DESIGN.md](docs/DESIGN.md)。
-- 发布与分发流程（市场索引、npm、Git）见 [docs/MARKET.md](docs/MARKET.md)。
-- 安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要开公开 issue。
+- 开发环境搭建、目录结构与调试方法见 [CONTRIBUTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) 与 [docs/DEVELOPMENT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md)。
+- 架构说明见 [docs/ARCHITECTURE.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md)，接口契约见 [docs/CONTRACT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md)，视觉规范见 [docs/DESIGN.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DESIGN.md)。
+- 发布与分发流程（市场索引、npm、Git）见 [docs/MARKET.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/MARKET.md)。
+- 用户侧排障手册见 [docs/TROUBLESHOOTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)。
+- 安全问题请按 [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md) 私下报告，不要开公开 issue。
 
 ## License
 
-[MIT](LICENSE) © topmindspace
+[MIT](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace

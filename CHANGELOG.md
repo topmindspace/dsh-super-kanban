@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-05
+
+Documentation-only patch release: the plugin code is unchanged from 0.4.0.
+
+### Added
+
+- **Upgrade guide**: how to update an installed plugin, how to verify the
+  installed version, the SemVer-range pitfall (`^0.3.0` never resolves 0.4.x;
+  cross-minor upgrades need an exact version or a reinstall), and how to roll
+  back.
+- **Troubleshooting guide** (`docs/TROUBLESHOOTING.md`): stale UI after an
+  update, missing entry point, blank board, 401/403, scanning and AI issues,
+  artifact previews, sidebar widths, uninstall/data retention and diagnostics.
+- **Absolute README asset and document links**, so screenshots, the demo GIF
+  and docs links render correctly on the npm package page as well as GitHub.
+
+### Changed
+
+- README (Chinese and English), INSTALL, MARKET, DESIGN, ARCHITECTURE,
+  DEVELOPMENT and CONTRACT were re-checked against the 0.4 UI and updated where
+  they still described earlier behaviour (toolbar actions, accent marks, board
+  status markers).
+
 ## [0.4.0] - 2026-11-05
 
 UI refinement release: put the frequently used toolbar actions back on the
@@ -83,6 +106,7 @@ workspace into a maintainable task board.
   with the local DSH account token; tokens are never logged or persisted by the
   plugin. See [SECURITY.md](./SECURITY.md).
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.4.1...HEAD
 [0.3.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.3.0
 [0.4.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.0
+[0.4.1]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.1

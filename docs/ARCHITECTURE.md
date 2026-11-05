@@ -147,6 +147,12 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 - 按根容器宽度分档：窄（单列 + 状态分段）/ 中 / 宽（四列）。右侧栏可拖宽，拖到全屏时自动切到宽档。
 - 抽屉在页面形态从右侧覆盖，在右侧栏形态则覆盖整个面板。
 
+### 页头与入口（v0.4 实现细节）
+
+- 全页看板页头常驻：搜索、扫描、设置齿轮、在右侧栏打开、主按钮「新建」；「⋯」菜单只保留「导出 JSON」。
+- 右侧栏看板页头常驻：扫描、设置、在全页面板打开、新建、「⋯」（仅导出 JSON）。
+- 页头按钮的排列与图标属于浏览器半的**实现细节**，不在 Host/浏览器契约内；契约只约束注册的 slot / tab / 数据接口（见 [CONTRACT.md](CONTRACT.md)）。
+
 ### 与 DSH 其他服务的联动
 
 | 能力 | 使用的服务 |
@@ -200,6 +206,16 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 - **新的 UI 区块**：在 `client.js` 的 `BoardPage` / `TaskDrawer` 内加组件，样式只用 DSH token。
 - **新的入口形态**：注册新的 slot / sidebarRight tab 类型。
 - **存储字段**：在 `store.mjs` 的 `truncateTask` / 迁移函数中维护版本与裁剪规则，并补测试。
+
+## 版本、升级与运行时
+
+- **运行时版本**：插件实际执行的是 DSH profile 的 `node_modules/dsh-super-kanban/`（或 `install.sh` 链接的工作区）。`package.json` 的 `version` 只描述发布包，不决定运行时。
+- **profile 依赖规格决定升级行为**：
+  - 插件页/npm 安装写入**精确版本**（`pnpm add --save-exact`）；
+  - 源码/本地目录安装写入 `link:`；
+  - 手工写成范围时，`^0.4.0` 只覆盖 0.4.x，`^0.3.0` 永远不会到 0.4.x（跨 minor 需精确版本）。
+- **升级动作由 DSH 完成**：第三方插件没有自动升级，也没有官方「更新」按钮；升级 = 卸载旧版 → 安装目标版本，然后刷新窗口（客户端 bundle 有缓存，必要时完全退出 DSH）。
+- 用户侧步骤、版本验证与排障见 [INSTALL.md](INSTALL.md) 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)；插件数据（`state.json`）与插件版本解耦（存储格式版本见 `store.mjs`）。
 
 ## 失败与降级
 

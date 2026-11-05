@@ -247,6 +247,7 @@ data: {"reason":"scan"|"task"|"settings","tasksChanged":2}
 - 轮询 `/state`（4 秒，页面隐藏时暂停）；扫描中加快刷新；SSE 可选。
 - 所有写操作乐观更新 + 失败回滚 + 轻量 toast。
 - 打开会话 / 产物 / 终端后自动收起抽屉。
+- 页头按钮的布局与图标（如设置常驻、右侧栏入口常驻、「⋯」仅导出 JSON）属于浏览器半实现细节，不在本契约内；契约只约束注册项、数据交互与行为约定。
 
 ### 与 DSH 服务的联动约定
 
@@ -281,6 +282,7 @@ if (target) ctx.get("sidebarRight").toggleFullscreen(target);
 
 - `state.version = 2`（当前）。仓库加载 v1 状态时自动迁移并落盘；迁移失败会备份原文件并重建空状态，不阻塞插件启动。
 - 新增字段必须保持向后兼容：客户端对缺失字段使用默认值；服务端对未知字段宽容处理。
+- 运行时版本由 DSH profile 的 `node_modules/dsh-super-kanban` 决定；profile 依赖规格（精确版本 / 范围 / `link:`）影响升级行为，见 [INSTALL.md](INSTALL.md) 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 - 契约变更需同步更新：本文件、`tests/` 中的契约相关断言、以及 CHANGELOG。
 
 ## 7. 验收标准

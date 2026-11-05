@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-super-kanban.svg)](https://www.npmjs.com/package/dsh-super-kanban)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE)
 
 An AI task board that **lives inside the DeepSeek Harness UI**. It reads the real DSH sessions across your workspaces and infers each task's goal, progress, completion state and open issues — and you can also maintain the board entirely by hand. Every card can be traced back to a specific session and a specific sentence.
 
@@ -10,11 +10,11 @@ An AI task board that **lives inside the DeepSeek Harness UI**. It reads the rea
 - **Data**: sessions are scanned read-only on your machine; board data stays on your machine.
 - **Intelligence**: reuses the model quota of the DSH account already signed in on this machine — zero configuration. Turn AI off and it falls back to local rule-based analysis.
 
-**English** | [简体中文](README.md)
+**English** | [简体中文](https://github.com/topmindspace/dsh-super-kanban/blob/main/README.md)
 
-![Task board (light)](docs/screenshots/board-light.png)
+![Task board (light)](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-light.png)
 
-![Board → task details → continue task demo](docs/screenshots/demo.gif)
+![Board → task details → continue task demo](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/demo.gif)
 
 ## Contents
 
@@ -27,6 +27,7 @@ An AI task board that **lives inside the DeepSeek Harness UI**. It reads the rea
 - [Screenshots](#screenshots)
 - [Compatibility](#compatibility)
 - [FAQ](#faq)
+- [Troubleshooting](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
 - [Development and contributing](#development-and-contributing)
 - [License](#license)
 
@@ -46,7 +47,7 @@ Super Kanban turns those conversations into a maintainable board:
 | 🤝 Session hand-off | "Continue this task" builds a structured prompt and (after your confirmation) puts it in the original or a new session input — never sends automatically |
 | ✅ Subtasks and goals | Subtask checklists (importable from session todos, writes back progress), task goal, and DSH Session Goal tracking |
 | 📦 Artifact tracking | Collects deliverables and written files; click to open them in the DSH document preview |
-| 🧾 Key facts first | Cards show a one-line goal summary; the drawer leads with 3–6 key facts and keeps raw evidence collapsed |
+| 🧾 Key facts first | Cards keep only title / meta / progress; the drawer leads with 3–6 key facts and keeps raw evidence collapsed |
 | ✍️ Manual control | Create, edit, drag between columns, archive, delete, lock fields — AI never overwrites what you locked |
 | 🔄 Continuous maintenance | First scan in seconds, then incremental scans; new sessions join automatically and old tasks keep updating |
 | 🧠 Explainable | Every inference carries a confidence and a one-line reason — no black-box status changes |
@@ -64,7 +65,7 @@ Super Kanban turns those conversations into a maintainable board:
 
 - Session digests sent to the model are capped at **≤1.5KB per session**, containing only recent changes and key signals.
 - Structured output is bounded: ≤6 key facts, ≤8 evidence items, `max_tokens` ≤ 2200, with per-session limits.
-- **Incremental gating**: the model is called only when user messages increase, a turn ends, the session is new, or you explicitly re-analyze. Live turns are never re-analyzed, and there is a minimum interval per session.
+- **Incremental gating**: the model is called only when user messages increase, a turn ends, or the session is analyzed for the first time. Live turns are never re-analyzed, and there is a minimum interval per session.
 - **Controllable budget**: per-scan and daily AI call limits are configurable; exceeding them automatically falls back to the rules engine. The settings page shows today's calls and tokens.
 - Re-scanning already analyzed sessions results in **zero AI calls**.
 
@@ -73,6 +74,12 @@ Super Kanban turns those conversations into a maintainable board:
 - Board data is written only to `~/.dsh/storages/super-kanban/` on your machine. No third-party servers, no telemetry.
 - Online analysis sends **compressed digests only**: never full session text, never file contents, never account credentials.
 - All AI features can be disabled in settings and take effect immediately, falling back to local rules.
+
+### Interface (v0.4)
+
+- DSH-native light/dark themes, typography and spacing; "monochrome first with restrained accents": color only appears in status dots, thin progress lines, priority text and type icons.
+- The header keeps frequent actions visible (search / scan / settings / open in right sidebar / new task); the "⋯" menu only contains "Export JSON".
+- Full visual and interaction rules: [DESIGN.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DESIGN.md).
 
 ## Two layouts
 
@@ -98,16 +105,16 @@ The same board can be opened in two ways:
 1. DSH → **Plugins** → **Discover**
 2. **Add index source** and paste:
    `https://topmindspace.github.io/dsh-super-kanban/index.json`
-3. Find **Super Kanban** in the list → **Install** → enable
+3. Find **Super Kanban** in the list → open its page (the index lists every available version) → **Install** the version you want → enable
 4. Press `Cmd+R` in the DSH window (restart DSH if needed)
 
 > The market index becomes available after the first release is published to GitHub Pages; its content comes from this repository's `docs/`.
 
 ### Option B: npm package
 
-DSH → Plugins → Add plugin → enter the package name `dsh-super-kanban` (optionally with a version, e.g. `dsh-super-kanban@<version>`) → install → enable → reload the window.
+DSH → Plugins → Add plugin → enter the package name — `dsh-super-kanban` for npm latest, or an **exact version** such as `dsh-super-kanban@0.4.1` (recommended when upgrading) → install → enable → reload the window.
 
-> The npm package is published: `dsh-super-kanban` (https://www.npmjs.com/package/dsh-super-kanban). See [docs/MARKET.md](docs/MARKET.md) for the release and index-refresh flow.
+> The npm package is published: `dsh-super-kanban` (https://www.npmjs.com/package/dsh-super-kanban). See [docs/MARKET.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/MARKET.md) for the release and index-refresh flow.
 
 ### Option C: Git repository
 
@@ -125,19 +132,26 @@ cd dsh-super-kanban
 
 Or choose "local directory" in the DSH plugin page and point it at this repository root. After installing, reload the window and "任务看板" appears in the left sidebar.
 
-### Upgrade and uninstall
+### Updating the plugin (important)
 
-- **Upgrade**: market / npm / Git installs update from the plugin page; source installs run `git pull` and reload the window.
+Third-party plugins have **no automatic upgrade**: updating means **uninstall the old version → install the target version**, then reload DSH (fully quit and reopen if the UI still looks stale).
+
+- **Cross-minor upgrades need an exact version**: going from `0.3.x` to `0.4.x` requires an exact install such as `dsh-super-kanban@0.4.1`. An old range such as `^0.3.0` **never** resolves to 0.4.x under semantic versioning — the most common cause of "updated but the UI is still old".
+- **Within 0.4.x**: if the profile dependency is `^0.4.0`, patch releases (0.4.1, 0.4.2, …) resolve normally; plugin-page installs record an exact version, so those still require uninstall + reinstall.
+- After updating press `Cmd+R`; if nothing changed, **fully quit and reopen DSH**, then verify the real installed version as described in [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#2-验证安装与版本).
+
+### Uninstall
+
 - **Uninstall**: remove it from the plugin page, or run `./uninstall.sh -y` in the source directory.
 - Uninstalling **does not delete** board data; to wipe it, delete `~/.dsh/storages/super-kanban/`.
 
-Detailed installation, upgrade and troubleshooting steps are in [docs/INSTALL.md](docs/INSTALL.md).
+Detailed install / update / verification / rollback steps are in [docs/INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md); if something breaks see [docs/TROUBLESHOOTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md).
 
 ## Usage
 
 1. Click **任务看板** in the left sidebar (or the board icon in a conversation header for the right-sidebar form).
 2. **Board**: four columns — Backlog / In progress / Blocked / Done; column headers show counts and status colors.
-3. **Cards**: status dot, title with an AI/rules marker, a one-line goal summary, source workspace and last-activity time, plus restrained priority, issue count, artifact count, subtask progress and a progress line.
+3. **Cards**: status dot, title with an AI/rules marker, source workspace and last-activity time, plus restrained priority, issue count, artifact count, subtask progress and a progress line.
 4. **Detail drawer** (click a card):
    - One-line status summary (click "Edit" to change fields)
    - **Key facts** (3–6 items: key progress / decisions / issues from the session)
@@ -207,27 +221,27 @@ By default incremental scans only analyze **changed sessions**; the per-scan AI 
 
 | Board (light) | Board (dark) |
 | --- | --- |
-| ![Board light](docs/screenshots/board-light.png) | ![Board dark](docs/screenshots/board-dark.png) |
+| ![Board light](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-light.png) | ![Board dark](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-dark.png) |
 
 | Task details (light) | Task details (dark) |
 | --- | --- |
-| ![Task details light](docs/screenshots/drawer-light.png) | ![Task details dark](docs/screenshots/drawer-dark.png) |
+| ![Task details light](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-light.png) | ![Task details dark](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-dark.png) |
 
 | Continue-task dialog | Prompt placed into the session input |
 | --- | --- |
-| ![Continue task](docs/screenshots/continue-modal.png) | ![Prompt placed](docs/screenshots/continue-placed.png) |
+| ![Continue task](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/continue-modal.png) | ![Prompt placed](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/continue-placed.png) |
 
 | Right sidebar (narrow) | Right sidebar fullscreen |
 | --- | --- |
-| ![Right sidebar](docs/screenshots/side-panel.png) | ![Sidebar fullscreen](docs/screenshots/side-fullscreen.png) |
+| ![Right sidebar](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/side-panel.png) | ![Sidebar fullscreen](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/side-fullscreen.png) |
 
 | Artifact preview entries | Settings (persistent gear) |
 | --- | --- |
-| ![Artifacts](docs/screenshots/drawer-artifacts.png) | ![Settings](docs/screenshots/settings-dual.png) |
+| ![Artifacts](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-artifacts.png) | ![Settings](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/settings-dual.png) |
 
 | "⋯" menu (export JSON only) | 1280px window |
 | --- | --- |
-| ![Toolbar menu](docs/screenshots/toolbar-menu.png) | ![1280](docs/screenshots/board-1280.png) |
+| ![Toolbar menu](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/toolbar-menu.png) | ![1280](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-1280.png) |
 
 > All screenshots above use a fully fictional demo dataset (invented workspaces / sessions / tasks) and contain no real user or workspace information.
 
@@ -244,6 +258,9 @@ By default incremental scans only analyze **changed sessions**; the per-scan AI 
 
 ## FAQ
 
+**Q: I updated the plugin but the UI still looks old / new features are missing.**
+A: The usual cause is an old profile dependency range (e.g. `^0.3.0`); cross-minor upgrades require an **exact version** such as `dsh-super-kanban@0.4.1`. Press `Cmd+R` first, then fully quit and reopen DSH. If it is still old, follow [docs/TROUBLESHOOTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md#更新后-ui-未变) to check the real installed version and dependency spec.
+
 **Q: There is no "任务看板" in the left sidebar.**
 A: Press `Cmd+R` to reload the window; restart DSH if it is still missing. If it remains missing, check the diagnostics on the DSH plugin page (a failed plugin load usually reports a reason).
 
@@ -251,7 +268,7 @@ A: Press `Cmd+R` to reload the window; restart DSH if it is still missing. If it
 A: Click the scan button in the header to trigger a manual scan, or check that "Auto scan" is enabled in settings.
 
 **Q: The AI judgment is wrong.**
-A: Open the card and edit the fields directly (editing locks them), or use "re-analyze" in the card menu to let AI look at the source session again.
+A: Open the card and edit the fields directly (editing locks them, so AI won't overwrite them later). To make AI re-judge it, continue the source session and wait for the next scan — the card updates automatically.
 
 **Q: I don't want certain workspaces on the board.**
 A: Settings gear in the board header → Excluded workspaces (multi-select).
@@ -277,11 +294,12 @@ npm run check:privacy # scan for personal paths / credentials / session ids
 npm run market:index  # regenerate docs/index.json
 ```
 
-- For the development setup, repository layout and debugging, see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-- Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Interface contract: [docs/CONTRACT.md](docs/CONTRACT.md). Visual spec: [docs/DESIGN.md](docs/DESIGN.md).
-- Release and distribution flow (market index, npm, Git): [docs/MARKET.md](docs/MARKET.md).
-- For security issues, please follow [SECURITY.md](SECURITY.md) and report privately instead of opening a public issue.
+- For the development setup, repository layout and debugging, see [CONTRIBUTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) and [docs/DEVELOPMENT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md).
+- Architecture: [docs/ARCHITECTURE.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md). Interface contract: [docs/CONTRACT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md). Visual spec: [docs/DESIGN.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DESIGN.md).
+- Release and distribution flow (market index, npm, Git): [docs/MARKET.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/MARKET.md).
+- User-facing troubleshooting guide: [docs/TROUBLESHOOTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md).
+- For security issues, please follow [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md) and report privately instead of opening a public issue.
 
 ## License
 
-[MIT](LICENSE) © topmindspace
+[MIT](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace

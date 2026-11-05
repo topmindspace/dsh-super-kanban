@@ -121,6 +121,19 @@ await page.screenshot({ path: "board-light.png" });
 - 制作公开截图时**不要**使用真实会话 / 工作区 / 账号数据；建议构造一套完全虚构的 DSH home（自建 `workspace.json`、会话日志与看板状态），确认左下角不出现真实账号信息后再截图。
 - 深色模式可通过页面注入 `prefers-color-scheme: dark`（CDP `Emulation.setEmulatedMedia`）或切换系统主题验证。
 
+## 7.1 版本、升级与文档一致性
+
+- **页面 chrome 约定（v0.4）**：页头设置/扫描/在右侧栏打开等高频动作常驻图标按钮，「⋯」只放「导出 JSON」；改 UI 时保持这个信息架构，避免文档与截图再次不一致。
+- **验证运行时版本**：以 profile 的 `node_modules` 为准，而不是仓库 `package.json`：
+
+  ```bash
+  node -p "require(require('os').homedir() + '/.dsh/profiles/desktop/node_modules/dsh-super-kanban/package.json').version"
+  ```
+
+- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.3.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.4.1` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
+- **文档同步**：涉及安装/升级/UI 入口的改动，需同步更新 [INSTALL.md](INSTALL.md)、[TROUBLESHOOTING.md](TROUBLESHOOTING.md)、[MARKET.md](MARKET.md) 以及中英文 README 的截图与描述；改完跑断链与 `npm run check:privacy` 检查。
+- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.4.1`）只用于演示精确安装，实际以 npm latest / 插件页为准。
+
 ## 8. 代码风格
 
 - Node ESM（`import` / `export`），浏览器半边使用 DSH 的模块加载器与 `React.createElement`。
