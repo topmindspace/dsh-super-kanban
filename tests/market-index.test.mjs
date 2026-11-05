@@ -61,9 +61,11 @@ test("buildMarketIndex keeps older versions from a previous index", () => {
   const previous = buildMarketIndex({ pkg: oldPkg, source: "git", commit: COMMIT_B, publishTimestamp: 1_690_000_000 });
   const index = buildMarketIndex({ pkg, source: "git", commit: COMMIT_A, publishTimestamp: 1_700_000_000, previous });
   const validated = validateMarketIndex(index, INDEX_URL);
+  // Derive the expected order from the current package version so a version
+  // bump never leaves a stale expectation behind.
   assert.deepEqual(
     validated.plugins[0].versions.map((entry) => entry.version),
-    ["0.3.0", "0.2.0"],
+    [pkg.version, oldPkg.version],
   );
 });
 
