@@ -71,11 +71,11 @@
       "versions": [
         {
           "version": "0.4.0",
-          "publishTimestamp": 1793847538,
+          "publishTimestamp": 1793847649,
           "source": {
             "type": "git",
             "url": "https://github.com/topmindspace/dsh-super-kanban",
-            "commit": "dfae42c271c93c6defdfeda78d6bc2097db8950b"
+            "commit": "1ee2c00f44bd0d531b9700b8672d8ffe0c392ead"
           },
           "engines": {
             "dsh": ">=0.2.1-rc.5 <0.3.0"
