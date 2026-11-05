@@ -60,6 +60,8 @@ export function runChecks(root) {
   run("npm", ["test"], { cwd: root });
   run("npm", ["run", "validate"], { cwd: root });
   run("npm", ["run", "check:privacy"], { cwd: root });
+  run("npm", ["run", "check:docs"], { cwd: root });
+  run("npm", ["run", "check:version"], { cwd: root });
 }
 
 function readVersion(root) {
@@ -84,21 +86,24 @@ function main() {
     checkCleanWorktree(root);
     console.log(`✓ working tree is clean`);
 
-    console.log("\nRunning checks (this can take a minute)...");
-    runChecks(root);
-    console.log("✓ tests, validator and privacy scan passed");
-
+    // Regenerate the market index before running the checks: check:version
+    // requires the committed index to list the package.json version, and the
+    // index can only pin its git source once the version commit exists.
     console.log("\nUpdating the plugin-market index...");
     if (options.dryRun) run(process.execPath, ["scripts/build-market-index.mjs", "--check"], { cwd: root });
     else run(process.execPath, ["scripts/build-market-index.mjs"], { cwd: root });
+
+    console.log("\nRunning checks (this can take a minute)...");
+    runChecks(root);
+    console.log("✓ tests, validator, privacy, docs and version checks passed");
 
     const changed = run("git", ["status", "--porcelain", "docs/index.json", "docs/icon.svg"], { cwd: root, capture: true })
       .stdout.trim();
     console.log("\nNext steps:");
     if (changed) {
       console.log(`  git add docs/index.json docs/icon.svg`);
+      console.log(`  git commit -m "chore: refresh market index for v${version}"`);
     }
-    console.log(`  git commit -m "chore: release v${version}"   # if the index changed`);
     console.log(`  git tag -a v${version} -m "v${version}"`);
     console.log(`  git push origin main --tags`);
     console.log("\nPushing the tag runs .github/workflows/release.yml: it re-runs the");

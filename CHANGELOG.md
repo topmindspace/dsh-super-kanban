@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Task-level AI review and re-analysis**: the drawer shows an “AI 研判 / 规则推断”
+  block (engine, model, confidence, last-analysis time, one-line reason) and a
+  “重新研判” action in the ⋯ menu that reruns `task.analyze` for a single card.
+  “可能已过期” appears only when the source session has activity newer than the
+  analysis; re-analysis reports engine/calls/tokens in a toast.
+- **Persistent scan outcome** in the board header: the last-scan line keeps the
+  host message (sessions processed, AI calls/tokens, “本次无 AI 调用”, budget
+  fallback, cancellation, failure + retry), and the scan button reads
+  “扫描（仅规则）” when AI is disabled.
+- **Accessibility and keyboard support**: dialogs/drawer use `role="dialog"` +
+  `aria-modal` + `aria-labelledby` with a focus trap and focus restore; cards are
+  keyboard-openable with visible focus rings; icon-only buttons have
+  `aria-label`s; subtask rows are real toggle + delete buttons; toasts and scan
+  state are announced via `aria-live`; Esc closes the topmost layer.
+- **Board and drawer usability**: backlog/archived counts in the summary (zero
+  values hidden), expand-all for issues/next steps, draft edits survive
+  background polls (with a quiet “后台已更新” note), the continue prompt keeps
+  user edits when the target changes, search covers goal/key facts/issues/next
+  steps, completed cards no longer draw the coloured progress line, archived
+  cards get a “已归档” marker, and the right-sidebar workspace filter stays
+  visible at every width.
+- **Backend**: new test-covered modules `server/auth.mjs`, `server/http.mjs` and
+  `server/titles.mjs`; the host test suite grew from 55 to 177 tests
+  (`sessions`, `service`, `store-robustness`, `http`, `auth`, `titles`,
+  `host-entry`, `analyzer-llm`); `server/sessions.mjs` now parses session-event
+  payloads from `event.data` (lineage/cwd had silently fallen back to the
+  projection cache).
+- **CI/CD**: `scripts/check-docs.mjs` and `scripts/check-version.mjs` with
+  `npm run check` / `check:docs` / `check:version` aggregates wired into CI and
+  the release workflow; non-blocking coverage report; stricter `npm pack`
+  contents assertions; Dependabot for GitHub Actions.
+- Maintainer documentation for the git-ignored `dev/` and
+  `internal/docs-internal/` trees, plus reproducible dev scripts.
+
+### Changed
+
+- Text limits are now a single source of truth (`TEXT_LIMITS` in
+  `server/store.mjs`): title 80, goal 280, tags 4×12, subtasks 12×60,
+  issues/next steps 5×160, milestones 20×120, key facts 6×60, evidence 8
+  (text 200 / quote 160), artifact name 80; client forms use the same maxima so
+  edits are no longer silently truncated.
+- Evidence/issue/key-fact/subtask/milestone `seq` may be `null` when a citation
+  cannot be resolved against the session timeline (never a misleading `#0`); the
+  UI hides unresolved `#N` badges.
+- “今日” AI usage and the daily budget roll over at the user’s local midnight
+  instead of UTC.
+- AI/rules “done” is kept as `in_progress` (with a history note) while unfinished
+  manual or locked subtasks remain; locked status always wins; generated
+  subtasks still auto-close on done.
+- HTTP edge validation: malformed command bodies, unknown/prototype-inherited
+  ops, malformed session ids and oversized bodies now return 400 instead of 500;
+  routes and successful response shapes are unchanged.
+- README.zh/README.en, INSTALL, CONTRACT, DESIGN, ARCHITECTURE, DEVELOPMENT,
+  TROUBLESHOOTING and the market landing page were re-checked against the code
+  (export filenames, `/ping`, `/session` limits, `TEXT_LIMITS`, nullable `seq`,
+  trust rule, local-day budget, the real re-analysis path, and an explicit
+  roadmap for features that are not available yet). `docs/screenshots/*.png`
+  were regenerated from the synthetic demo dataset and pass the demo privacy
+  audit (no forbidden strings in visible text).
+
+### Fixed
+
+- Clicking “锁定字段” in the task drawer no longer throws (`EDITABLE_FIELDS` was
+  referenced but never defined).
+- Scan finalization can no longer leave the scan mutex locked (and emit an
+  unhandled rejection) when the host logger or persistence throws.
+- Corrupt/partially written session logs no longer force a full re-parse on
+  every scan; unchanged sessions are not re-parsed just because AI is enabled
+  without credentials.
+- Single-task “AI 润色” reports failure honestly instead of claiming success when
+  AI is disabled/unavailable.
+- Background polling no longer discards unsaved drawer edits or continue-prompt
+  edits.
+- Search matches goal text again (it previously compared against
+  `[object Object]`).
+- SSE clients that half-close are dropped (plus a client cap), request bodies
+  have byte/time limits, and store loading sanitizes hostile-but-valid JSON;
+  backup retention also prunes `.migrate-failed` files.
+- Duplicate-title merge helpers were consolidated (a duplicate `dedupeByText`
+  definition silently overrode the first).
+- Privacy scanner no longer flags long kebab-case `sk-*` UI ids as API keys.
+- `scripts/release.mjs` regenerates the market index before running checks.
+- The new-task dialog no longer claims sessions can be linked from the drawer
+  (relinking is a documented roadmap item).
+
 ## [0.4.1] - 2026-11-05
 
 Documentation-only patch release: the plugin code is unchanged from 0.4.0.

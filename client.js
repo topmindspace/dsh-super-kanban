@@ -31,6 +31,27 @@ window.__ModuleLoader__.load({
       done: { label: "已完成", tone: "var(--dsw-alias-state-success-primary)", desc: "已交付或已闭环" },
     };
     const STATUS_ORDER = ["backlog", "in_progress", "blocked", "done"];
+    /** 用户可锁定、避免被 AI 研判覆盖的任务字段（与 Host task.update 的 lockFields 对齐）。 */
+    const EDITABLE_FIELDS = Object.freeze(["title", "goal", "status", "priority", "progress"]);
+    /**
+     * 持久化文本上限，镜像 Host `server/store.mjs` 的 `TEXT_LIMITS`（导出常量，不在 client.js import）。
+     * Host 已按这些上限截断；客户端表单 maxLength 必须一致，避免「输入被静默截断」。
+     * title 80 / goal 280 / tag 12×4 / subtask 60 / issue·nextStep 160 / milestone 120 / keyFact 60
+     * / evidence text 200 · quote 160。
+     */
+    const TEXT_LIMITS = Object.freeze({
+      title: 80,
+      goal: 280,
+      tagText: 12,
+      tags: 4,
+      subtaskText: 60,
+      issueText: 160,
+      nextStepText: 160,
+      milestoneText: 120,
+      keyFactText: 60,
+      evidenceText: 200,
+      evidenceQuote: 160,
+    });
 
     const PRIORITY_META = {
       P0: { label: "P0", tone: "var(--dsw-alias-state-error-primary)" },
@@ -39,12 +60,6 @@ window.__ModuleLoader__.load({
       P3: { label: "P3", tone: "var(--dsw-alias-label-tertiary)" },
     };
     const PRIORITY_ORDER = ["P0", "P1", "P2", "P3"];
-
-    const SEVERITY_META = {
-      high: { label: "高", tone: "var(--dsw-alias-state-error-primary)" },
-      medium: { label: "中", tone: "var(--dsw-alias-state-warn-primary)" },
-      low: { label: "低", tone: "var(--dsw-alias-label-tertiary)" },
-    };
 
     const KIND_META = {
       user: { label: "用户", icon: "user" },
@@ -90,6 +105,18 @@ window.__ModuleLoader__.load({
       });
     }
 
+    /** 下载 /export 的 JSON（设置弹窗与页头菜单共用；失败由调用方 toast）。 */
+    async function downloadExport() {
+      const payload = await apiRequest("/export");
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `super-kanban-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
     function relTime(ms) {
       if (!ms) return "—";
       const delta = Date.now() - Number(ms);
@@ -119,6 +146,13 @@ window.__ModuleLoader__.load({
       const value = String(text || "");
       if (value.length <= max) return value;
       return `${value.slice(0, max)}…`;
+    }
+
+    /** Host v2：无法在时间线上定位引用时 seq 为 null（永不为 0）。0/null 一律视为「无引用序号」。 */
+    function seqOf(value) {
+      if (value === null || value === undefined) return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
     }
 
     function pct(value) {
@@ -158,10 +192,10 @@ window.__ModuleLoader__.load({
         .slice(0, 6)
         .map((item, index) => ({
           id: item.id || `kf_${index}`,
-          text: clip(item.text.trim(), 80),
+          text: clip(item.text.trim(), TEXT_LIMITS.keyFactText),
           kind: FACT_KINDS[item.kind] ? item.kind : "status",
           sessionId: item.sessionId || "",
-          seq: Number(item.seq) || 0,
+          seq: seqOf(item.seq),
         }));
     }
 
@@ -174,10 +208,10 @@ window.__ModuleLoader__.load({
           .slice(0, 12)
           .map((item, index) => ({
             id: item.id || `st_${index}`,
-            text: clip(item.text.trim(), 60),
+            text: clip(item.text.trim(), TEXT_LIMITS.subtaskText),
             done: item.done === true,
             source: ["ai", "todo", "manual"].includes(item.source) ? item.source : "manual",
-            seq: Number(item.seq) || 0,
+            seq: seqOf(item.seq),
           }));
       }
       return (Array.isArray(task.milestones) ? task.milestones : [])
@@ -185,10 +219,10 @@ window.__ModuleLoader__.load({
         .slice(0, 12)
         .map((item, index) => ({
           id: item.id || `st_${index}`,
-          text: clip(item.text.trim(), 60),
+          text: clip(item.text.trim(), TEXT_LIMITS.milestoneText),
           done: item.done === true,
           source: "ai",
-          seq: Number(item.seq) || 0,
+          seq: seqOf(item.seq),
         }));
     }
 
@@ -202,7 +236,7 @@ window.__ModuleLoader__.load({
           path: String(item.path || ""),
           absPath: String(item.absPath || ""),
           sessionId: String(item.sessionId || ""),
-          seq: Number(item.seq) || 0,
+          seq: seqOf(item.seq),
           time: Number(item.time) || 0,
         }));
     }
@@ -218,6 +252,20 @@ window.__ModuleLoader__.load({
       const text = String(task.goal || "").trim();
       if (!text) return null;
       return { text, status: task.status === "done" ? "done" : "active", source: "task" };
+    }
+
+    /** task.ai 的防御性归一化：引擎、模型、置信度（0-100）、研判时间与理由。 */
+    function aiInfoOf(task) {
+      const raw = task && task.ai && typeof task.ai === "object" ? task.ai : null;
+      if (!raw) return null;
+      const analyzedAt = raw.analyzedAt ? Date.parse(raw.analyzedAt) : NaN;
+      return {
+        engine: raw.engine === "llm" ? "llm" : "rules",
+        model: String(raw.model || "").trim(),
+        confidence: Number.isFinite(Number(raw.confidence)) ? Math.round(Math.max(0, Math.min(1, Number(raw.confidence))) * 100) : null,
+        analyzedAt: Number.isFinite(analyzedAt) ? analyzedAt : null,
+        reason: String(raw.reason || "").trim(),
+      };
     }
 
     function sessionContextOf(task) {
@@ -268,10 +316,6 @@ window.__ModuleLoader__.load({
 
     function statusOf(task) {
       return STATUS_META[task.status] ? task.status : "backlog";
-    }
-
-    function issueCount(task) {
-      return Array.isArray(task.issues) ? task.issues.length : 0;
     }
 
     function compareTasks(a, b) {
@@ -355,7 +399,6 @@ window.__ModuleLoader__.load({
 
     const ICONS = {
       chat: (p) => h(Svg, p, h("path", { d: "M20 5H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h5l4 3.5V17h7a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z" })),
-      folder: (p) => h(Svg, p, h("path", { d: "M3.5 7A1.5 1.5 0 0 1 5 5.5h3.8l2 2H19a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17z" })),
       board: (p) =>
         h(Svg, p, h("rect", { x: 3, y: 4, width: 5, height: 16, rx: 1.5 }), h("rect", { x: 9.5, y: 4, width: 5, height: 10, rx: 1.5 }), h("rect", { x: 16, y: 4, width: 5, height: 13, rx: 1.5 })),
       filter: (p) => h(Svg, p, h("path", { d: "M4 5.5h16l-6.2 7.2v5.6l-3.6 1.8v-7.4z" })),
@@ -363,19 +406,16 @@ window.__ModuleLoader__.load({
       back: (p) => h(Svg, p, h("path", { d: "m15 18-6-6 6-6" })),
       stop: (p) => h(Svg, p, h("rect", { x: 6.5, y: 6.5, width: 11, height: 11, rx: 2 })),
       chevronDown: (p) => h(Svg, p, h("path", { d: "m6 9 6 6 6-6" })),
-      chevronUp: (p) => h(Svg, p, h("path", { d: "m6 15 6-6 6 6" })),
       copy: (p) => h(Svg, p, h("rect", { x: 9, y: 9, width: 11, height: 11, rx: 2 }), h("path", { d: "M5.5 14.5H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h8.5a1 1 0 0 1 1 1v.5" })),
       play: (p) => h(Svg, p, h("path", { d: "M7 5.2 18 12 7 18.8z" })),
       target: (p) => h(Svg, p, h("circle", { cx: 12, cy: 12, r: 8.5 }), h("circle", { cx: 12, cy: 12, r: 4.4 }), h("circle", { cx: 12, cy: 12, r: 1.1 })),
-      box: (p) => h(Svg, p, h("path", { d: "M12 3.2 20 7.6v8.8L12 20.8 4 16.4V7.6z" }), h("path", { d: "m4.2 7.7 7.8 4.4 7.8-4.4" }), h("path", { d: "M12 12.1v8.5" })),
-      list: (p) => h(Svg, p, h("path", { d: "M8.5 6h11.5M8.5 12h11.5M8.5 18h11.5" }), h("path", { d: "M4 6h.01M4 12h.01M4 18h.01" })),
       layout: (p) => h(Svg, p, h("rect", { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2 }), h("path", { d: "M9.5 4.5v15" })),
       panelRight: (p) => h(Svg, p, h("rect", { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2 }), h("path", { d: "M14.5 4.5v15" }), h("path", { d: "M14.5 8.5h6" })),
-      maximize: (p) => h(Svg, p, h("path", { d: "M8.5 3.5H5A1.5 1.5 0 0 0 3.5 5v3.5" }), h("path", { d: "M15.5 3.5H19A1.5 1.5 0 0 1 20.5 5v3.5" }), h("path", { d: "M8.5 20.5H5A1.5 1.5 0 0 1 3.5 19v-3.5" }), h("path", { d: "M15.5 20.5H19a1.5 1.5 0 0 0 1.5-1.5v-3.5" })),
       refresh: (p) => h(Svg, p, h("path", { d: "M20 11a8 8 0 1 0-2.34 5.66" }), h("path", { d: "M20 4v7h-7" })),
       plus: (p) => h(Svg, p, h("path", { d: "M12 5v14M5 12h14" })),
       settings: (p) => h(Svg, p, h("circle", { cx: 12, cy: 12, r: 3.2 }), h("path", { d: "M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" })),
       close: (p) => h(Svg, p, h("path", { d: "M18 6 6 18M6 6l12 12" })),
+      edit: (p) => h(Svg, p, h("path", { d: "M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17z" }), h("path", { d: "m13.5 6.5 4 4" })),
       search: (p) => h(Svg, p, h("circle", { cx: 11, cy: 11, r: 7 }), h("path", { d: "m20 20-3.5-3.5" })),
       user: (p) => h(Svg, p, h("circle", { cx: 12, cy: 8, r: 3.6 }), h("path", { d: "M4.5 20a7.5 7.5 0 0 1 15 0" })),
       bot: (p) => h(Svg, p, h("rect", { x: 4, y: 7, width: 16, height: 12, rx: 3 }), h("path", { d: "M12 3v4M8 13h.01M16 13h.01M9 17h6" })),
@@ -384,15 +424,12 @@ window.__ModuleLoader__.load({
       file: (p) => h(Svg, p, h("path", { d: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" }), h("path", { d: "M14 3v6h6" })),
       send: (p) => h(Svg, p, h("path", { d: "m22 2-7 20-4-9-9-4z" }), h("path", { d: "M22 2 11 13" })),
       alert: (p) => h(Svg, p, h("path", { d: "M12 9v4M12 17h.01" }), h("path", { d: "M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" })),
-      link: (p) => h(Svg, p, h("path", { d: "M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1L10.9 5" }), h("path", { d: "M14 11a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1" })),
       lock: (p) => h(Svg, p, h("rect", { x: 4.5, y: 10, width: 15, height: 10, rx: 2 }), h("path", { d: "M8 10V7a4 4 0 0 1 8 0v3" })),
       unlock: (p) => h(Svg, p, h("rect", { x: 4.5, y: 10, width: 15, height: 10, rx: 2 }), h("path", { d: "M8 10V7a4 4 0 0 1 7.5-2" })),
       archive: (p) => h(Svg, p, h("rect", { x: 3, y: 4, width: 18, height: 4, rx: 1 }), h("path", { d: "M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4" })),
       trash: (p) => h(Svg, p, h("path", { d: "M4 7h16M10 11v6M14 11v6M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M9 7V4h6v3" })),
       spark: (p) => h(Svg, p, h("path", { d: "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" })),
       chevron: (p) => h(Svg, p, h("path", { d: "m9 18 6-6-6-6" })),
-      clock: (p) => h(Svg, p, h("circle", { cx: 12, cy: 12, r: 9 }), h("path", { d: "M12 7v5l3 2" })),
-      layers: (p) => h(Svg, p, h("path", { d: "m12 3 9 5-9 5-9-5z" }), h("path", { d: "m3 13 9 5 9-5" })),
       arrow: (p) => h(Svg, p, h("path", { d: "M5 12h14M13 6l6 6-6 6" })),
     };
 
@@ -434,26 +471,7 @@ window.__ModuleLoader__.load({
 .sk-page ::-webkit-scrollbar-thumb:hover{background:var(--dsh-scrollbar-thumb-hover,var(--dsw-alias-scrollbar-hover-l1,#d4d4d4))}
 .sk-page ::-webkit-scrollbar-track{background:transparent}
 .sk-page :focus-visible{outline:2px solid color-mix(in srgb,var(--sk-accent) 55%,transparent);outline-offset:2px}
-.sk-page::before{content:"";position:absolute;left:0;right:0;top:0;height:220px;pointer-events:none;
-  background:radial-gradient(1000px 220px at 14% -150px,color-mix(in srgb,var(--sk-accent) 7%,transparent),transparent 72%)}
-.sk-icon{display:block;flex:none}
-/* ---------- top bar ---------- */
-.sk-top{display:flex;align-items:center;justify-content:space-between;gap:18px;flex:none;position:relative;min-height:42px}
-.sk-brand{display:flex;align-items:center;gap:12px;min-width:0}
-.sk-logo{width:38px;height:38px;flex:none;border-radius:11px;display:grid;place-items:center;overflow:hidden;
-  background:var(--sk-primary);color:var(--sk-on-primary);
-  box-shadow:0 1px 2px rgba(0,0,0,.14),inset 0 1px 0 rgba(255,255,255,.14)}
-.sk-title-wrap{min-width:0;display:flex;flex-direction:column;gap:2px}
-.sk-h1{margin:0;font-size:19px;font-weight:650;letter-spacing:-.015em;line-height:1.2;display:flex;align-items:center;gap:9px;white-space:nowrap}
-.sk-h1 em{font-style:normal;font-size:9.5px;font-weight:600;letter-spacing:.07em;color:var(--sk-ink-3);
-  background:var(--sk-surface-2);border:1px solid var(--sk-line-soft);border-radius:5px;padding:2px 6px;text-transform:none}
-.sk-sub{margin:0;font-size:11.5px;color:var(--sk-ink-3);display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.sk-sub .dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--sk-green);box-shadow:0 0 0 3px color-mix(in srgb,var(--sk-green) 14%,transparent)}
-.sk-sub .dot.busy{background:var(--sk-blue);box-shadow:0 0 0 3px color-mix(in srgb,var(--sk-blue) 16%,transparent);animation:skPulse 1.4s ease-in-out infinite}
-.sk-sub .dot.warn{background:var(--sk-amber);box-shadow:0 0 0 3px color-mix(in srgb,var(--sk-amber) 16%,transparent)}
-.sk-sub .sep{opacity:.38}
 @keyframes skPulse{0%,100%{opacity:1}50%{opacity:.4}}
-.sk-actions{display:flex;align-items:center;gap:8px;flex:none}
 /* ---------- buttons ---------- */
 .sk-btn{cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;
   border:1px solid var(--sk-line);background:var(--sk-surface);color:var(--sk-ink);border-radius:9px;padding:0 12px;
@@ -468,40 +486,6 @@ window.__ModuleLoader__.load({
 .sk-btn.danger{color:var(--sk-red);border-color:color-mix(in srgb,var(--sk-red) 28%,transparent)}
 .sk-btn.danger:hover{background:color-mix(in srgb,var(--sk-red) 9%,transparent)}
 .sk-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
-/* ---------- scan progress pill ---------- */
-.sk-scanbox{display:flex;align-items:center;gap:9px;height:32px;border:1px solid color-mix(in srgb,var(--sk-blue) 26%,var(--sk-line));
-  background:color-mix(in srgb,var(--sk-blue) 6%,var(--sk-surface));border-radius:9px;padding:0 10px;min-width:240px;max-width:340px}
-.sk-scanbox .bar{flex:1;height:4px;border-radius:99px;background:color-mix(in srgb,var(--sk-blue) 16%,var(--sk-surface-3));overflow:hidden;min-width:70px}
-.sk-scanbox .bar i{display:block;height:100%;border-radius:99px;background:var(--sk-blue);transition:width .4s var(--sk-ease)}
-.sk-scanbox .txt{font-size:10.5px;color:var(--sk-ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
-/* ---------- KPI deck ---------- */
-.sk-kpis{flex:none;display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) minmax(196px,1.06fr);
-  border:1px solid var(--sk-line);border-radius:14px;background:var(--sk-surface);overflow:hidden;position:relative;
-  box-shadow:0 1px 2px rgba(0,0,0,.02)}
-.sk-kpi{position:relative;display:flex;flex-direction:column;gap:3px;padding:13px 18px 12px;min-height:86px;min-width:0;
-  border-left:1px solid var(--sk-line-soft)}
-.sk-kpi:first-child{border-left:none}
-.sk-kpi .glow{display:none}
-.sk-kpi-label{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--sk-ink-3);letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sk-kpi-label svg{color:var(--tone,var(--sk-ink-4));opacity:.85}
-.sk-kpi-row{display:flex;align-items:baseline;gap:5px;margin-top:2px}
-.sk-kpi-value{font-size:26px;font-weight:650;letter-spacing:-.035em;line-height:1.05;font-variant-numeric:tabular-nums;
-  color:color-mix(in srgb,var(--tone,var(--sk-ink)) 82%,var(--sk-ink))}
-.sk-kpi-value small{font-size:11px;font-weight:500;letter-spacing:0;color:var(--sk-ink-3);margin-left:1px}
-.sk-kpi-foot{margin-top:auto;font-size:10.5px;color:var(--sk-ink-3);display:flex;align-items:center;gap:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sk-kpi.spark{border-left:1px solid var(--sk-line-soft);padding:11px 16px 9px;gap:6px}
-.sk-spark{display:flex;align-items:flex-end;gap:3px;height:36px;margin-top:auto}
-.sk-spark i{flex:1;min-width:3px;border-radius:3px 3px 1.5px 1.5px;background:color-mix(in srgb,var(--sk-accent) 24%,var(--sk-surface-3));
-  transition:height .3s var(--sk-ease),background .15s}
-.sk-spark i.hot{background:color-mix(in srgb,var(--sk-accent) 58%,var(--sk-surface-3))}
-.sk-spark i:hover{background:var(--sk-accent)}
-/* ---------- filter toolbar ---------- */
-.sk-toolbar{flex:none;display:flex;align-items:center;gap:10px;min-width:0;position:relative}
-.sk-toolbar-main{flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
-  -ms-overflow-style:none;padding:1px 1px 2px;mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 14px),transparent)}
-.sk-toolbar-main::-webkit-scrollbar{display:none}
-.sk-toolbar-right{flex:none;display:flex;align-items:center;gap:8px}
-.sk-ws-chips{display:flex;align-items:center;gap:6px;flex:none}
 .sk-ws-select{display:none;max-width:190px}
 
 .sk-chip{cursor:pointer;display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border:1px solid var(--sk-line);
@@ -511,34 +495,20 @@ window.__ModuleLoader__.load({
 .sk-chip.on{background:var(--sk-ink);border-color:var(--sk-ink);color:var(--sk-on-primary);font-weight:520}
 .sk-chip .n{opacity:.58;font-variant-numeric:tabular-nums;font-size:10.5px}
 .sk-chip.on .n{opacity:.75}
-.sk-chip-dot{width:6px;height:6px;border-radius:50%;flex:none}
 .sk-select{appearance:none;cursor:pointer;height:28px;border:1px solid var(--sk-line);background:var(--sk-surface);
   color:var(--sk-ink-2);border-radius:8px;padding:0 22px 0 9px;font-size:11.5px;font-family:inherit;line-height:1;white-space:nowrap;
   background-image:linear-gradient(45deg,transparent 50%,var(--sk-ink-4) 50%),linear-gradient(135deg,var(--sk-ink-4) 50%,transparent 50%);
   background-position:calc(100% - 11px) 52%,calc(100% - 7px) 52%;background-size:4px 4px,4px 4px;background-repeat:no-repeat}
 .sk-select:hover{background-color:var(--sk-hover);border-color:var(--sk-line-strong);color:var(--sk-ink)}
-.sk-searchbox{display:flex;align-items:center;gap:6px;height:28px;border:1px solid var(--sk-line);background:var(--sk-surface);
-  border-radius:8px;padding:0 9px;width:190px;flex:none;transition:border-color .15s,box-shadow .15s,width .2s var(--sk-ease)}
-.sk-searchbox:focus-within{border-color:color-mix(in srgb,var(--sk-accent) 50%,var(--sk-line));box-shadow:0 0 0 3px color-mix(in srgb,var(--sk-accent) 10%,transparent)}
-.sk-searchbox svg{color:var(--sk-ink-4);flex:none}
-.sk-searchbox input{border:none;outline:none;background:transparent;color:var(--sk-ink);font:inherit;font-size:11.5px;width:100%;min-width:0}
-.sk-searchbox input::placeholder{color:var(--sk-ink-4)}
 .sk-count{font-size:11px;color:var(--sk-ink-4);white-space:nowrap;font-variant-numeric:tabular-nums;flex:none}
 .sk-count b{color:var(--sk-ink-3);font-weight:600}
-/* ---------- board ---------- */
-.sk-board{flex:1;min-height:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;position:relative}
-.sk-board > .sk-empty,.sk-board > .sk-error-panel{grid-column:1/-1}
 .sk-col{min-width:0;display:flex;flex-direction:column;border:1px solid var(--sk-line-soft);border-radius:14px;
   background:var(--sk-col-bg);overflow:hidden;position:relative;transition:border-color .18s,background .18s}
-.sk-board > .sk-col:nth-child(2){--tone:var(--sk-blue)}
-.sk-board > .sk-col:nth-child(3){--tone:var(--sk-amber)}
-.sk-board > .sk-col:nth-child(4){--tone:var(--sk-green)}
 .sk-col::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;pointer-events:none;
   background:linear-gradient(90deg,color-mix(in srgb,var(--tone,var(--sk-ink-3)) 55%,transparent),transparent 62%);opacity:.7}
 .sk-col.dragover{border-color:color-mix(in srgb,var(--sk-accent) 50%,var(--sk-line));
   background:color-mix(in srgb,var(--sk-accent) 6%,var(--sk-col-bg));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--sk-accent) 22%,transparent)}
 .sk-col-head{display:flex;align-items:center;gap:7px;padding:12px 10px 8px 14px;flex:none}
-.sk-col-dot{width:7px;height:7px;border-radius:50%;flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--tone) 14%,transparent)}
 .sk-col-title{font-size:12px;font-weight:620;letter-spacing:.01em;color:var(--sk-ink)}
 .sk-col-count{min-width:20px;height:18px;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;border-radius:6px;
   background:var(--sk-surface-2);border:1px solid var(--sk-line-soft);color:var(--sk-ink-3);font-size:10px;font-weight:600;font-variant-numeric:tabular-nums}
@@ -556,35 +526,7 @@ window.__ModuleLoader__.load({
 .sk-card:active{cursor:grabbing}
 .sk-card.dragging{opacity:.42;transform:scale(.99);box-shadow:none}
 .sk-card:focus-visible{box-shadow:0 0 0 2px color-mix(in srgb,var(--sk-accent) 45%,transparent)}
-.sk-card-top{display:flex;align-items:center;gap:5px;min-height:16px;min-width:0}
-.sk-badge{display:inline-flex;align-items:center;gap:3px;font-size:9.5px;font-weight:650;line-height:1;padding:2.5px 5.5px;
-  border-radius:5px;letter-spacing:.02em;flex:none}
-.sk-badge.pri{color:var(--tone);background:color-mix(in srgb,var(--tone) 10%,transparent)}
-.sk-badge.ai{color:var(--sk-accent);background:color-mix(in srgb,var(--sk-accent) 10%,transparent)}
-.sk-badge.rules{color:var(--sk-ink-3);background:var(--sk-surface-2)}
-.sk-badge.issue{color:var(--sk-red);background:color-mix(in srgb,var(--sk-red) 10%,transparent)}
-.sk-badge.archived{color:var(--sk-ink-3);background:var(--sk-surface-2)}
 .sk-card-ws{font-size:9.5px;color:var(--sk-ink-4);display:inline-flex;align-items:center;gap:3px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sk-card-title{font-size:12.5px;font-weight:620;line-height:1.4;letter-spacing:-.005em;margin:0;color:var(--sk-ink);
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
-.sk-card-goal{font-size:10.5px;line-height:1.5;color:var(--sk-ink-3);margin:0;display:-webkit-box;-webkit-line-clamp:2;
-  -webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
-.sk-card-prog{display:flex;align-items:center;gap:8px;margin-top:2px}
-.sk-track{flex:1;height:3px;border-radius:99px;background:var(--sk-surface-3);overflow:hidden}
-.sk-track i{display:block;height:100%;border-radius:99px;transition:width .45s var(--sk-ease);background:var(--tone)}
-.sk-card-pct{font-size:9.5px;color:var(--sk-ink-3);font-variant-numeric:tabular-nums;min-width:25px;text-align:right;font-weight:550}
-.sk-card-foot{display:flex;align-items:center;gap:6px;font-size:9.5px;color:var(--sk-ink-4);min-width:0;margin-top:1px}
-.sk-card-foot .src{display:inline-flex;align-items:center;gap:3px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sk-card-foot .grow{flex:1}
-.sk-tagrow{display:flex;gap:4px;flex-wrap:wrap}
-.sk-tag{font-size:9px;line-height:1;padding:2.5px 5px;border-radius:4px;background:var(--sk-surface-2);color:var(--sk-ink-3)}
-/* done 列：整体更安静 */
-.sk-board > .sk-col:nth-child(4) .sk-card{background:color-mix(in srgb,var(--sk-surface) 84%,var(--sk-col-bg));border-color:var(--sk-line-soft);box-shadow:none}
-.sk-board > .sk-col:nth-child(4) .sk-card:hover{background:var(--sk-surface);border-color:var(--sk-line);transform:none;box-shadow:var(--sk-shadow-lift)}
-.sk-board > .sk-col:nth-child(4) .sk-card-title{color:var(--sk-ink-2);font-weight:580}
-.sk-board > .sk-col:nth-child(4) .sk-card-prog{--tone:color-mix(in srgb,var(--sk-green) 42%,var(--sk-ink-4))}
-.sk-board > .sk-col:nth-child(4) .sk-badge.pri,
-.sk-board > .sk-col:nth-child(4) .sk-badge.ai{opacity:.72}
 /* ---------- drawer ---------- */
 .sk-mask{position:fixed;inset:0;background:var(--sk-mask);z-index:60;animation:skFade .18s var(--sk-ease);backdrop-filter:blur(1.5px);-webkit-backdrop-filter:blur(1.5px)}
 @keyframes skFade{from{opacity:0}to{opacity:1}}
@@ -594,25 +536,9 @@ window.__ModuleLoader__.load({
 @keyframes skSlideIn{from{transform:translateX(32px);opacity:.55}to{transform:translateX(0);opacity:1}}
 .sk-drawer-head{flex:none;padding:calc(var(--dsh-frame-top-clearance,0px) + 16px) 22px 13px;
   border-bottom:1px solid var(--sk-line-soft);display:flex;flex-direction:column;gap:8px;background:var(--sk-surface)}
-.sk-drawer-crumb{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--sk-ink-4);min-width:0}
-.sk-drawer-crumb span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sk-drawer-crumb .sk-btn{flex:none}
 .sk-drawer-title{display:flex;align-items:flex-start;gap:10px}
 .sk-drawer-title h2{flex:1;margin:0;font-size:17px;font-weight:650;line-height:1.35;letter-spacing:-.01em;word-break:break-word;color:var(--sk-ink)}
 .sk-drawer-body{flex:1;overflow-y:auto;padding:0 22px 26px;display:flex;flex-direction:column;scrollbar-width:thin}
-.sk-drawer-body > .sk-sec{padding-top:16px;border-top:1px solid var(--sk-line-soft);margin-top:0}
-.sk-drawer-body > .sk-sec:first-child{border-top:none;padding-top:16px}
-.sk-sec{display:flex;flex-direction:column;gap:8px}
-.sk-sec-h{display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:620;color:var(--sk-ink-2);letter-spacing:.02em;min-height:18px}
-.sk-sec-h svg{color:var(--sk-ink-4)}
-.sk-sec-h .grow{flex:1}
-.sk-sec-h .hint{font-size:10px;color:var(--sk-ink-4);font-weight:400}
-.sk-ai-box{border:1px solid color-mix(in srgb,var(--sk-accent) 18%,var(--sk-line));border-radius:12px;
-  background:color-mix(in srgb,var(--sk-accent) 4.5%,var(--sk-surface));padding:11px 13px;display:flex;flex-direction:column;gap:7px}
-.sk-ai-top{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--sk-accent);font-weight:620;flex-wrap:wrap}
-.sk-ai-conf{margin-left:auto;font-weight:500;color:var(--sk-ink-3);font-variant-numeric:tabular-nums;white-space:nowrap}
-.sk-ai-conf + .sk-ai-conf{margin-left:0}
-.sk-ai-reason{font-size:11.5px;line-height:1.6;color:var(--sk-ink-2);margin:0;word-break:break-word}
 .sk-field{display:flex;flex-direction:column;gap:5px;min-width:0}
 .sk-field label{font-size:10.5px;color:var(--sk-ink-3);letter-spacing:.01em}
 .sk-input,.sk-textarea{box-sizing:border-box;width:100%;height:34px;border:1px solid var(--sk-line);border-radius:8px;
@@ -629,31 +555,6 @@ window.__ModuleLoader__.load({
 .sk-seg button.on{border-color:color-mix(in srgb,var(--tone) 42%,transparent);background:color-mix(in srgb,var(--tone) 10%,transparent);color:var(--tone);font-weight:620}
 .sk-row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .sk-slider{width:100%;accent-color:var(--sk-accent);height:20px}
-.sk-issue{display:flex;align-items:flex-start;gap:8px;border:1px solid var(--sk-line-soft);border-radius:9px;
-  padding:8px 10px;background:var(--sk-surface-2)}
-.sk-issue .sev{flex:none;font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;color:var(--tone);
-  background:color-mix(in srgb,var(--tone) 12%,transparent);margin-top:1px}
-.sk-issue p{margin:0;font-size:11.5px;line-height:1.55;color:var(--sk-ink-2);word-break:break-word}
-.sk-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
-.sk-list li{display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.5;color:var(--sk-ink-2)}
-.sk-list li .num{flex:none;width:16px;height:16px;border-radius:5px;background:var(--sk-surface-2);color:var(--sk-ink-3);
-  font-size:9px;font-weight:600;display:grid;place-items:center;margin-top:1px;font-variant-numeric:tabular-nums}
-.sk-milestone{display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.5;color:var(--sk-ink-2);
-  width:100%;text-align:left;background:none;border:none;padding:4px 2px;border-radius:6px;cursor:pointer;font-family:inherit}
-.sk-milestone:hover{background:var(--sk-hover)}
-.sk-milestone .box{flex:none;width:15px;height:15px;margin-top:1px;border-radius:4.5px;border:1.5px solid var(--sk-line-strong);
-  display:grid;place-items:center;color:transparent;transition:background .15s,border-color .15s,color .15s}
-.sk-milestone.done .box{background:var(--sk-green);border-color:var(--sk-green);color:#fff}
-.sk-milestone.done span:last-child{color:var(--sk-ink-3);text-decoration:line-through}
-.sk-ev-group{display:flex;flex-direction:column;gap:2px;border:1px solid var(--sk-line-soft);border-radius:10px;
-  padding:8px 10px 6px;background:var(--sk-surface)}
-.sk-ev-src{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--sk-ink-4);min-width:0;
-  position:sticky;top:0;background:var(--sk-surface);padding:2px 0 4px;z-index:1;border-radius:4px}
-.sk-ev-src .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--sk-ink-2);font-weight:560}
-.sk-ev-src button{margin-left:auto;flex:none}
-.sk-ev-src .sk-btn{height:24px;padding:0 8px;font-size:10px;border-radius:7px;color:var(--sk-accent);
-  border-color:color-mix(in srgb,var(--sk-accent) 24%,transparent);background:color-mix(in srgb,var(--sk-accent) 5%,transparent)}
-.sk-ev-src .sk-btn:hover{background:color-mix(in srgb,var(--sk-accent) 11%,transparent);border-color:color-mix(in srgb,var(--sk-accent) 38%,transparent);color:var(--sk-accent)}
 .sk-ev{display:flex;gap:8px;padding:6px 0;border-top:1px dashed var(--sk-line-soft)}
 .sk-ev:first-of-type{border-top:none;padding-top:2px}
 .sk-ev-icon{flex:none;width:20px;height:20px;border-radius:6px;display:grid;place-items:center;background:var(--sk-surface-2);color:var(--sk-ink-3);margin-top:1px}
@@ -702,51 +603,25 @@ window.__ModuleLoader__.load({
 .sk-toast.error{background:color-mix(in srgb,var(--sk-red) 88%,#000)}
 .sk-toast.info{background:var(--dsw-alias-toast-bg,#353638)}
 @keyframes skToastIn{from{transform:translateY(6px);opacity:0}to{transform:none;opacity:1}}
-.sk-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--sk-ink-3);
-  font-size:12px;text-align:center;padding:52px 24px;border:1px dashed var(--sk-line);border-radius:14px;background:var(--sk-col-bg)}
-.sk-empty .big{width:54px;height:54px;border-radius:15px;display:grid;place-items:center;background:var(--sk-surface);
-  border:1px solid var(--sk-line);color:var(--sk-ink-3);box-shadow:0 1px 2px rgba(0,0,0,.03)}
-.sk-empty .actions{display:flex;gap:8px;margin-top:4px}
-.sk-error-panel{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--sk-ink-2);
-  padding:48px 24px;border:1px dashed var(--sk-line);border-radius:14px;background:var(--sk-col-bg);font-size:12px}
-.sk-skeleton{display:flex;flex-direction:column;gap:8px;padding:2px}
-.sk-sk{height:104px;border-radius:12px;background:linear-gradient(100deg,var(--sk-surface-2) 30%,var(--sk-surface-3) 50%,var(--sk-surface-2) 70%);
-  background-size:200% 100%;animation:skShimmer 1.5s infinite linear;border:1px solid var(--sk-line-soft)}
-@keyframes skShimmer{from{background-position:160% 0}to{background-position:-60% 0}}
 .sk-banner{flex:none;display:flex;align-items:center;gap:8px;border:1px solid color-mix(in srgb,var(--sk-red) 26%,transparent);
   background:color-mix(in srgb,var(--sk-red) 6%,transparent);color:var(--sk-red);border-radius:10px;padding:8px 12px;font-size:11.5px}
 .sk-banner .grow{flex:1}
 .sk-inline-actions{display:flex;gap:8px;flex-wrap:wrap}
 /* ---------- responsive ---------- */
 @media (max-width:1500px){
-  .sk-ws-chips{display:none}
   .sk-ws-select{display:block}
 }
 @media (max-width:1360px){
   .sk-page{padding-left:20px;padding-right:20px}
-  .sk-kpis{grid-template-columns:repeat(4,minmax(0,1fr))}
-  .sk-kpi.spark{display:none}
-  .sk-searchbox{width:160px}
-  .sk-h1{font-size:18px}
 }
 @media (max-width:1180px){
   .sk-page{gap:10px;padding-top:calc(var(--dsh-frame-top-clearance,0px) + 18px);padding-bottom:14px}
-  .sk-kpi{padding:11px 14px 10px;min-height:80px}
-  .sk-kpi-value{font-size:24px}
   .sk-card{padding:8px 10px 7px}
-  .sk-card-title{font-size:12px}
-  .sk-card-goal{-webkit-line-clamp:1}
-  .sk-searchbox{width:142px}
-  .sk-h1 em{display:none}
   .sk-drawer{width:min(560px,96vw)}
 }
 @media (max-height:900px){
   .sk-page{gap:9px;padding-top:calc(var(--dsh-frame-top-clearance,0px) + 16px);padding-bottom:12px}
-  .sk-top{min-height:38px}
-  .sk-kpi{min-height:76px;padding:10px 16px 9px}
-  .sk-kpi-value{font-size:23px}
   .sk-col-head{padding-top:10px;padding-bottom:6px}
-  .sk-card-goal{-webkit-line-clamp:1}
   .sk-drawer-head{padding-top:calc(var(--dsh-frame-top-clearance,0px) + 12px)}
 }
 /* ---------- side pane / 双形态 ---------- */
@@ -754,37 +629,8 @@ window.__ModuleLoader__.load({
   background:transparent;color:var(--sk-ink-2);cursor:pointer;transition:background .15s,color .15s,border-color .15s}
 .sk-header-btn:hover{background:var(--sk-hover);color:var(--sk-ink);border-color:var(--sk-line)}
 .sk-page.is-side{position:relative;padding:10px 12px 10px;gap:8px;height:100%}
-.sk-page.is-side::before{height:150px}
-.sk-page.is-side .sk-top-side{min-height:34px;gap:10px}
-.sk-logo-sm{width:28px;height:28px;border-radius:8px}
-.sk-h1-sm{font-size:14px;font-weight:640;letter-spacing:-.01em;gap:6px}
-.sk-sub-sm{font-size:10px;gap:5px}
-.sk-sub-sm .dot{width:5px;height:5px;box-shadow:0 0 0 2px color-mix(in srgb,var(--sk-green) 16%,transparent)}
-.sk-actions-sm{gap:4px}
-.sk-minibtn{display:grid;place-items:center;width:28px;height:28px;padding:0;border:1px solid transparent;border-radius:8px;
-  background:transparent;color:var(--sk-ink-2);cursor:pointer;transition:background .15s,color .15s,border-color .15s,opacity .15s;flex:none}
-.sk-minibtn:hover{background:var(--sk-hover);color:var(--sk-ink);border-color:var(--sk-line)}
-.sk-minibtn.is-primary{background:var(--sk-primary);border-color:transparent;color:var(--sk-on-primary)}
-.sk-minibtn.is-primary:hover{background:var(--sk-primary-hover);color:var(--sk-on-primary)}
-.sk-minibtn:disabled{opacity:.5;cursor:not-allowed}
-.sk-minibtn.is-busy{color:var(--sk-blue);animation:skPulse 1.4s ease-in-out infinite}
-.sk-page.is-side .sk-kpis{grid-template-columns:repeat(4,minmax(0,1fr));border-radius:12px}
-.sk-page.is-side .sk-kpi{padding:8px 12px 7px;min-height:62px;gap:1px}
-.sk-page.is-side .sk-kpi-value{font-size:20px;letter-spacing:-.03em}
-.sk-page.is-side .sk-kpi-value small{font-size:10px}
-.sk-page.is-side .sk-kpi-label{font-size:10px;gap:4px}
-.sk-page.is-side .sk-kpi-foot{font-size:9px;margin-top:2px}
-.sk-page.is-side .sk-kpi.spark{display:none}
-.sk-page.is-side .sk-toolbar{gap:6px}
-.sk-page.is-side .sk-ws-chips{display:none}
 .sk-page.is-side .sk-ws-select{display:block;max-width:200px}
-.sk-page.is-side.sk-tier-wide .sk-ws-chips{display:flex}
-.sk-page.is-side.sk-tier-wide .sk-ws-select{display:none}
-.sk-page.is-side .sk-searchbox{width:168px}
-.sk-page.is-side .sk-board{gap:8px}
-.sk-page.is-side.sk-tier-medium .sk-board{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))}
 .sk-page.is-side.sk-tier-medium .sk-col-head{padding:10px 8px 6px 12px}
-.sk-page.is-side.sk-tier-medium .sk-card-title{font-size:12px}
 .sk-page.is-side .sk-drawer{position:absolute;top:0;right:0;bottom:0;width:100%;border-left:none;border-radius:0;box-shadow:none;z-index:61}
 .sk-page.is-side .sk-mask{position:absolute;z-index:60}
 .sk-page.is-side .sk-modal-mask{position:absolute;z-index:70;padding:10px}
@@ -793,33 +639,13 @@ window.__ModuleLoader__.load({
 .sk-page.is-side .sk-toast{font-size:11px;padding:8px 11px}
 /* narrow：状态分段 + 单列 */
 .sk-page.is-side.sk-tier-narrow{padding:8px 10px 8px;gap:7px}
-.sk-page.is-side.sk-tier-narrow .sk-kpis{grid-template-columns:repeat(2,minmax(0,1fr));border-radius:11px}
-.sk-page.is-side.sk-tier-narrow .sk-kpi{min-height:52px;padding:7px 10px 6px}
-.sk-page.is-side.sk-tier-narrow .sk-kpi-value{font-size:18px}
-.sk-page.is-side.sk-tier-narrow .sk-kpi-label{font-size:9.5px}
-.sk-page.is-side.sk-tier-narrow .sk-kpi-foot{display:none}
-.sk-page.is-side.sk-tier-narrow .sk-kpi:nth-child(3){border-left:none;border-top:1px solid var(--sk-line-soft)}
-.sk-page.is-side.sk-tier-narrow .sk-kpi:nth-child(4){border-top:1px solid var(--sk-line-soft)}
-.sk-page.is-side.sk-tier-narrow .sk-toolbar-main{flex:1}
 .sk-page.is-side.sk-tier-narrow .sk-ws-select{max-width:132px}
-.sk-page.is-side.sk-tier-narrow .sk-toolbar-right{flex:1;min-width:0}
-.sk-page.is-side.sk-tier-narrow .sk-toolbar-right>.sk-select,
-.sk-page.is-side.sk-tier-narrow .sk-toolbar-right>.sk-chip,
-.sk-page.is-side.sk-tier-narrow .sk-count{display:none}
-.sk-page.is-side.sk-tier-narrow .sk-searchbox{width:auto;flex:1;min-width:0}
-.sk-page.is-side.sk-tier-narrow .sk-board{grid-template-columns:minmax(0,1fr)}
-.sk-page.is-side.sk-tier-narrow .sk-board>.sk-col:nth-child(n+2){display:none}
-.sk-page.is-side.sk-tier-narrow .sk-board>.sk-col:first-child .sk-col-head{display:none}
-.sk-page.is-side.sk-tier-narrow .sk-card-goal{display:none}
-.sk-page.is-side.sk-tier-narrow .sk-card-title{font-size:12px}
-.sk-page.is-side.sk-tier-medium .sk-card-goal{-webkit-line-clamp:1}
 .sk-page.is-side.sk-tier-narrow .sk-narrow-add{margin-top:1px}
 .sk-status-tabs{display:flex;gap:3px;flex:none;padding:3px;border-radius:10px;background:var(--sk-surface-2);border:1px solid var(--sk-line-soft)}
 .sk-status-tab{flex:1;min-width:0;height:28px;border:none;border-radius:7px;background:transparent;color:var(--sk-ink-2);font:inherit;font-size:10.5px;
   display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;white-space:nowrap;overflow:hidden;padding:0 4px;transition:background .15s,color .15s}
 .sk-status-tab:hover{color:var(--sk-ink)}
 .sk-status-tab.is-on{background:var(--sk-surface);color:var(--sk-ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.07)}
-.sk-status-tab-dot{width:5px;height:5px;border-radius:50%;background:var(--tone);flex:none}
 .sk-status-tab-count{font-size:9px;font-weight:600;color:var(--sk-ink-4);font-variant-numeric:tabular-nums;background:var(--sk-surface-3);border-radius:4px;padding:0 3px;min-width:14px;text-align:center}
 .sk-status-tab.is-on .sk-status-tab-count{color:var(--sk-ink-3);background:var(--sk-surface-2)}
 .sk-narrow-list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:1px 1px 2px;scrollbar-width:thin}
@@ -834,66 +660,19 @@ window.__ModuleLoader__.load({
 .sk-entry-option:hover{background:var(--sk-hover);color:var(--sk-ink)}
 .sk-entry-option.is-on{border-color:color-mix(in srgb,var(--sk-accent) 45%,transparent);background:color-mix(in srgb,var(--sk-accent) 8%,transparent);color:var(--sk-ink);font-weight:600}
 .sk-entry-option small{display:block;font-size:9.5px;font-weight:400;color:var(--sk-ink-3);margin-top:2px;line-height:1.35}
-/* ======================= v2：更少但更准 ======================= */
-.sk-card-fact{display:flex;align-items:flex-start;gap:5px;min-width:0;font-size:10.5px;line-height:1.45;color:var(--sk-ink-3)}
-.sk-card-fact .sk-icon{color:var(--fact-tone,var(--sk-ink-4));margin-top:1px}
-.sk-card-fact-text{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;min-width:0;flex:1;overflow-wrap:anywhere}
-.sk-card-prog-value{font-size:9.5px;color:var(--sk-ink-3);font-variant-numeric:tabular-nums;min-width:28px;text-align:right;font-weight:550;white-space:nowrap}
-.sk-card-artifacts{display:inline-flex;align-items:center;gap:3px;font-size:9.5px;color:var(--sk-ink-4);flex:none}
-/* KPI v2 */
-.sk-kpis-v2{grid-template-columns:repeat(4,minmax(0,1fr)) minmax(200px,0.92fr)}
-.sk-card-v2{padding:8px 10px 7px;gap:4px}
-.sk-card-v2 .sk-card-title{line-height:1.38}
-.sk-card-v2 .sk-card-fact{font-size:10px}
-.sk-card-v2 .sk-card-prog{margin-top:1px}
-.sk-card-v2 .sk-card-foot .src{font-size:9.5px}
-.sk-kpis-v2 .sk-kpi{min-height:74px;padding:11px 16px 10px}
-.sk-kpis-v2 .sk-kpi-foot{display:none}
-.sk-kpis-v2 .sk-kpi-value{font-size:24px}
-.sk-activity-strip .sk-kpi{display:flex;flex-direction:row;align-items:center;gap:10px;border:none;background:none;padding:0;min-height:0;flex:1}
-.sk-activity-strip .sk-kpi-label{display:none}
-.sk-activity-strip .sk-spark{flex:1;height:30px;margin:0}
-.sk-page.is-side .sk-kpis-v2{grid-template-columns:repeat(4,minmax(0,1fr))}
-.sk-page.is-side.sk-tier-medium .sk-kpis-v2{grid-template-columns:repeat(4,minmax(0,1fr))}
-.sk-page.is-side.sk-tier-narrow .sk-kpis-v2{grid-template-columns:repeat(2,minmax(0,1fr))}
-.sk-page.is-side.sk-tier-narrow .sk-kpi-scan{grid-column:1 / -1;border-left:none;border-top:1px solid var(--sk-line-soft);min-height:44px;padding:8px 11px}
-.sk-page.is-side .sk-kpi-scan{border-left:1px solid var(--sk-line-soft)}
-.sk-page.is-side.sk-tier-narrow .sk-card-fact{display:none}
-.sk-kpi-scan{display:flex;flex-direction:column;gap:5px;min-height:86px;padding:12px 16px 11px;border-left:1px solid var(--sk-line-soft)}
-.sk-kpi-scan-label{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--sk-ink-3)}
-.sk-kpi-scan-state{display:flex;align-items:center;gap:6px;margin-top:auto;font-size:11.5px;color:var(--sk-ink-2);min-width:0}
-.sk-kpi-scan-state b{font-weight:600;color:var(--sk-ink);font-variant-numeric:tabular-nums}
-.sk-kpi-scan-time{font-size:10px;color:var(--sk-ink-4);white-space:nowrap}
-.sk-mini-link{display:inline-flex;align-items:center;gap:4px;border:none;background:transparent;padding:0;font:inherit;font-size:10.5px;color:var(--sk-accent);cursor:pointer;white-space:nowrap;margin-left:auto}
-.sk-mini-link:hover{text-decoration:underline}
-.sk-activity-strip{flex:none;display:flex;align-items:center;gap:12px;border:1px solid var(--sk-line);border-radius:11px;background:var(--sk-surface);padding:8px 14px}
-.sk-activity-strip-label{font-size:10px;color:var(--sk-ink-4);white-space:nowrap;letter-spacing:.03em}
-.sk-activity-strip .sk-spark{flex:1;height:30px}
 /* 工具栏筛选弹层 */
 .sk-filter-wrap{position:relative;display:flex;align-items:center;flex:none}
-.sk-filter-btn{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:8px;border:1px solid var(--sk-line);background:var(--sk-surface);color:var(--sk-ink-2);font:inherit;font-size:11.5px;cursor:pointer;white-space:nowrap}
-.sk-filter-btn:hover{background:var(--sk-hover);color:var(--sk-ink);border-color:var(--sk-line-strong)}
-.sk-filter-btn.is-on{border-color:color-mix(in srgb,var(--sk-accent) 40%,transparent);background:color-mix(in srgb,var(--sk-accent) 7%,transparent);color:var(--sk-accent)}
-.sk-filter-badge{min-width:15px;height:15px;padding:0 4px;border-radius:8px;background:var(--sk-accent);color:#fff;font-size:9px;font-weight:600;display:grid;place-items:center;line-height:1}
 .sk-filter-popover{position:absolute;top:calc(100% + 6px);right:0;z-index:45;width:288px;padding:12px;border-radius:12px;background:var(--sk-surface);border:1px solid var(--sk-line-strong);box-shadow:var(--sk-shadow-lift);display:flex;flex-direction:column;gap:10px;animation:skPop .16s cubic-bezier(.2,.8,.3,1)}
 .sk-filter-row{display:flex;flex-direction:column;gap:5px}
 .sk-filter-label{font-size:10px;color:var(--sk-ink-4);letter-spacing:.04em}
 .sk-filter-chips{display:flex;flex-wrap:wrap;gap:5px}
 .sk-filter-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--sk-line-soft);padding-top:8px}
-/* 抽屉 v2 */
-.sk-edit-summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;border-radius:9px;background:var(--sk-surface-2);border:1px solid var(--sk-line-soft);min-width:0}
-.sk-summary-badge{display:inline-flex;align-items:center;height:19px;padding:0 7px;border-radius:5px;font-size:10px;font-weight:600;color:var(--tone);background:color-mix(in srgb,var(--tone) 11%,transparent);flex:none}
-.sk-summary-text{flex:1;min-width:0;font-size:11px;color:var(--sk-ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sk-summary-prog{flex:none;font-size:10px;color:var(--sk-ink-3);font-variant-numeric:tabular-nums}
-.sk-goal-row{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:9px;background:var(--sk-surface-2);border:1px solid var(--sk-line-soft)}
 .sk-goal-text{flex:1;min-width:0;font-size:11.5px;line-height:1.55;color:var(--sk-ink-2);overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .sk-goal-text.is-open{-webkit-line-clamp:unset;display:block}
-.sk-goal-tag{flex:none;font-size:9px;color:var(--sk-ink-4);padding-top:2px}
 .sk-facts{display:flex;flex-direction:column;gap:6px}
 .sk-fact{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;line-height:1.5;color:var(--sk-ink-2);min-width:0}
 .sk-fact-icon{flex:none;width:18px;height:18px;border-radius:5px;display:grid;place-items:center;background:color-mix(in srgb,var(--fact-tone,var(--sk-ink-3)) 12%,transparent);color:var(--fact-tone,var(--sk-ink-3));margin-top:1px}
 .sk-fact-text{flex:1;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
-.sk-fact-kind{flex:none;font-size:9px;color:var(--sk-ink-4);padding-top:2px;white-space:nowrap}
 .sk-subtasks{display:flex;flex-direction:column;gap:2px}
 .sk-subtask{display:flex;align-items:flex-start;gap:8px;padding:5px 4px;border-radius:6px;width:100%;border:none;background:transparent;font:inherit;font-size:11.5px;line-height:1.45;color:var(--sk-ink-2);text-align:left;cursor:pointer;min-width:0}
 .sk-subtask:hover{background:var(--sk-hover)}
@@ -906,28 +685,12 @@ window.__ModuleLoader__.load({
 .sk-subtask-del:hover{color:var(--sk-red);background:var(--sk-hover)}
 .sk-subtask-add{display:flex;gap:6px;align-items:center;margin-top:3px}
 .sk-subtask-add .sk-input{height:30px;font-size:11.5px}
-.sk-subtask-summary{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--sk-ink-3)}
-.sk-subtask-summary b{color:var(--sk-ink-2)}
-.sk-subtask-summary .sk-progress{flex:1;max-width:150px}
 .sk-duo{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .sk-duo-col{min-width:0;display:flex;flex-direction:column;gap:4px}
-.sk-duo-title{font-size:10.5px;color:var(--sk-ink-4);display:flex;align-items:center;gap:5px;margin-bottom:1px}
 .sk-duo-item{font-size:11.5px;line-height:1.5;color:var(--sk-ink-2);padding-left:9px;position:relative;overflow-wrap:anywhere}
 .sk-duo-item::before{content:"";position:absolute;left:0;top:7px;width:3px;height:3px;border-radius:50%;background:var(--sk-ink-4)}
-.sk-link-panel{display:flex;flex-direction:column;gap:10px;padding:12px 13px;border-radius:12px;border:1px solid color-mix(in srgb,var(--sk-accent) 22%,var(--sk-line));background:color-mix(in srgb,var(--sk-accent) 4%,var(--sk-surface))}
-.sk-link-session{display:flex;flex-direction:column;gap:3px;min-width:0}
-.sk-link-session-top{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:var(--sk-ink);min-width:0}
-.sk-link-session-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .sk-live-dot{width:5px;height:5px;border-radius:50%;background:var(--sk-green);flex:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--sk-green) 16%,transparent)}
 .sk-live-dot.off{background:var(--sk-ink-4);box-shadow:none}
-.sk-link-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:10px;color:var(--sk-ink-3);min-width:0}
-.sk-link-meta .sk-link-goal{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
-.sk-link-actions{display:flex;gap:6px;flex-wrap:wrap}
-.sk-act-btn{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:8px;border:1px solid var(--sk-line);background:var(--sk-surface);color:var(--sk-ink-2);font:inherit;font-size:11px;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s,color .15s}
-.sk-act-btn:hover{background:var(--sk-hover);color:var(--sk-ink);border-color:var(--sk-line-strong)}
-.sk-act-btn.primary{background:var(--sk-primary);border-color:transparent;color:var(--sk-on-primary);font-weight:550}
-.sk-act-btn.primary:hover{background:var(--sk-primary-hover);color:var(--sk-on-primary)}
-.sk-act-btn:disabled{opacity:.45;cursor:not-allowed}
 .sk-artifacts{display:flex;flex-direction:column;gap:4px}
 .sk-artifact{display:flex;align-items:center;gap:8px;width:100%;padding:6px 7px;border-radius:7px;border:1px solid var(--sk-line-soft);background:var(--sk-surface);color:var(--sk-ink-2);font:inherit;font-size:11px;text-align:left;cursor:pointer;min-width:0}
 .sk-artifact:hover{background:var(--sk-hover);border-color:var(--sk-line)}
@@ -950,12 +713,6 @@ window.__ModuleLoader__.load({
 .sk-usage b{color:var(--sk-ink-2)}
 .sk-usage-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
 .sk-usage-warn{color:var(--sk-amber)}
-.sk-drawer-body-v2 > .sk-sec{padding-top:14px}
-.sk-drawer-body-v2 .sk-field{gap:4px}
-.sk-drawer-body-v2 .sk-seg button{height:24px;padding:0 9px}
-.sk-drawer-body-v2 .sk-slider{height:16px}
-.sk-drawer-body-v2 .sk-goal-row{padding:7px 9px}
-.sk-drawer-body-v2 .sk-subtask{padding:4px 4px}
 .sk-page.is-side .sk-duo{grid-template-columns:1fr}
 .sk-page.is-side .sk-continue-textarea{min-height:150px}
 
@@ -965,7 +722,6 @@ window.__ModuleLoader__.load({
 
 /* ======================= v3：DSH-native 单色重做 ======================= */
 .sk-page{padding:calc(var(--dsh-frame-top-clearance,0px) + 28px) 28px 24px;gap:0;background:var(--dsw-alias-bg-base)}
-.sk-page::before{display:none}
 /* header */
 .sk-header-v3{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;flex:none;padding-bottom:18px;min-width:0}
 .sk-header-main{min-width:0;display:flex;flex-direction:column;gap:6px}
@@ -1021,15 +777,12 @@ window.__ModuleLoader__.load({
 .sk-filter-foot .sk-chip.on{background:color-mix(in srgb,var(--sk-ink) 8%,transparent);color:var(--sk-ink);font-weight:500}
 .sk-clear{font-size:12px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);background:none;border:none;padding:0;cursor:pointer}
 .sk-clear:hover{color:var(--sk-ink);text-decoration:underline}
-/* board / columns */
-.sk-board{flex:1;min-height:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px;position:relative;padding-top:12px}
 .sk-col{border:none;background:transparent;border-radius:0;min-width:0;display:flex;flex-direction:column;overflow:visible;transition:none}
 .sk-col::before{display:none}
 .sk-col.dragover{background:transparent}
 .sk-col.dragover .sk-col-head{border-bottom-color:var(--sk-ink)}
 .sk-col.dragover .sk-col-body{outline:1px solid var(--sk-line-strong);outline-offset:4px;border-radius:8px}
 .sk-col-head{display:flex;align-items:center;gap:6px;padding:0 2px 8px;border-bottom:0.5px solid var(--sk-line-soft);margin-bottom:10px;flex:none}
-.sk-col-dot{display:none}
 .sk-col-title{font-size:12px;font-weight:600;color:var(--sk-ink);letter-spacing:normal}
 .sk-col-count{display:inline;min-width:0;height:auto;padding:0;border:none;background:transparent;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);font-size:11px;font-weight:400;font-variant-numeric:tabular-nums}
 .sk-col-head-spacer{flex:1}
@@ -1046,7 +799,6 @@ window.__ModuleLoader__.load({
 .sk-card-v3.is-done{opacity:.62}
 .sk-card-v3.is-done .sk-card-title-v3{color:color-mix(in srgb,var(--sk-ink) 70%,transparent)}
 .sk-card-v3-head{display:flex;align-items:flex-start;gap:6px;min-width:0}
-.sk-card-warn-dot{width:6px;height:6px;border-radius:50%;background:var(--sk-amber);opacity:.7;flex:none;margin-top:6px}
 .sk-card-title-v3{margin:0;font-size:13px;font-weight:600;line-height:1.4;color:var(--sk-ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;flex:1;min-width:0}
 .sk-card-meta-v3{display:flex;align-items:center;gap:8px;min-width:0;font-size:11px;line-height:1.4;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
 .sk-card-meta-v3 .sk-card-ws{font-size:11px;color:inherit;min-width:0;display:inline-flex;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1068,7 +820,6 @@ window.__ModuleLoader__.load({
 .sk-status-tab{flex:1;min-width:0;height:32px;border:none;border-radius:0;background:transparent;color:color-mix(in srgb,var(--sk-ink) 55%,transparent);font:inherit;font-size:12px;display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;white-space:nowrap;overflow:hidden;padding:0 4px;border-bottom:1px solid transparent;margin-bottom:-0.5px;transition:color .15s,border-color .15s}
 .sk-status-tab:hover{color:var(--sk-ink)}
 .sk-status-tab.is-on{color:var(--sk-ink);font-weight:500;border-bottom-color:var(--sk-ink)}
-.sk-status-tab-dot{display:none}
 .sk-status-tab-count{font-size:11px;color:inherit;opacity:.6;background:none;padding:0;min-width:0}
 .sk-narrow-list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:12px 0 8px;scrollbar-width:thin}
 .sk-narrow-empty{margin:auto;padding:24px 12px;color:color-mix(in srgb,var(--sk-ink) 40%,transparent);font-size:12px;text-align:center;border:none}
@@ -1105,7 +856,6 @@ window.__ModuleLoader__.load({
 .sk-facts{display:flex;flex-direction:column;gap:6px}
 .sk-fact{display:flex;gap:8px;align-items:flex-start;font-size:13px;line-height:1.55;color:color-mix(in srgb,var(--sk-ink) 78%,transparent);min-width:0}
 .sk-fact-text{flex:1;min-width:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.sk-facts .sk-expand{align-self:flex-start}
 .sk-subtasks{display:flex;flex-direction:column;gap:0}
 .sk-subtask{display:flex;align-items:flex-start;gap:8px;width:100%;min-height:30px;padding:4px 2px;border:none;border-radius:6px;background:transparent;font:inherit;font-size:13px;line-height:1.45;color:color-mix(in srgb,var(--sk-ink) 78%,transparent);text-align:left;cursor:pointer}
 .sk-subtask:hover{background:color-mix(in srgb,var(--sk-ink) 4%,transparent)}
@@ -1118,12 +868,8 @@ window.__ModuleLoader__.load({
 .sk-subtask-del:hover{color:var(--sk-ink);background:color-mix(in srgb,var(--sk-ink) 6%,transparent)}
 .sk-subtask-add{display:flex;gap:6px;align-items:center;margin-top:2px}
 .sk-subtask-add .sk-input{height:32px;font-size:12px;border-radius:8px}
-.sk-subtask-summary{display:flex;align-items:center;gap:8px;font-size:11px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
-.sk-subtask-summary .sk-progress{flex:1;max-width:160px;height:2px;background:color-mix(in srgb,var(--sk-ink) 10%,transparent)}
-.sk-subtask-summary .sk-progress-fill{background:color-mix(in srgb,var(--sk-ink) 45%,transparent);height:100%}
 .sk-duo{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .sk-duo-col{display:flex;flex-direction:column;gap:2px;min-width:0}
-.sk-duo-title{font-size:11px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);padding-bottom:2px}
 .sk-duo-item{font-size:12px;line-height:1.55;color:color-mix(in srgb,var(--sk-ink) 78%,transparent);padding-left:0;position:static;overflow-wrap:anywhere}
 .sk-duo-item::before{display:none}
 .sk-duo-item.is-issue{color:color-mix(in srgb,var(--sk-ink) 62%,transparent)}
@@ -1220,7 +966,6 @@ window.__ModuleLoader__.load({
 .sk-page.is-side .sk-toasts{position:absolute;left:10px;right:10px;bottom:10px;transform:none;align-items:flex-end;max-width:none;z-index:90}
 /* board wrapper for v3 padding */
 .sk-board-v3{flex:1;min-height:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px;padding-top:14px;position:relative}
-.sk-board-v3 > .sk-empty,.sk-board-v3 > .sk-error-panel{grid-column:1/-1}
 .sk-empty-v3{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:8px;padding:40px 8px;color:color-mix(in srgb,var(--sk-ink) 55%,transparent);font-size:13px;text-align:left}
 .sk-empty-v3 .sk-text{font-size:13px;color:var(--sk-ink);text-decoration:underline;text-underline-offset:2px}
 .sk-loading-v3{flex:1;display:flex;flex-direction:column;gap:10px;padding-top:14px}
@@ -1234,16 +979,10 @@ window.__ModuleLoader__.load({
 @media (max-width:1180px){.sk-page .sk-search-v3{width:150px}.sk-board-v3{gap:14px}}
 @media (max-height:900px){.sk-page{padding-top:calc(var(--dsh-frame-top-clearance,0px) + 20px)}.sk-header-v3{padding-bottom:14px}.sk-board-v3{padding-top:10px}}
 
-
 /* v3 fixes */
 .sk-drawer-head{flex-direction:row;align-items:flex-start}
 .sk-page.is-side .sk-drawer-head{padding-left:12px}
 .sk-drawer-head-text{gap:1px}
-
-
-/* v3.1 micro tune */
-.sk-card-warn-dot{width:6px;height:6px;border-radius:50%;background:var(--sk-amber);opacity:.65;flex:none;margin-top:6px}
-.sk-card-warn-dot.is-error{background:var(--sk-red);opacity:.7}
 .sk-card-v3.is-done{opacity:.6}
 .sk-card-v3.is-done .sk-card-metrics{display:none}
 .sk-card-v3.is-done .sk-card-meta-v3{color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
@@ -1264,7 +1003,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-page.is-side.sk-tier-narrow .sk-status-tabs{margin-top:0}
 .sk-page.is-side.sk-tier-narrow .sk-narrow-list{padding-top:10px}
 .sk-page.is-side .sk-slimbar{padding-bottom:10px}
-
 
 /* ======================= v0.4：克制的强调色 ======================= */
 .sk-page{--sk-brand-accent:var(--dsw-alias-state-business-primary,#4176e6)}
@@ -1293,7 +1031,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-ai-mark.is-rules{color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
 .sk-card-meta-v3 .sk-card-metrics{gap:7px}
 .sk-card-metric{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);font-size:11px}
-.sk-card-metric .sk-icon{opacity:.9}
 .sk-card-metric.is-warn{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .sk-card-metric.is-error{color:var(--sk-red)}
 .sk-card-metric.is-done{color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 75%,transparent)}
@@ -1307,7 +1044,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-card-v3.is-blocked .sk-card-progress-v3 i{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 75%,transparent)}
 .sk-card-v3.is-done .sk-card-progress-v3{display:block}
 .sk-card-v3.is-done .sk-card-progress-v3 i{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 55%,transparent)}
-.sk-col-dot{width:6px;height:6px;border-radius:50%;flex:none;margin-right:2px}
 .sk-col-head .sk-dot{margin-right:2px}
 .sk-summary-status{font-weight:600}
 .sk-summary-status.is-in_progress{color:var(--sk-brand-accent)}
@@ -1324,13 +1060,76 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-link-text:hover{color:var(--sk-brand-accent);text-decoration:underline;text-underline-offset:2px}
 .sk-session-line .sk-session-icon{flex:none;color:color-mix(in srgb,var(--sk-ink) 55%,transparent);margin-top:1px}
 .sk-duo-item{display:flex;align-items:flex-start;gap:5px;font-size:12px;line-height:1.55;color:color-mix(in srgb,var(--sk-ink) 78%,transparent);overflow-wrap:anywhere}
-.sk-duo-item .sk-icon{flex:none;margin-top:2px;color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
 .sk-duo-item.is-warn{color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 85%,var(--sk-ink))}
-.sk-duo-item.is-warn .sk-icon{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .sk-duo-item.is-error{color:var(--sk-red)}
-.sk-duo-item.is-error .sk-icon{color:var(--sk-red)}
 .sk-page.is-side.sk-tier-narrow .sk-card-v3-head .sk-dot{margin-top:5px}
 .sk-page.is-side.sk-tier-narrow .sk-ai-mark{display:none}
+
+/* ======================= 可用性 / 无障碍补充 ======================= */
+/* 仅供读屏的隐藏文本（扫描状态、错误播报等） */
+.sk-sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* 表单分组标题（替代无关联的 label 元素） */
+.sk-field .sk-field-label{font-size:10.5px;color:var(--sk-ink-3);letter-spacing:.01em}
+/* 首屏 / 断连的说明样式 */
+.sk-error-title{display:flex;align-items:center;gap:6px;margin:0;font-size:13px;font-weight:600;color:var(--sk-ink)}
+.sk-error-detail{margin:0;font-size:12px;line-height:1.5;color:var(--sk-ink-3);max-width:440px;overflow-wrap:anywhere;word-break:break-word}
+/* 键盘焦点：卡片用强调色描边，保证在浅色 / 深色下都清晰可见 */
+.sk-card:focus-visible{outline:2px solid color-mix(in srgb,var(--sk-brand-accent) 65%,transparent);outline-offset:2px;box-shadow:none}
+/* 卡片元信息：空间不足时让指标整体换到第二行，工作区名不再被压成「dsh-…」 */
+.sk-card-meta-v3{flex-wrap:wrap;row-gap:3px}
+.sk-card-meta-v3 .sk-card-ws{flex:0 1 auto;max-width:100%}
+.sk-col-body{container-type:inline-size}
+@container (max-width:300px){
+  .sk-card-v3{padding:9px 11px 7px;gap:4px}
+  .sk-card-v3 .sk-card-meta-v3{row-gap:2px}
+  .sk-card-v3 .sk-card-progress-v3{margin-top:1px}
+}
+/* 子任务行：外层行 + 独立勾选按钮 + 独立删除按钮（原先删除按钮嵌在按钮内，键盘不可达） */
+.sk-subtask{display:flex;align-items:flex-start;gap:2px;width:100%;min-height:30px;padding:0;border-radius:6px;background:transparent;font-size:13px;line-height:1.45;color:color-mix(in srgb,var(--sk-ink) 78%,transparent)}
+.sk-subtask:hover{background:color-mix(in srgb,var(--sk-ink) 4%,transparent)}
+.sk-subtask-toggle{display:flex;align-items:flex-start;gap:8px;flex:1;min-width:0;min-height:30px;padding:4px 2px;border:none;border-radius:6px;background:transparent;font:inherit;font-size:inherit;line-height:inherit;color:inherit;text-align:left;cursor:pointer}
+.sk-subtask-toggle:focus-visible{outline:2px solid color-mix(in srgb,var(--sk-brand-accent) 65%,transparent);outline-offset:0}
+.sk-subtask-del{margin-top:4px;margin-right:2px}
+.sk-subtask:hover .sk-subtask-del,.sk-subtask:focus-within .sk-subtask-del{opacity:1}
+/* 列头「+」在键盘聚焦 / 无 hover 设备上也要可见 */
+.sk-col-add:focus-visible{opacity:1}
+@media (hover:none){.sk-col-add{opacity:1}}
+
+/* ======================= wave 2：编辑安全 / AI 可读性 / 侧栏补全 ======================= */
+/* 归档任务标记（仅「含归档」筛选下出现） */
+.sk-archived-mark{font-size:10px;line-height:1;color:var(--sk-ink-3);background:var(--sk-surface-2);border-radius:4px;padding:3px 5px;flex:none;margin-top:4px;white-space:nowrap}
+/* 后台覆盖提醒 / 重新研判错误提示：安静的琥珀文字，不做大色块 */
+.sk-inline-note{font-size:11px;line-height:1.5;color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 80%,var(--sk-ink));background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 6%,transparent);border-radius:6px;padding:6px 8px}
+/* AI 研判：普通段落，不用彩色盒子 */
+.sk-ai-review{display:flex;flex-direction:column;gap:4px;margin-top:8px;min-width:0}
+.sk-ai-review-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:11px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);min-width:0}
+.sk-ai-review-head svg{flex:none;color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
+.sk-ai-review-title{font-weight:500;color:color-mix(in srgb,var(--sk-ink) 62%,transparent)}
+.sk-ai-review-meta{font-variant-numeric:tabular-nums;white-space:nowrap}
+.sk-ai-review-stale{color:var(--dsw-alias-state-warn-primary,#f59e0b);white-space:nowrap}
+.sk-ai-review-reason{margin:0;font-size:12px;line-height:1.55;color:color-mix(in srgb,var(--sk-ink) 62%,transparent);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.sk-ai-review-reason.is-open{-webkit-line-clamp:unset;display:block}
+.sk-ai-review-reason.is-empty{color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
+/* 扫描结果行 */
+.sk-scan-error{color:var(--dsw-alias-state-warn-primary,#f59e0b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}
+.sk-scan-outcome{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+/* 完成卡：去掉整条彩色进度线，只保留状态点 */
+.sk-card-v3.is-done .sk-card-progress-v3{display:none}
+/* 右侧栏任何宽度都保留工作区下拉（原 side-wide 规则会隐藏它） */
+.sk-page.is-side.sk-tier-wide .sk-ws-select{display:block}
+/* 窄侧栏：卡片保留「短工作区 · 时间 · 优先级」的紧凑巡检信息 */
+.sk-page.is-side.sk-tier-narrow .sk-card-meta-v3{display:flex;flex-wrap:nowrap;gap:5px;font-size:10.5px;line-height:1.35;margin-top:1px}
+.sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-card-ws{max-width:96px;flex:0 1 auto}
+.sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-card-ws-sep{flex:none}
+.sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-card-time{flex:none}
+.sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-card-metrics{margin-left:auto;gap:4px}
+.sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-card-metric{display:none}
+.sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-prio-text{font-size:10.5px}
+.sk-page.is-side.sk-tier-narrow .sk-archived-mark{display:none}
+/* 窄侧栏：统计独占一行（避免裁掉状态与扫描结论），操作图标第二行右对齐 */
+.sk-page.is-side.sk-tier-narrow .sk-header-v3{flex-wrap:wrap;row-gap:6px}
+.sk-page.is-side.sk-tier-narrow .sk-stats-v3{flex:0 0 100%;order:1;white-space:normal;flex-wrap:wrap;row-gap:2px;max-height:3.1em}
+.sk-page.is-side.sk-tier-narrow .sk-header-actions{order:2;margin-left:auto}
 
 `;
 
@@ -1349,24 +1148,160 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 
     /* =============================== hooks ================================ */
 
+    /* -------------------- 对话框基础：焦点 / Esc / 滚动锁定 -------------------- */
+
+    // 所有打开中的对话框按挂载顺序入栈；只有栈顶对话框响应 Esc 和焦点逃逸，
+    // 保证「抽屉 → 继续此任务」这类嵌套浮层的层级正确。
+    const dialogStack = [];
+
+    function hasOpenDialog() {
+      return dialogStack.length > 0;
+    }
+
+    const FOCUSABLE_SELECTOR = [
+      "a[href]",
+      "button:not([disabled])",
+      "input:not([disabled]):not([type='hidden'])",
+      "select:not([disabled])",
+      "textarea:not([disabled])",
+      "[tabindex]:not([tabindex='-1'])",
+    ].join(",");
+
+    function focusableIn(node) {
+      if (!node) return [];
+      return [...node.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
+        (element) => element.getClientRects().length > 0,
+      );
+    }
+
+    /** 对话框：初始焦点 + Tab 焦点陷阱 + 关闭后焦点归还；Esc 交给最上层对话框。 */
+    function useDialogFocus(rootRef, onEscape) {
+      const escapeRef = React.useRef(onEscape);
+      React.useEffect(() => {
+        escapeRef.current = onEscape;
+      });
+      React.useEffect(() => {
+        const token = Symbol("dialog");
+        const node = rootRef.current;
+        const previous = document.activeElement;
+        dialogStack.push(token);
+        const initial = focusableIn(node)[0];
+        if (initial) {
+          initial.focus({ preventScroll: true });
+        } else if (node) {
+          node.setAttribute("tabindex", "-1");
+          node.focus({ preventScroll: true });
+        }
+        const onKeyDown = (event) => {
+          if (dialogStack[dialogStack.length - 1] !== token) return;
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (escapeRef.current) escapeRef.current();
+            return;
+          }
+          if (event.key !== "Tab") return;
+          const items = focusableIn(node);
+          if (!items.length) {
+            event.preventDefault();
+            return;
+          }
+          const first = items[0];
+          const last = items[items.length - 1];
+          const active = document.activeElement;
+          if (event.shiftKey && (active === first || !node.contains(active))) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        };
+        // 焦点若被脚本/鼠标拖出对话框，拉回第一个可聚焦元素。
+        const onFocusIn = (event) => {
+          if (dialogStack[dialogStack.length - 1] !== token) return;
+          if (node && !node.contains(event.target)) {
+            const items = focusableIn(node);
+            if (items[0]) items[0].focus({ preventScroll: true });
+          }
+        };
+        document.addEventListener("keydown", onKeyDown, true);
+        document.addEventListener("focusin", onFocusIn, true);
+        return () => {
+          document.removeEventListener("keydown", onKeyDown, true);
+          document.removeEventListener("focusin", onFocusIn, true);
+          const index = dialogStack.indexOf(token);
+          if (index >= 0) dialogStack.splice(index, 1);
+          if (previous && previous.isConnected && typeof previous.focus === "function") {
+            previous.focus({ preventScroll: true });
+          }
+        };
+      }, [rootRef]);
+    }
+
+    // 抽屉 / 弹窗打开时锁住页面滚动（引用计数，嵌套浮层不会提前解锁）。
+    let scrollLockCount = 0;
+    let scrollLockPrevious = null;
+
+    function useBodyScrollLock() {
+      React.useEffect(() => {
+        if (!document.body) return undefined;
+        if (scrollLockCount === 0) {
+          scrollLockPrevious = document.body.style.overflow;
+          document.body.style.overflow = "hidden";
+        }
+        scrollLockCount += 1;
+        return () => {
+          scrollLockCount = Math.max(0, scrollLockCount - 1);
+          if (scrollLockCount === 0 && document.body) {
+            document.body.style.overflow = scrollLockPrevious || "";
+          }
+        };
+      }, []);
+    }
+
     function useToasts() {
       const [toasts, setToasts] = React.useState([]);
+      const timers = React.useRef(new Set());
+      React.useEffect(
+        () => () => {
+          for (const timer of timers.current) clearTimeout(timer);
+          timers.current.clear();
+        },
+        [],
+      );
       const push = React.useCallback((text, tone) => {
         const id = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         setToasts((list) => [...list.slice(-3), { id, text, tone: tone || "info" }]);
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          timers.current.delete(timer);
           setToasts((list) => list.filter((item) => item.id !== id));
         }, tone === "error" ? 5200 : 3200);
+        timers.current.add(timer);
       }, []);
       return [toasts, push];
     }
 
-    function useBoardData(pushToast) {
+    /**
+     * /state 每次响应都会生成新的 generatedAt，不能直接拿它判断「没变化」。
+     * 这里用去掉 generatedAt 后的内容指纹比较，未变化时保留旧对象引用，避免整页重渲染。
+     */
+    function stateSignature(payload) {
+      if (!payload || typeof payload !== "object") return "";
+      try {
+        return JSON.stringify({ ...payload, generatedAt: "" });
+      } catch {
+        return "";
+      }
+    }
+
+    function useBoardData() {
       const [data, setData] = React.useState(null);
       const [error, setError] = React.useState(null);
       const [loading, setLoading] = React.useState(true);
       const inflight = React.useRef(null);
       const mounted = React.useRef(true);
+      const signature = React.useRef("");
 
       React.useEffect(() => {
         mounted.current = true;
@@ -1377,11 +1312,15 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 
       const load = React.useCallback(async (silent) => {
         if (inflight.current) return inflight.current;
-        if (!silent) setLoading((value) => (data ? value : true));
+        if (!silent) setLoading(true);
         const task = apiRequest("/state")
           .then((payload) => {
             if (!mounted.current) return null;
-            setData(payload);
+            const next = stateSignature(payload);
+            if (next !== signature.current) {
+              signature.current = next;
+              setData(payload);
+            }
             setError(null);
             setLoading(false);
             return payload;
@@ -1397,89 +1336,46 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           });
         inflight.current = task;
         return task;
-      }, [data]);
+      }, []);
 
       React.useEffect(() => {
         load(false);
-      }, []);
+      }, [load]);
 
-      // Poll: slow when idle, faster while a scan runs, paused when hidden.
+      // 轮询：空闲 4s，扫描中 1.2s；页面隐藏时停止请求并把节奏放慢，重新可见时立即补一次。
       React.useEffect(() => {
         let timer = null;
         let cancelled = false;
+        const running = Boolean(data && data.scan && data.scan.state === "running");
+        const nextDelay = () => {
+          if (typeof document !== "undefined" && document.hidden) return 30_000;
+          return running ? POLL_SCAN_MS : POLL_MS;
+        };
         const tick = () => {
           if (cancelled) return;
           const hidden = typeof document !== "undefined" && document.hidden;
-          if (!hidden) {
-            load(true);
-          }
-          const running = data && data.scan && data.scan.state === "running";
-          timer = setTimeout(tick, running ? POLL_SCAN_MS : POLL_MS);
+          if (!hidden) load(true);
+          timer = setTimeout(tick, nextDelay());
         };
-        timer = setTimeout(tick, POLL_MS);
+        const onVisibility = () => {
+          if (cancelled) return;
+          clearTimeout(timer);
+          if (!document.hidden) load(true);
+          timer = setTimeout(tick, nextDelay());
+        };
+        timer = setTimeout(tick, nextDelay());
+        document.addEventListener("visibilitychange", onVisibility);
         return () => {
           cancelled = true;
           clearTimeout(timer);
+          document.removeEventListener("visibilitychange", onVisibility);
         };
       }, [data && data.scan && data.scan.state, load]);
 
       return { data, error, loading, reload: load, setData };
     }
 
-    /* ============================== small ui ============================== */
-
-    function KpiCard({ label, value, suffix, foot, tone, icon }) {
-      return h(
-        "div",
-        { className: "sk-kpi", style: { "--tone": tone || "var(--dsw-alias-brand-primary)" } },
-        h("div", { className: "glow" }),
-        h("div", { className: "sk-kpi-label" }, icon ? h(Icon, { name: icon, size: 13 }) : null, label),
-        h(
-          "div",
-          { className: "sk-kpi-row" },
-          h("div", { className: "sk-kpi-value" }, String(value), suffix ? h("small", null, suffix) : null),
-        ),
-        foot ? h("div", { className: "sk-kpi-foot" }, foot) : null,
-      );
-    }
-
-    function Sparkline({ activity }) {
-      const items = Array.isArray(activity) ? activity.slice(-14) : [];
-      const max = Math.max(1, ...items.map((item) => Number(item.count) || 0));
-      return h(
-        "div",
-        { className: "sk-kpi spark" },
-        h("div", { className: "sk-kpi-label" }, h(Icon, { name: "layers", size: 13 }), "近 14 天活动"),
-        h(
-          "div",
-          { className: "sk-spark" },
-          items.map((item, index) =>
-            h("i", {
-              key: item.day || index,
-              className: (Number(item.count) || 0) >= max * 0.6 ? "hot" : "",
-              style: { height: `${Math.max(6, Math.round(((Number(item.count) || 0) / max) * 100))}%` },
-              title: `${item.day}：${item.count} 个事件`,
-            }),
-          ),
-        ),
-      );
-    }
-
-    function PriorityBadge({ priority }) {
-      const meta = PRIORITY_META[priority] || PRIORITY_META.P3;
-      return h("span", { className: "sk-badge pri", style: { "--tone": meta.tone }, title: `优先级 ${meta.label}` }, meta.label);
-    }
-
-    function topFactOf(task) {
-      const facts = keyFactsOf(task);
-      if (!facts.length) return null;
-      // 卡面只取决策/进展/状态/产物类事实；问题类保留给问题徽标与抽屉，避免卡面出现「错误：…」。
-      const preferred = facts.filter((fact) => fact.kind !== "issue");
-      const pool = preferred.length ? preferred : facts;
-      return pool
-        .slice()
-        .sort((a, b) => factMeta(a.kind).weight - factMeta(b.kind).weight || (Number(b.seq) || 0) - (Number(a.seq) || 0))[0];
-    }
+    /* ================================ cards =============================== */
 
     function TaskCard({ task, onOpen, onDragStart, onDragEnd, dragging }) {
       const progress = progressOf(task);
@@ -1500,8 +1396,12 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         "article",
         {
           className: cx("sk-card", "sk-card-v3", "is-" + taskStatus, done && "is-done", dragging && "dragging"),
-          draggable: true,
+          role: "button",
           tabIndex: 0,
+          "aria-haspopup": "dialog",
+          "data-task-id": task.id,
+          "aria-label": `${task.title}（${STATUS_META[taskStatus].label}）`,
+          draggable: true,
           onDragStart: (event) => {
             event.dataTransfer.effectAllowed = "move";
             event.dataTransfer.setData("text/plain", task.id);
@@ -1510,7 +1410,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           onDragEnd: () => onDragEnd(),
           onClick: () => onOpen(task.id),
           onKeyDown: (event) => {
-            if (event.key === "Enter" || event.key === " ") {
+            if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
               event.preventDefault();
               onOpen(task.id);
             }
@@ -1522,6 +1422,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           { className: "sk-card-v3-head" },
           h("span", { className: cx("sk-dot", "is-" + taskStatus), title: STATUS_META[taskStatus].label }),
           h("h3", { className: "sk-card-title-v3" }, task.title),
+          task.archived ? h("span", { className: "sk-archived-mark", title: "已归档任务（筛选「含归档」时显示）" }, "已归档") : null,
           showEngine
             ? h("span", { className: cx("sk-ai-mark", engine === "AI" ? "is-ai" : "is-rules"), title: engine === "AI" ? "AI 研判" : "规则推断" }, engine)
             : null,
@@ -1582,7 +1483,13 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h("span", { className: "sk-col-head-spacer" }),
           h(
             "button",
-            { type: "button", className: "sk-col-add", title: `在「${meta.label}」新建`, onClick: () => onAdd(status) },
+            {
+              type: "button",
+              className: "sk-col-add",
+              title: `在「${meta.label}」新建`,
+              "aria-label": `在「${meta.label}」新建任务`,
+              onClick: () => onAdd(status),
+            },
             h(Icon, { name: "plus", size: 14 }),
           ),
         ),
@@ -1710,12 +1617,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       return lines.join("\n");
     }
 
-    function ToastToneOf(result) {
-      if (result === "applied") return "info";
-      if (result === "preserved") return "info";
-      return "error";
-    }
-
     /** 「继续此任务」弹窗：模板提示词可编辑 → 放入会话 / 新会话 / 复制。 */
     function ContinueTaskModal({ task, initialTarget, ctxProps, pushToast, onClose, onDone }) {
       const host = (ctxProps && ctxProps.host) || {};
@@ -1725,8 +1626,17 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const [busy, setBusy] = React.useState("");
       const [note, setNote] = React.useState("");
       const session = sessionContextOf(task);
+      // 用户改过 textarea 后，切换「原会话 / 新会话」不能丢编辑内容；提示词模板本身与 target 无关。
+      const dirtyRef = React.useRef(false);
+      const promptKeyRef = React.useRef("");
 
       React.useEffect(() => {
+        const key = `${task.id}:${target}`;
+        if (dirtyRef.current) {
+          setNote("已保留你编辑的提示词；切换目标不会重新生成");
+          return undefined;
+        }
+        if (promptKeyRef.current === key) return undefined;
         let cancelled = false;
         setLoading(true);
         setNote("");
@@ -1735,11 +1645,14 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             if (cancelled) return;
             const data = (res && res.data) || res || {};
             const text = typeof data.prompt === "string" ? data.prompt : "";
+            promptKeyRef.current = key;
+            if (dirtyRef.current) return;
             setPrompt(text || localContinuePrompt(task));
             if (!text) setNote("Host 模板接口未就绪，已使用本地模板");
           })
-          .catch((cause) => {
-            if (cancelled) return;
+          .catch(() => {
+            if (cancelled || dirtyRef.current) return;
+            promptKeyRef.current = key;
             setPrompt(localContinuePrompt(task));
             setNote("Host 模板接口不可用，已使用本地模板（仍然可用）");
           })
@@ -1769,11 +1682,13 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           const res = await command("task.polishPrompt", { id: task.id, prompt });
           const data = (res && res.data) || res || {};
           const text = typeof data.prompt === "string" ? data.prompt : "";
-          if (text) {
+          // Host 在 AI 未启用 / 无凭证 / 预算耗尽时返回 polished:false + 原文，不能当成润色成功。
+          if (data.polished === true && text) {
             setPrompt(text);
+            dirtyRef.current = true;
             pushToast("AI 已润色提示词", "info");
           } else {
-            pushToast("润色未返回结果，保留原文", "error");
+            pushToast("AI 未启用或不可用，已保留原文", "info");
           }
         } catch (cause) {
           pushToast("润色失败，保留原文：" + cause.message, "error");
@@ -1822,40 +1737,53 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       };
 
       const disabled = loading || !!busy || !prompt.trim();
+      const dialogRef = React.useRef(null);
+      useDialogFocus(dialogRef, onClose);
+      useBodyScrollLock();
 
       return h(
         "div",
         { className: "sk-modal-mask", onMouseDown: (event) => event.target === event.currentTarget && onClose() },
         h(
           "div",
-          { className: "sk-modal sk-continue-modal", role: "dialog", "aria-label": "继续此任务" },
-          h("h3", null, h(Icon, { name: "play", size: 15 }), "继续此任务"),
+          {
+            className: "sk-modal sk-continue-modal",
+            ref: dialogRef,
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-labelledby": "sk-continue-title",
+          },
+          h("h3", { id: "sk-continue-title" }, h(Icon, { name: "play", size: 15 }), "继续此任务"),
           h("p", { className: "sub" }, "提示词只放入输入框、不会自动发送；确认无误后再发送给 DSH。"),
           h(
             "div",
-            { className: "sk-continue-target" },
+            { className: "sk-continue-target", role: "group", "aria-label": "提示词放入位置" },
             h(
               "button",
-              { type: "button", className: target === "session" ? "is-on" : "", onClick: () => setTarget("session") },
+              { type: "button", "aria-pressed": target === "session", className: target === "session" ? "is-on" : "", onClick: () => setTarget("session") },
               "原会话继续",
               h("small", null, session.title || "来源会话"),
             ),
             h(
               "button",
-              { type: "button", className: target === "newSession" ? "is-on" : "", onClick: () => setTarget("newSession") },
+              { type: "button", "aria-pressed": target === "newSession", className: target === "newSession" ? "is-on" : "", onClick: () => setTarget("newSession") },
               "同工作区新会话",
               h("small", null, task.workspaceTitle || "未关联工作区"),
             ),
           ),
           loading
-            ? h("div", { className: "sk-note-tiny" }, "正在生成提示词…")
+            ? h("div", { className: "sk-note-tiny", role: "status", "aria-live": "polite" }, "正在生成提示词…")
             : h("textarea", {
                 className: "sk-continue-textarea",
+                "aria-label": "继续任务的提示词",
                 value: prompt,
                 spellCheck: false,
-                onChange: (event) => setPrompt(event.target.value),
+                onChange: (event) => {
+                  dirtyRef.current = true;
+                  setPrompt(event.target.value);
+                },
               }),
-          note ? h("div", { className: "sk-note-tiny" }, note) : null,
+          note ? h("div", { className: "sk-note-tiny", role: "status", "aria-live": "polite" }, note) : null,
           h(
             "div",
             { className: "sk-modal-foot" },
@@ -1876,7 +1804,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       );
     }
 
-    function TaskDrawer({ task, ctxProps, onClose, onChanged, pushToast }) {
+    function TaskDrawer({ task, ctxProps, settings, onClose, onChanged, pushToast }) {
       const host = (ctxProps && ctxProps.host) || {};
       const goal = goalInfoOf(task);
       const session = sessionContextOf(task);
@@ -1890,7 +1818,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       }));
       const [editing, setEditing] = React.useState(false);
       const [saving, setSaving] = React.useState(false);
-      const [busy, setBusy] = React.useState("");
       const [factsExpanded, setFactsExpanded] = React.useState(false);
       const [subtasksExpanded, setSubtasksExpanded] = React.useState(false);
       const [evidenceOpen, setEvidenceOpen] = React.useState(false);
@@ -1904,13 +1831,29 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const [subtaskBusy, setSubtaskBusy] = React.useState("");
       const [optimisticSubtasks, setOptimisticSubtasks] = React.useState(null);
       const [confirmDelete, setConfirmDelete] = React.useState(false);
+      const [issuesExpanded, setIssuesExpanded] = React.useState(false);
+      const [nextStepsExpanded, setNextStepsExpanded] = React.useState(false);
+      const [reasonExpanded, setReasonExpanded] = React.useState(false);
+      const [reasonOverflow, setReasonOverflow] = React.useState(false);
+      const [staleNotice, setStaleNotice] = React.useState(false);
+      const [analyzeBusy, setAnalyzeBusy] = React.useState(false);
+      const reasonRef = React.useRef(null);
+      const dialogRef = React.useRef(null);
 
       const subtasks = optimisticSubtasks || subtasksOf(task);
       const subtaskDone = subtasks.filter((item) => item.done).length;
       const facts = keyFactsOf(task);
       const artifacts = artifactsOf(task);
-      const issues = Array.isArray(task.issues) ? task.issues : [];
+      const severityRank = { high: 0, medium: 1, low: 2 };
+      const issues = (Array.isArray(task.issues) ? task.issues : [])
+        .slice()
+        .sort((left, right) => (severityRank[left?.severity] ?? 9) - (severityRank[right?.severity] ?? 9));
       const nextSteps = Array.isArray(task.nextSteps) ? task.nextSteps : [];
+      const aiInfo = aiInfoOf(task);
+      // 「可能已过期」只在会话在研判之后又产生了活动时提示：没有新活动时，
+      // 旧研判仍然有效；按扫描间隔判断会让所有旧任务都误报过期。
+      const lastActivityAt = Number((task.sessionContext && task.sessionContext.lastActivityAt) || task.lastActivityAt) || 0;
+      const aiStale = Boolean(aiInfo && aiInfo.analyzedAt && lastActivityAt > aiInfo.analyzedAt + 5 * 60_000);
       const evidence = Array.isArray(task.evidence) ? task.evidence.slice(0, 8) : [];
       const history = Array.isArray(task.history) ? task.history.slice().reverse().slice(0, 20) : [];
       const progress = subtasks.length ? Math.round((subtaskDone / Math.max(1, subtasks.length)) * 100) : pct(task.progress) || 0;
@@ -1926,11 +1869,51 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         });
       };
 
+      // 只在切换到另一张任务卡时重置编辑态；轮询/扫描导致 updatedAt 变化不能吞掉用户草稿。
       React.useEffect(() => {
         resetDraft();
         setEditing(false);
         setOptimisticSubtasks(null);
-      }, [task.id, task.updatedAt]);
+        setStaleNotice(false);
+      }, [task.id]);
+
+      // 后台（轮询 / 扫描 / 重新研判）覆盖了任务时：保留草稿，只给一句安静的提示。
+      React.useEffect(() => {
+        setOptimisticSubtasks(null);
+        if (editing) setStaleNotice(true);
+      }, [task.updatedAt]);
+
+      // 研判理由超过 2 行才显示「展开理由」；展开后保留按钮以便收起。
+      React.useEffect(() => {
+        const node = reasonRef.current;
+        if (!node || reasonExpanded) return;
+        setReasonOverflow(node.scrollHeight > node.clientHeight + 1);
+      }, [aiInfo && aiInfo.reason, reasonExpanded]);
+
+      // Esc 分层：先收起抽屉内浮层 / 退出编辑，最后才关闭抽屉；「继续此任务」弹窗自己处理 Esc。
+      const handleEscape = () => {
+        if (continueOpen) return;
+        if (moreOpen) {
+          setMoreOpen(false);
+          return;
+        }
+        if (moreOpenFooter) {
+          setMoreOpenFooter(false);
+          return;
+        }
+        if (editing) {
+          resetDraft();
+          setEditing(false);
+          return;
+        }
+        if (confirmDelete) {
+          setConfirmDelete(false);
+          return;
+        }
+        onClose();
+      };
+      useDialogFocus(dialogRef, handleEscape);
+      useBodyScrollLock();
 
       const update = (patch) => setDraft((value) => ({ ...value, ...patch }));
 
@@ -1956,6 +1939,8 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           await command("task.update", { id: task.id, patch, lockFields: changed });
           pushToast("已保存", "info");
           setEditing(false);
+          setStaleNotice(false);
+          resetDraft();
           await onChanged();
         } catch (cause) {
           pushToast("保存失败：" + cause.message, "error");
@@ -1965,21 +1950,24 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       };
 
       const run = async (label, fn, toastText) => {
-        setBusy(label);
         try {
           await fn();
           if (toastText) pushToast(toastText, "info");
           await onChanged();
         } catch (cause) {
           pushToast(label + "失败：" + cause.message, "error");
-        } finally {
-          setBusy("");
         }
       };
 
       const toggleLock = () => {
-        if (locked.length > 0) run("解锁", () => command("task.unlock", { id: task.id }), "已交还 AI 维护");
-        else run("锁定", () => command("task.update", { id: task.id, patch: {}, lockFields: EDITABLE_FIELDS }), "已锁定字段");
+        if (locked.length > 0) {
+          run("解锁", () => command("task.unlock", { id: task.id }), "已交还 AI 维护").then(() => {
+            resetDraft();
+            setStaleNotice(false);
+          });
+        } else {
+          run("锁定", () => command("task.update", { id: task.id, patch: {}, lockFields: EDITABLE_FIELDS }), "已锁定字段");
+        }
       };
 
       const importTodos = async () => {
@@ -2084,8 +2072,31 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         }
       };
 
+      // 立即对来源会话重跑一次研判（Host 在扫描中会返回冲突错误；AI 不可用时自动降级规则）。
+      const analyzeNow = async () => {
+        if (analyzeBusy) return;
+        setAnalyzeBusy(true);
+        try {
+          const res = await command("task.analyze", { id: task.id });
+          const data = (res && res.data) || {};
+          const details = [];
+          if (data.engine) details.push(data.engine === "llm" ? "AI 引擎" : "规则引擎");
+          if (Number(data.aiCalls) > 0) details.push(`${data.aiCalls} 次 AI 调用`);
+          if (Number(data.tokens) > 0) details.push(`${fmtTokens(data.tokens)} tokens`);
+          const message = String(data.message || "任务已重新研判");
+          pushToast(details.length ? `${message} · ${details.join(" · ")}` : message, "info");
+          await onChanged();
+        } catch (cause) {
+          const message = String((cause && cause.message) || cause);
+          pushToast(/扫描/.test(message) ? "扫描进行中，暂时无法重新研判" : `重新研判失败：${message}`, "error");
+        } finally {
+          setAnalyzeBusy(false);
+        }
+      };
+
       const drawerMenuItems = [
         { label: "编辑任务", icon: "edit", onClick: () => { resetDraft(); setEditing(true); } },
+        { label: analyzeBusy ? "重新研判中…" : "重新研判", icon: "spark", onClick: analyzeNow },
         { label: locked.length ? "解锁字段" : "锁定字段", icon: locked.length ? "unlock" : "lock", onClick: toggleLock },
         "divider",
         { label: task.archived ? "恢复任务" : "归档任务", icon: "archive", onClick: () => run(task.archived ? "恢复" : "归档", () => command("task.archive", { id: task.id, archived: !task.archived }), task.archived ? "已恢复" : "已归档") },
@@ -2099,21 +2110,23 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 
       const subtaskRows = (subtasksExpanded ? subtasks : subtasks.slice(0, 8)).map((item) =>
         h(
-          "button",
-          { key: item.id, type: "button", className: cx("sk-subtask", item.done && "done"), onClick: () => toggleSubtask(item) },
-          h("span", { className: "sk-subtask-box" }, item.done ? h(Icon, { name: "check", size: 10 }) : null),
-          h("span", { className: "sk-subtask-text" }, item.text),
+          "div",
+          { key: item.id, className: cx("sk-subtask", item.done && "done") },
           h(
-            "span",
+            "button",
             {
-              className: "sk-subtask-del",
-              role: "button",
-              title: "删除子任务",
-              onClick: (event) => {
-                event.stopPropagation();
-                removeSubtask(item);
-              },
+              type: "button",
+              className: "sk-subtask-toggle",
+              "aria-pressed": item.done,
+              "aria-label": `${item.done ? "标记未完成" : "标记完成"}：${item.text}`,
+              onClick: () => toggleSubtask(item),
             },
+            h("span", { className: "sk-subtask-box" }, item.done ? h(Icon, { name: "check", size: 10 }) : null),
+            h("span", { className: "sk-subtask-text" }, item.text),
+          ),
+          h(
+            "button",
+            { type: "button", className: "sk-subtask-del", title: "删除子任务", "aria-label": `删除子任务：${item.text}`, onClick: () => removeSubtask(item) },
             h(Icon, { name: "close", size: 11 }),
           ),
         ),
@@ -2122,19 +2135,34 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       return h(
         React.Fragment,
         null,
-        h("div", { className: "sk-mask", onClick: onClose }),
+        h("div", { className: "sk-mask", onClick: onClose, "aria-hidden": "true" }),
         h(
           "aside",
-          { className: "sk-drawer sk-drawer-v3", role: "dialog", "aria-label": "任务详情", onClick: (event) => event.stopPropagation() },
+          {
+            className: "sk-drawer sk-drawer-v3",
+            ref: dialogRef,
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-labelledby": "sk-drawer-title",
+            onClick: (event) => event.stopPropagation(),
+          },
           h(
             "header",
             { className: "sk-drawer-head" },
-            h("button", { type: "button", className: "sk-iconbtn-v3 sk-drawer-back", title: "返回（Esc）", onClick: onClose }, h(Icon, { name: "back", size: 16 })),
-            h("div", { className: "sk-drawer-head-text" }, h("div", { className: "sk-drawer-kicker" }, "任务"), h("h2", { className: "sk-drawer-title-v3" }, task.title)),
+            h(
+              "button",
+              { type: "button", className: "sk-iconbtn-v3 sk-drawer-back", title: "返回（Esc）", "aria-label": "关闭任务详情", onClick: onClose },
+              h(Icon, { name: "back", size: 16 }),
+            ),
+            h("div", { className: "sk-drawer-head-text" }, h("div", { className: "sk-drawer-kicker" }, "任务"), h("h2", { className: "sk-drawer-title-v3", id: "sk-drawer-title" }, task.title)),
             h(
               DropMenu,
               { open: moreOpen, onClose: () => setMoreOpen(false), items: drawerMenuItems },
-              h("button", { type: "button", className: "sk-iconbtn-v3", title: "更多", onClick: () => setMoreOpen((value) => !value) }, h(Icon, { name: "more", size: 16 })),
+              h(
+                "button",
+                { type: "button", className: "sk-iconbtn-v3", title: "更多", "aria-label": "更多任务操作", "aria-haspopup": "menu", "aria-expanded": moreOpen, onClick: () => setMoreOpen((value) => !value) },
+                h(Icon, { name: "more", size: 16 }),
+              ),
             ),
           ),
           h(
@@ -2170,15 +2198,15 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                 ? h(
                     "div",
                     { className: "sk-edit-fields" },
-                    h("div", { className: "sk-edit-row" }, h("span", { className: "sk-edit-label" }, "标题"), h("input", { className: "sk-input", value: draft.title, maxLength: 80, onChange: (event) => update({ title: event.target.value }) })),
-                    h("div", { className: "sk-edit-row" }, h("span", { className: "sk-edit-label" }, "目标"), h("textarea", { className: "sk-textarea", value: draft.goal, maxLength: 280, rows: 3, onChange: (event) => update({ goal: event.target.value }) })),
+                    h("div", { className: "sk-edit-row" }, h("span", { className: "sk-edit-label" }, "标题"), h("input", { className: "sk-input", "aria-label": "标题", value: draft.title, maxLength: TEXT_LIMITS.title, onChange: (event) => update({ title: event.target.value }) })),
+                    h("div", { className: "sk-edit-row" }, h("span", { className: "sk-edit-label" }, "目标"), h("textarea", { className: "sk-textarea", "aria-label": "目标", value: draft.goal, maxLength: TEXT_LIMITS.goal, rows: 3, onChange: (event) => update({ goal: event.target.value }) })),
                     h(
                       "div",
                       { className: "sk-edit-row" },
                       h("span", { className: "sk-edit-label" }, "状态"),
-                      h("select", { className: "sk-select", value: draft.status, onChange: (event) => update({ status: event.target.value }) }, STATUS_ORDER.map((status) => h("option", { key: status, value: status }, STATUS_META[status].label))),
+                      h("select", { className: "sk-select", "aria-label": "状态", value: draft.status, onChange: (event) => update({ status: event.target.value }) }, STATUS_ORDER.map((status) => h("option", { key: status, value: status }, STATUS_META[status].label))),
                       h("span", { className: "sk-edit-label", style: { width: 44, textAlign: "right" } }, "优先级"),
-                      h("select", { className: "sk-select", value: draft.priority, onChange: (event) => update({ priority: event.target.value }) }, PRIORITY_ORDER.map((priority) => h("option", { key: priority, value: priority }, priority))),
+                      h("select", { className: "sk-select", "aria-label": "优先级", value: draft.priority, onChange: (event) => update({ priority: event.target.value }) }, PRIORITY_ORDER.map((priority) => h("option", { key: priority, value: priority }, priority))),
                     ),
                     h(
                       "div",
@@ -2190,6 +2218,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                         min: 0,
                         max: 100,
                         step: 5,
+                        "aria-label": "进度",
                         value: draft.progress === null ? 0 : draft.progress,
                         onChange: (event) => update({ progress: Number(event.target.value) }),
                       }),
@@ -2197,16 +2226,49 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                     ),
                   )
                 : h(
-                    "div",
-                    { className: "sk-summary-line" },
-                    h("span", { className: cx("sk-dot", "is-" + statusOf(task)) }),
-                    h("span", { className: cx("sk-summary-status", "is-" + statusOf(task)) }, STATUS_META[statusOf(task)].label),
-                    h("span", { className: "sk-sep" }, "·"),
-                    h("span", { className: cx("sk-summary-prio", task.priority === "P0" ? "is-p0" : task.priority === "P1" ? "is-p1" : "is-rest") }, task.priority || "P2"),
-                    h("span", { className: "sk-sep" }, "·"),
-                    h("span", { className: "sk-muted" }, subtasks.length ? `${subtaskDone}/${subtasks.length} 子任务` : `进度 ${progress}%`),
-                    goal && goal.text ? h("span", { className: "sk-goal-text" }, goal.text) : null,
+                    React.Fragment,
+                    null,
+                    h(
+                      "div",
+                      { className: "sk-summary-line" },
+                      h("span", { className: cx("sk-dot", "is-" + statusOf(task)) }),
+                      h("span", { className: cx("sk-summary-status", "is-" + statusOf(task)) }, STATUS_META[statusOf(task)].label),
+                      h("span", { className: "sk-sep" }, "·"),
+                      h("span", { className: cx("sk-summary-prio", task.priority === "P0" ? "is-p0" : task.priority === "P1" ? "is-p1" : "is-rest") }, task.priority || "P2"),
+                      h("span", { className: "sk-sep" }, "·"),
+                      h("span", { className: "sk-muted" }, subtasks.length ? `${subtaskDone}/${subtasks.length} 子任务` : `进度 ${progress}%`),
+                      goal && goal.text ? h("span", { className: "sk-goal-text" }, goal.text) : null,
+                    ),
+                    aiInfo
+                      ? h(
+                          "div",
+                          { className: "sk-ai-review" },
+                          h(
+                            "div",
+                            { className: "sk-ai-review-head" },
+                            h(Icon, { name: "spark", size: 12 }),
+                            h("span", { className: "sk-ai-review-title" }, analyzeBusy ? "重新研判中…" : aiInfo.engine === "llm" ? "AI 研判" : "规则推断"),
+                            aiInfo.engine === "llm" && aiInfo.model ? h("span", { className: "sk-ai-review-meta" }, aiInfo.model) : null,
+                            aiInfo.engine === "llm" && aiInfo.confidence !== null ? h("span", { className: "sk-ai-review-meta" }, `${aiInfo.confidence}%`) : null,
+                            aiInfo.analyzedAt ? h("span", { className: "sk-ai-review-meta" }, relTime(aiInfo.analyzedAt)) : null,
+                            aiStale ? h("span", { className: "sk-ai-review-stale" }, "可能已过期") : null,
+                          ),
+                          aiInfo.reason
+                            ? h(
+                                React.Fragment,
+                                null,
+                                h("p", { ref: reasonRef, className: cx("sk-ai-review-reason", reasonExpanded && "is-open") }, aiInfo.reason),
+                                reasonOverflow || reasonExpanded
+                                  ? h("button", { type: "button", className: "sk-text", style: { alignSelf: "flex-start" }, onClick: () => setReasonExpanded((value) => !value) }, reasonExpanded ? "收起" : "展开理由")
+                                  : null,
+                              )
+                            : h("p", { className: "sk-ai-review-reason is-empty" }, "本次未给出研判理由"),
+                        )
+                      : null,
                   ),
+              staleNotice
+                ? h("div", { className: "sk-inline-note", role: "status", "aria-live": "polite" }, "后台已更新；保存将覆盖 AI 的新结果")
+                : null,
             ),
             h(
               "div",
@@ -2268,8 +2330,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                 { className: "sk-subtask-add" },
                 h("input", {
                   className: "sk-input",
+                  "aria-label": "新增子任务",
                   value: newSubtask,
-                  maxLength: 60,
+                  maxLength: TEXT_LIMITS.subtaskText,
                   placeholder: "新增子任务…",
                   onChange: (event) => setNewSubtask(event.target.value),
                   onKeyDown: (event) => {
@@ -2291,7 +2354,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                       "div",
                       { className: "sk-duo-col" },
                       issues.length
-                        ? issues.slice(0, 3).map((issue, index) =>
+                        ? (issuesExpanded ? issues : issues.slice(0, 3)).map((issue, index) =>
                             h(
                               "div",
                               {
@@ -2304,12 +2367,25 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                             ),
                           )
                         : h("div", { className: "sk-note-tiny" }, "暂无"),
+                      issues.length > 3
+                        ? h(
+                            "button",
+                            {
+                              type: "button",
+                              className: "sk-text",
+                              style: { alignSelf: "flex-start", paddingTop: 2 },
+                              "aria-label": issuesExpanded ? "收起问题列表" : `展开全部 ${issues.length} 个问题`,
+                              onClick: () => setIssuesExpanded((value) => !value),
+                            },
+                            issuesExpanded ? "收起" : `展开全部 ${issues.length}`,
+                          )
+                        : null,
                     ),
                     h(
                       "div",
                       { className: "sk-duo-col" },
                       nextSteps.length
-                        ? nextSteps.slice(0, 3).map((step, index) =>
+                        ? (nextStepsExpanded ? nextSteps : nextSteps.slice(0, 3)).map((step, index) =>
                             h(
                               "div",
                               { key: index, className: "sk-duo-item", title: step },
@@ -2318,6 +2394,19 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                             ),
                           )
                         : h("div", { className: "sk-note-tiny" }, "暂无"),
+                      nextSteps.length > 3
+                        ? h(
+                            "button",
+                            {
+                              type: "button",
+                              className: "sk-text",
+                              style: { alignSelf: "flex-start", paddingTop: 2 },
+                              "aria-label": nextStepsExpanded ? "收起下一步列表" : `展开全部 ${nextSteps.length} 个下一步`,
+                              onClick: () => setNextStepsExpanded((value) => !value),
+                            },
+                            nextStepsExpanded ? "收起" : `展开全部 ${nextSteps.length}`,
+                          )
+                        : null,
                     ),
                   ),
                 )
@@ -2388,7 +2477,13 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                             h(
                               "div",
                               { className: "sk-ev-body" },
-                              h("div", { className: "sk-ev-meta" }, h("span", { className: "kind" }, meta.label), h("span", null, shortTime(item.time)), h("span", null, "#" + item.seq)),
+                              h(
+                                "div",
+                                { className: "sk-ev-meta" },
+                                h("span", { className: "kind" }, meta.label),
+                                item.time ? h("span", null, shortTime(item.time)) : null,
+                                seqOf(item.seq) ? h("span", null, "#" + seqOf(item.seq)) : null,
+                              ),
                               h("p", { className: cx("sk-ev-quote", open && "open") }, text),
                               text.length > 140 ? h("button", { type: "button", className: "sk-ev-more", onClick: () => setExpandedEvidence((value) => ({ ...value, [key]: !open })) }, open ? "收起" : "展开全文") : null,
                             ),
@@ -2428,7 +2523,19 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   h(
                     DropMenu,
                     { open: moreOpenFooter, onClose: () => setMoreOpenFooter(false), items: footerMenuItems },
-                    h("button", { type: "button", className: "sk-iconbtn-v3", title: "更多操作", onClick: () => setMoreOpenFooter((value) => !value) }, h(Icon, { name: "more", size: 16 })),
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        className: "sk-iconbtn-v3",
+                        title: "更多操作",
+                        "aria-label": "更多任务操作",
+                        "aria-haspopup": "menu",
+                        "aria-expanded": moreOpenFooter,
+                        onClick: () => setMoreOpenFooter((value) => !value),
+                      },
+                      h(Icon, { name: "more", size: 16 }),
+                    ),
                   ),
                 ),
           ),
@@ -2455,10 +2562,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const [workspaceId, setWorkspaceId] = React.useState("");
       const [saving, setSaving] = React.useState(false);
       const inputRef = React.useRef(null);
-
-      React.useEffect(() => {
-        if (inputRef.current) inputRef.current.focus();
-      }, []);
+      const dialogRef = React.useRef(null);
+      useDialogFocus(dialogRef, onClose);
+      useBodyScrollLock();
 
       const create = async () => {
         if (!title.trim()) return;
@@ -2479,32 +2585,38 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         { className: "sk-modal-mask", onMouseDown: (event) => event.target === event.currentTarget && onClose() },
         h(
           "div",
-          { className: "sk-modal", role: "dialog", "aria-label": "新建任务" },
-          h("h3", null, h(Icon, { name: "plus", size: 15 }), "新建任务"),
-          h("p", { className: "sub" }, "手动任务不会被自动扫描修改；关联会话可在详情里补充。"),
+          {
+            className: "sk-modal",
+            ref: dialogRef,
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-labelledby": "sk-newtask-title",
+          },
+          h("h3", { id: "sk-newtask-title" }, h(Icon, { name: "plus", size: 15 }), "新建任务"),
+          h("p", { className: "sub" }, "手动任务不会被自动扫描修改，可稍后从来源会话补充上下文。"),
           h(
             "div",
             { className: "sk-field" },
-            h("label", null, "标题"),
-            h("input", { ref: inputRef, className: "sk-input", value: title, maxLength: 80, placeholder: "要做什么？", onChange: (event) => setTitle(event.target.value), onKeyDown: (event) => event.key === "Enter" && create() }),
+            h("label", { htmlFor: "sk-newtask-title-input" }, "标题"),
+            h("input", { ref: inputRef, id: "sk-newtask-title-input", className: "sk-input", value: title, maxLength: TEXT_LIMITS.title, placeholder: "要做什么？", onChange: (event) => setTitle(event.target.value), onKeyDown: (event) => event.key === "Enter" && create() }),
           ),
           h(
             "div",
             { className: "sk-field" },
-            h("label", null, "目标 / 说明（可选）"),
-            h("textarea", { className: "sk-textarea", value: goal, maxLength: 240, rows: 2, placeholder: "一句话说明完成标准", onChange: (event) => setGoal(event.target.value) }),
+            h("label", { htmlFor: "sk-newtask-goal-input" }, "目标 / 说明（可选）"),
+            h("textarea", { id: "sk-newtask-goal-input", className: "sk-textarea", value: goal, maxLength: TEXT_LIMITS.goal, rows: 2, placeholder: "一句话说明完成标准", onChange: (event) => setGoal(event.target.value) }),
           ),
           h(
             "div",
             { className: "sk-field" },
-            h("label", null, "状态"),
+            h("span", { className: "sk-field-label", id: "sk-newtask-status-label" }, "状态"),
             h(
               "div",
-              { className: "sk-seg" },
+              { className: "sk-seg", role: "group", "aria-labelledby": "sk-newtask-status-label" },
               STATUS_ORDER.map((item) =>
                 h(
                   "button",
-                  { key: item, type: "button", className: status === item ? "on" : "", style: { "--tone": STATUS_META[item].tone }, onClick: () => setStatus(item) },
+                  { key: item, type: "button", "aria-pressed": status === item, className: status === item ? "on" : "", style: { "--tone": STATUS_META[item].tone }, onClick: () => setStatus(item) },
                   STATUS_META[item].label,
                 ),
               ),
@@ -2516,14 +2628,14 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             h(
               "div",
               { className: "sk-field" },
-              h("label", null, "优先级"),
+              h("span", { className: "sk-field-label", id: "sk-newtask-priority-label" }, "优先级"),
               h(
                 "div",
-                { className: "sk-seg" },
+                { className: "sk-seg", role: "group", "aria-labelledby": "sk-newtask-priority-label" },
                 PRIORITY_ORDER.map((item) =>
                   h(
                     "button",
-                    { key: item, type: "button", className: priority === item ? "on" : "", style: { "--tone": PRIORITY_META[item].tone }, onClick: () => setPriority(item) },
+                    { key: item, type: "button", "aria-pressed": priority === item, className: priority === item ? "on" : "", style: { "--tone": PRIORITY_META[item].tone }, onClick: () => setPriority(item) },
                     item,
                   ),
                 ),
@@ -2532,10 +2644,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             h(
               "div",
               { className: "sk-field" },
-              h("label", null, "工作区（可选）"),
+              h("label", { htmlFor: "sk-newtask-workspace" }, "工作区（可选）"),
               h(
                 "select",
-                { className: "sk-select", style: { width: "100%", padding: "7px 10px" }, value: workspaceId, onChange: (event) => setWorkspaceId(event.target.value) },
+                { id: "sk-newtask-workspace", className: "sk-select", style: { width: "100%", padding: "7px 10px" }, value: workspaceId, onChange: (event) => setWorkspaceId(event.target.value) },
                 h("option", { value: "" }, "不指定"),
                 (workspaces || []).map((workspace) => h("option", { key: workspace.id, value: workspace.id }, workspace.title)),
               ),
@@ -2562,9 +2674,14 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         excludeWorkspaces: Array.isArray(settings.excludeWorkspaces) ? settings.excludeWorkspaces.slice() : [],
       }));
       const [saving, setSaving] = React.useState(false);
+      // 入口偏好先暂存，取消不会写入；只有「保存设置」才真正落盘（需要刷新窗口生效）。
+      const [entryDraft, setEntryDraft] = React.useState(() => prefsMode(prefs));
+      const dialogRef = React.useRef(null);
+      useDialogFocus(dialogRef, onClose);
+      useBodyScrollLock();
       const set = (patch) => setDraft((value) => ({ ...value, ...patch }));
-      const entryMode = prefsMode(prefs);
-      const chooseEntry = (mode) => onPrefsChange(modePrefs(mode));
+      const entryMode = entryDraft;
+      const chooseEntry = (mode) => setEntryDraft(mode);
       const toggleWorkspace = (id) => {
         setDraft((value) => {
           const set = new Set(value.excludeWorkspaces);
@@ -2577,7 +2694,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         setSaving(true);
         try {
           await command("settings.update", { patch: draft });
-          pushToast("设置已保存", "info");
+          const entryChanged = entryDraft !== prefsMode(prefs);
+          if (entryChanged) onPrefsChange(modePrefs(entryDraft));
+          pushToast(entryChanged ? "设置已保存；入口偏好需刷新窗口（Cmd+R）生效" : "设置已保存", "info");
           await onSave();
         } catch (cause) {
           pushToast(`保存失败：${cause.message}`, "error");
@@ -2587,14 +2706,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       };
       const exportJson = async () => {
         try {
-          const payload = await apiRequest("/export");
-          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = `super-kanban-${new Date().toISOString().slice(0, 10)}.json`;
-          link.click();
-          setTimeout(() => URL.revokeObjectURL(url), 2000);
+          await downloadExport();
           pushToast("已导出 JSON", "info");
         } catch (cause) {
           pushToast(`导出失败：${cause.message}`, "error");
@@ -2605,8 +2717,14 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         { className: "sk-modal-mask", onMouseDown: (event) => event.target === event.currentTarget && onClose() },
         h(
           "div",
-          { className: "sk-modal", role: "dialog", "aria-label": "看板设置" },
-          h("h3", null, h(Icon, { name: "settings", size: 15 }), "看板设置"),
+          {
+            className: "sk-modal",
+            ref: dialogRef,
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-labelledby": "sk-settings-title",
+          },
+          h("h3", { id: "sk-settings-title" }, h(Icon, { name: "settings", size: 15 }), "看板设置"),
           h(
             "div",
             { className: "sk-settings-row" },
@@ -2625,7 +2743,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             h("div", { className: "label" }, h("b", null, "扫描间隔"), h("span", null, "没有新对话时开销极小")),
             h(
               "select",
-              { className: "sk-select", value: draft.scanIntervalSeconds, onChange: (event) => set({ scanIntervalSeconds: Number(event.target.value) }) },
+              { className: "sk-select", "aria-label": "扫描间隔", value: draft.scanIntervalSeconds, onChange: (event) => set({ scanIntervalSeconds: Number(event.target.value) }) },
               [60, 120, 300, 600].map((seconds) => h("option", { key: seconds, value: seconds }, seconds < 60 ? `${seconds} 秒` : `${seconds / 60} 分钟`)),
             ),
           ),
@@ -2635,7 +2753,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             h("div", { className: "label" }, h("b", null, "初始扫描范围"), h("span", null, "首次纳入最近多少天的会话")),
             h(
               "select",
-              { className: "sk-select", value: draft.initialDays, onChange: (event) => set({ initialDays: Number(event.target.value) }) },
+              { className: "sk-select", "aria-label": "初始扫描范围", value: draft.initialDays, onChange: (event) => set({ initialDays: Number(event.target.value) }) },
               [7, 14, 30, 90].map((days) => h("option", { key: days, value: days }, `最近 ${days} 天`)),
             ),
           ),
@@ -2645,7 +2763,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             h("div", { className: "label" }, h("b", null, "AI 预算 · 单次扫描上限"), h("span", null, "超出后本次扫描降级为规则推断")),
             h(
               "select",
-              { className: "sk-select", value: draft.maxAiCallsPerScan, onChange: (event) => set({ maxAiCallsPerScan: Number(event.target.value) }) },
+              { className: "sk-select", "aria-label": "单次扫描 AI 调用上限", value: draft.maxAiCallsPerScan, onChange: (event) => set({ maxAiCallsPerScan: Number(event.target.value) }) },
               [10, 20, 40].map((value) => h("option", { key: value, value }, `${value} 次`)),
             ),
           ),
@@ -2655,7 +2773,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             h("div", { className: "label" }, h("b", null, "AI 预算 · 每日上限"), h("span", null, "超限后当日只跑规则并提示")),
             h(
               "select",
-              { className: "sk-select", value: draft.dailyAiCallLimit, onChange: (event) => set({ dailyAiCallLimit: Number(event.target.value) }) },
+              { className: "sk-select", "aria-label": "每日 AI 调用上限", value: draft.dailyAiCallLimit, onChange: (event) => set({ dailyAiCallLimit: Number(event.target.value) }) },
               [50, 150, 300, 500].map((value) => h("option", { key: value, value }, `${value} 次`)),
             ),
           ),
@@ -2675,10 +2793,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h(
             "div",
             { className: "sk-field" },
-            h("label", null, "显示与入口"),
+            h("span", { className: "sk-field-label", id: "sk-settings-entry-label" }, "显示与入口"),
             h(
               "div",
-              { className: "sk-entry-options" },
+              { className: "sk-entry-options", role: "group", "aria-labelledby": "sk-settings-entry-label" },
               [
                 { id: "both", label: "两者", desc: "左侧栏全页 + 会话右侧栏" },
                 { id: "page", label: "仅全局面板", desc: "只注册左侧栏「任务看板」" },
@@ -2689,6 +2807,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   {
                     key: option.id,
                     type: "button",
+                    "aria-pressed": entryMode === option.id,
                     className: cx("sk-entry-option", entryMode === option.id && "is-on"),
                     onClick: () => chooseEntry(option.id),
                   },
@@ -2702,16 +2821,17 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h(
             "div",
             { className: "sk-field" },
-            h("label", null, "排除工作区"),
+            h("span", { className: "sk-field-label", id: "sk-settings-exclude-label" }, "排除工作区"),
             h(
               "div",
-              { className: "sk-ws-pick" },
+              { className: "sk-ws-pick", role: "group", "aria-labelledby": "sk-settings-exclude-label" },
               (workspaces || []).map((workspace) =>
                 h(
                   "button",
                   {
                     key: workspace.id,
                     type: "button",
+                    "aria-pressed": draft.excludeWorkspaces.includes(workspace.id),
                     className: cx("sk-chip", draft.excludeWorkspaces.includes(workspace.id) && "on"),
                     onClick: () => toggleWorkspace(workspace.id),
                     title: workspace.path,
@@ -2724,7 +2844,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           ),
           h(
             "div",
-            { className: "sk-inline-actions", style: { borderTop: "1px solid var(--dsw-alias-border-l1)", paddingTop: 11 } },
+            { className: "sk-inline-actions", style: { borderTop: "0.5px solid var(--dsw-alias-border-l1)", paddingTop: 11 } },
             h(
               "button",
               { type: "button", className: "sk-btn", onClick: () => onScan("full") },
@@ -2860,7 +2980,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const pageClass = cx("sk-page", surface === "side" && "is-side", "sk-tier-" + tier);
 
       const [toasts, pushToast] = useToasts();
-      const { data, error, loading, reload, setData } = useBoardData(pushToast);
+      const { data, error, loading, reload, setData } = useBoardData();
       const [filters, setFilters] = React.useState(readFilters);
       const searchRef = React.useRef(null);
       const [drawerId, setDrawerId] = React.useState(null);
@@ -2891,7 +3011,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             else if (filterOpen) setFilterOpen(false);
             return;
           }
-          if (typing) return;
+          if (typing || hasOpenDialog()) return;
           if (event.key === "/") {
             event.preventDefault();
             if (searchRef.current) searchRef.current.focus();
@@ -2925,7 +3045,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const usage = usageOf(data);
       const activeFilterCount = (filters.priority ? 1 : 0) + (filters.source ? 1 : 0) + (filters.tag ? 1 : 0) + (filters.showArchived ? 1 : 0);
       const clearFilters = () => setFilters({ workspace: "", priority: "", source: "", tag: "", query: "", showArchived: false });
-      const tags = React.useMemo(() => allTags(tasks.filter((task) => !task.archived)), [tasks.length, data && data.generatedAt]);
+      const tags = React.useMemo(() => allTags(tasks.filter((task) => !task.archived)), [tasks]);
 
       const visible = React.useMemo(() => {
         const query = filters.query.trim().toLowerCase();
@@ -2937,15 +3057,24 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           if (filters.source === "ai" && task.origin === "manual") return false;
           if (filters.source === "manual" && task.origin !== "manual") return false;
           if (query) {
-            const haystack = [task.title, task.goal, task.workspaceTitle, ...(task.tags || []), ...((task.sessions || []).map((session) => session.title))]
-              .filter(Boolean)
-              .join(" ")
-              .toLowerCase();
+            // v2 的 goal 是对象，直接拼接会变成 "[object Object]"；搜索覆盖目标/关键事实/问题/下一步。
+            const goal = goalInfoOf(task);
+            const parts = [
+              task.title,
+              goal && goal.text,
+              task.workspaceTitle,
+              ...(task.tags || []),
+              ...keyFactsOf(task).map((fact) => fact.text),
+              ...(Array.isArray(task.issues) ? task.issues.map((issue) => issue && issue.text) : []),
+              ...(Array.isArray(task.nextSteps) ? task.nextSteps : []),
+              ...(Array.isArray(task.sessions) ? task.sessions.map((session) => session && session.title) : []),
+            ];
+            const haystack = parts.filter(Boolean).join(" ").toLowerCase();
             if (!haystack.includes(query)) return false;
           }
           return true;
         });
-      }, [tasks, filters, data && data.generatedAt]);
+      }, [tasks, filters]);
 
       const byStatus = React.useMemo(() => {
         const map = { backlog: [], in_progress: [], blocked: [], done: [] };
@@ -2960,7 +3089,14 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const drawerTask = drawerId ? tasks.find((task) => task.id === drawerId) : null;
 
       const scanRunning = scan.state === "running";
-      const scanPct = scan.total > 0 ? Math.round((scan.processed / scan.total) * 100) : 0;
+      // 读屏播报扫描状态（可见区已有文字，这里不重复显示）。
+      const scanAnnounce = scanRunning
+        ? `扫描中 ${scan.processed || 0}/${scan.total || 0}`
+        : scan.state === "error"
+          ? `扫描失败：${scan.error || scan.message || "未知错误"}`
+          : scan.state === "done"
+            ? `扫描完成：新增 ${scan.newTasks || 0}，更新 ${scan.updatedTasks || 0}`
+            : "";
 
       // 扫描从 running 结束时给一次结论 toast（轮询里状态会先 running 后 done/error）。
       const prevScanState = React.useRef(null);
@@ -3023,11 +3159,16 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       if (loading && !data) {
         return h(
           "div",
-          { className: cx("sk-page", surface === "side" && "is-side", "sk-tier-" + tier), "data-super-kanban": "page", "data-surface": surface },
+          {
+            className: cx("sk-page", surface === "side" && "is-side", "sk-tier-" + tier),
+            "data-super-kanban": "page",
+            "data-surface": surface,
+            "aria-busy": "true",
+          },
           h(
             "header",
             { className: "sk-header-v3" },
-            h("div", { className: "sk-header-main" }, h("h1", { className: "sk-title-v3" }, "任务看板"), h("p", { className: "sk-stats-v3" }, "正在加载…")),
+            h("div", { className: "sk-header-main" }, h("h1", { className: "sk-title-v3" }, "任务看板"), h("p", { className: "sk-stats-v3", role: "status", "aria-live": "polite" }, "正在加载…")),
           ),
           h(
             "div",
@@ -3046,49 +3187,94 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h(
             "header",
             { className: "sk-header-v3" },
-            h("div", { className: "sk-header-main" }, h("h1", { className: "sk-title-v3" }, "任务看板"), h("p", { className: "sk-stats-v3" }, "看板加载失败：" + error)),
+            h("div", { className: "sk-header-main" }, h("h1", { className: "sk-title-v3" }, "任务看板")),
           ),
-          h("div", { className: "sk-empty-v3" }, h("button", { type: "button", className: "sk-text", onClick: () => reload(false) }, "重试")),
+          h(
+            "div",
+            { className: "sk-empty-v3", role: "alert" },
+            h("p", { className: "sk-error-title" }, h(Icon, { name: "alert", size: 14 }), "看板加载失败"),
+            h("p", { className: "sk-error-detail" }, error),
+            h(
+              "div",
+              { className: "sk-inline-actions" },
+              h("button", { type: "button", className: "sk-btn", onClick: () => reload(false) }, h(Icon, { name: "refresh", size: 12 }), "重试"),
+            ),
+            h("p", { className: "sk-note-tiny" }, "后台会自动重连，也可以稍等几秒。"),
+          ),
         );
       }
 
+      // 统计行：总数 / 各状态 / 归档 + 上一次扫描的持久结果（完整文字放 title，避免窄栏挤压）。
+      const statusCounts = (stats && stats.byStatus) || {};
+      const scanLastAt = settings.lastScanAt ? Date.parse(settings.lastScanAt) : scan.finishedAt ? Date.parse(scan.finishedAt) : null;
+      // Host 的 scan.message 已是完整结论（含 AI 调用 / 跳过 / 合并等信息），客户端不再拼接。
+      const scanOutcomeText =
+        scan.state === "done" ? String(scan.message || `扫描完成：${scan.processed || 0}/${scan.total || 0} 个会话`) : "";
+      const scanErrorText = scan.state === "error" ? String(scan.error || scan.message || "未知错误") : "";
+      const scanTitleText =
+        scan.state === "done" && Number(scan.aiCalls) > 0 && !/tokens/.test(scanOutcomeText)
+          ? `${scanOutcomeText} · ${fmtTokens(scan.tokens)} tokens`
+          : scanOutcomeText || scanErrorText;
+      const archivedCount = Number(stats.archived) || 0;
       const statsLine = h(
         React.Fragment,
         null,
         h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-total" }), `${stats.total || tasks.length} 项`),
         h("span", { className: "sk-sep" }, "·"),
-        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-in_progress" }), `${(stats.byStatus && stats.byStatus.in_progress) || 0} 进行中`),
+        // 0 待办 / 0 已归档不再占位，避免统计行被无信息量内容挤占（列头本身已显示计数）。
+        Number(statusCounts.backlog) > 0
+          ? h(
+              React.Fragment,
+              null,
+              h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-backlog" }), `${statusCounts.backlog} 待办`),
+              h("span", { className: "sk-sep" }, "·"),
+            )
+          : null,
+        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-in_progress" }), `${Number(statusCounts.in_progress) || 0} 进行中`),
         h("span", { className: "sk-sep" }, "·"),
-        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-blocked" }), `${(stats.byStatus && stats.byStatus.blocked) || 0} 受阻`),
+        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-blocked" }), `${Number(statusCounts.blocked) || 0} 受阻`),
         h("span", { className: "sk-sep" }, "·"),
-        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-done" }), `${(stats.byStatus && stats.byStatus.done) || 0} 完成`),
+        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-done" }), `${Number(statusCounts.done) || 0} 完成`),
+        archivedCount > 0
+          ? h(
+              React.Fragment,
+              null,
+              h("span", { className: "sk-sep" }, "·"),
+              h("span", { className: "sk-stats-group is-archived" }, h("span", { className: "sk-dot is-total" }), `${archivedCount} 已归档`),
+            )
+          : null,
         h("span", { className: "sk-sep" }, "·"),
         scanRunning
           ? h(
               React.Fragment,
               null,
               h("span", { className: "sk-status-dot is-running" }),
-              `扫描中 ${scan.processed}/${scan.total}`,
+              h("span", null, `扫描中 ${scan.processed || 0}/${scan.total || 0}`),
               h("button", { type: "button", className: "sk-textlink", onClick: cancelScan }, "取消"),
             )
-          : h(
-              React.Fragment,
-              null,
-              h("span", { className: cx("sk-status-dot", scan.state === "error" && "is-error") }),
-              `上次扫描 ${relTime(settings.lastScanAt ? Date.parse(settings.lastScanAt) : null)}`,
-            ),
+          : scan.state === "error"
+            ? h(
+                React.Fragment,
+                null,
+                h("span", { className: "sk-status-dot is-error" }),
+                h("span", { className: "sk-scan-error", title: scanTitleText }, `上次扫描失败：${scanErrorText}`),
+                h("button", { type: "button", className: "sk-textlink", onClick: () => startScan("incremental") }, "重试"),
+              )
+            : h(
+                React.Fragment,
+                null,
+                h("span", { className: "sk-status-dot" }),
+                h(
+                  "span",
+                  { className: "sk-scan-outcome", title: scanTitleText },
+                  `上次扫描 ${relTime(scanLastAt)}${scanOutcomeText ? " · " + scanOutcomeText : ""}`,
+                ),
+              ),
       );
 
       const exportJson = async () => {
         try {
-          const payload = await apiRequest("/export");
-          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = "super-kanban-" + new Date().toISOString().slice(0, 10) + ".json";
-          link.click();
-          setTimeout(() => URL.revokeObjectURL(url), 2000);
+          await downloadExport();
           pushToast("已导出 JSON", "info");
         } catch (cause) {
           pushToast("导出失败：" + cause.message, "error");
@@ -3103,11 +3289,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         const ok = host.openPage ? host.openPage() : false;
         if (!ok) pushToast("当前环境无法切换到全页面板", "error");
       };
-      const goFullscreen = () => {
-        const ok = host.toggleFullscreen ? host.toggleFullscreen(rootRef.current) : false;
-        if (!ok) pushToast("当前环境不支持全屏切换", "error");
-      };
-
       const exportMenuItems = [{ label: "导出 JSON", icon: "file", onClick: exportJson }];
 
       const scanButton = h(
@@ -3115,7 +3296,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         {
           type: "button",
           className: "sk-iconbtn-v3" + (scanRunning ? " is-busy" : ""),
-          title: scanRunning ? "扫描中，点击取消" : "AI 扫描",
+          title: scanRunning ? "扫描中，点击取消" : settings.aiEnabled === false ? "扫描（仅规则）" : "AI 扫描",
+          "aria-label": scanRunning ? "取消扫描" : settings.aiEnabled === false ? "扫描（仅规则）" : "扫描会话",
+          "aria-busy": scanRunning ? "true" : undefined,
           onClick: scanRunning ? cancelScan : () => startScan("incremental"),
           disabled: !scanRunning && scanBusy,
         },
@@ -3133,14 +3316,22 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           { open: moreOpen, onClose: () => setMoreOpen(false), items },
           h(
             "button",
-            { type: "button", className: "sk-iconbtn-v3", title: "更多（导出）", onClick: () => setMoreOpen((value) => !value) },
+            {
+              type: "button",
+              className: "sk-iconbtn-v3",
+              title: "更多（导出）",
+              "aria-label": "更多操作（导出 JSON）",
+              "aria-haspopup": "menu",
+              "aria-expanded": moreOpen,
+              onClick: () => setMoreOpen((value) => !value),
+            },
             h(Icon, { name: "more", size: 15 }),
           ),
         );
       const settingsButton = actionIcon("settings", "设置", () => setSettingsOpen(true));
       const newTextButton = h(
         "button",
-        { type: "button", className: "sk-btn-primary-v3", onClick: () => setNewTaskStatus("backlog"), title: "新建任务（n）" },
+        { type: "button", className: "sk-btn-primary-v3", onClick: () => setNewTaskStatus("backlog"), title: "新建任务（n）", "aria-label": "新建任务" },
         "新建",
       );
 
@@ -3178,6 +3369,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   h(Icon, { name: "search", size: 14 }),
                   h("input", {
                     ref: searchRef,
+                    "aria-label": "搜索任务、会话或标签",
                     value: filters.query,
                     placeholder: "搜索任务 / 会话 / 标签",
                     onChange: (event) => setFilters((value) => ({ ...value, query: event.target.value })),
@@ -3195,10 +3387,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         "div",
         { ref: attachRoot, className: pageClass, "data-super-kanban": "page", "data-surface": surface, "data-tier": tier, "data-root-width": rootWidth, "data-tick": nowTick },
         headerNode,
+        h("div", { className: "sk-sr-only", role: "status", "aria-live": "polite", "aria-atomic": "true" }, scanAnnounce),
         error
           ? h(
               "div",
-              { className: "sk-banner" },
+              { className: "sk-banner", role: "alert" },
               h(Icon, { name: "alert", size: 13 }),
               h("span", { className: "grow" }, `连接异常：${error}（看板显示上一次数据）`),
               h("button", { type: "button", className: "sk-btn ghost", style: { padding: "2px 8px" }, onClick: () => reload(false) }, "重试"),
@@ -3214,6 +3407,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               "select",
               {
                 className: "sk-select sk-ws-select",
+                "aria-label": "按工作区筛选",
                 value: filters.workspace,
                 title: "按工作区筛选",
                 onChange: (event) => setFilters((value) => ({ ...value, workspace: event.target.value })),
@@ -3233,6 +3427,8 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               {
                 type: "button",
                 className: cx("sk-slim-icon", activeFilterCount > 0 && "is-on"),
+                "aria-expanded": filterOpen,
+                "aria-haspopup": "true",
                 onClick: () => setFilterOpen((value) => !value),
                 title: "筛选任务",
               },
@@ -3243,7 +3439,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             filterOpen
               ? h(
                   "div",
-                  { className: "sk-filter-popover" },
+                  { className: "sk-filter-popover", role: "group", "aria-label": "筛选条件" },
                   h(
                     "div",
                     { className: "sk-filter-row" },
@@ -3251,11 +3447,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                     h(
                       "div",
                       { className: "sk-filter-chips" },
-                      h("button", { type: "button", className: cx("sk-chip", !filters.priority && "on"), onClick: () => setFilters((value) => ({ ...value, priority: "" })) }, "全部"),
+                      h("button", { type: "button", "aria-pressed": !filters.priority, className: cx("sk-chip", !filters.priority && "on"), onClick: () => setFilters((value) => ({ ...value, priority: "" })) }, "全部"),
                       PRIORITY_ORDER.map((priority) =>
                         h(
                           "button",
-                          { key: priority, type: "button", className: cx("sk-chip", filters.priority === priority && "on"), onClick: () => setFilters((value) => ({ ...value, priority: value.priority === priority ? "" : priority })) },
+                          { key: priority, type: "button", "aria-pressed": filters.priority === priority, className: cx("sk-chip", filters.priority === priority && "on"), onClick: () => setFilters((value) => ({ ...value, priority: value.priority === priority ? "" : priority })) },
                           priority,
                         ),
                       ),
@@ -3268,9 +3464,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                     h(
                       "div",
                       { className: "sk-filter-chips" },
-                      h("button", { type: "button", className: cx("sk-chip", !filters.source && "on"), onClick: () => setFilters((value) => ({ ...value, source: "" })) }, "全部"),
-                      h("button", { type: "button", className: cx("sk-chip", filters.source === "ai" && "on"), onClick: () => setFilters((value) => ({ ...value, source: value.source === "ai" ? "" : "ai" })) }, "AI 自动"),
-                      h("button", { type: "button", className: cx("sk-chip", filters.source === "manual" && "on"), onClick: () => setFilters((value) => ({ ...value, source: value.source === "manual" ? "" : "manual" })) }, "手动"),
+                      h("button", { type: "button", "aria-pressed": !filters.source, className: cx("sk-chip", !filters.source && "on"), onClick: () => setFilters((value) => ({ ...value, source: "" })) }, "全部"),
+                      h("button", { type: "button", "aria-pressed": filters.source === "ai", className: cx("sk-chip", filters.source === "ai" && "on"), onClick: () => setFilters((value) => ({ ...value, source: value.source === "ai" ? "" : "ai" })) }, "AI 自动"),
+                      h("button", { type: "button", "aria-pressed": filters.source === "manual", className: cx("sk-chip", filters.source === "manual" && "on"), onClick: () => setFilters((value) => ({ ...value, source: value.source === "manual" ? "" : "manual" })) }, "手动"),
                     ),
                   ),
                   tags.length
@@ -3280,7 +3476,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                         h("div", { className: "sk-filter-label" }, "标签"),
                         h(
                           "select",
-                          { className: "sk-select", style: { width: "100%" }, value: filters.tag, onChange: (event) => setFilters((value) => ({ ...value, tag: event.target.value })) },
+                          { className: "sk-select", "aria-label": "按标签筛选", style: { width: "100%" }, value: filters.tag, onChange: (event) => setFilters((value) => ({ ...value, tag: event.target.value })) },
                           h("option", { value: "" }, "全部标签"),
                           tags.slice(0, 24).map((tag) => h("option", { key: tag, value: tag }, tag)),
                         ),
@@ -3291,7 +3487,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                     { className: "sk-filter-foot" },
                     h(
                       "button",
-                      { type: "button", className: cx("sk-chip", filters.showArchived && "on"), onClick: () => setFilters((value) => ({ ...value, showArchived: !value.showArchived })) },
+                      { type: "button", "aria-pressed": filters.showArchived, className: cx("sk-chip", filters.showArchived && "on"), onClick: () => setFilters((value) => ({ ...value, showArchived: !value.showArchived })) },
                       "含归档",
                     ),
                     h("button", { type: "button", className: "sk-clear", onClick: clearFilters }, "清空筛选"),
@@ -3351,7 +3547,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                     }),
                   ),
                 ),
-        drawerTask ? h(TaskDrawer, { task: drawerTask, ctxProps, onClose: () => setDrawerId(null), onChanged: () => reload(true), pushToast }) : null,
+        drawerTask
+          ? h(TaskDrawer, { task: drawerTask, ctxProps, settings, onClose: () => setDrawerId(null), onChanged: () => reload(true), pushToast })
+          : null,
         newTaskStatus !== null
           ? h(NewTaskModal, { defaultStatus: newTaskStatus, workspaces, onClose: () => setNewTaskStatus(null), onCreate: async () => { setNewTaskStatus(null); await reload(true); }, pushToast })
           : null,
@@ -3364,7 +3562,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               onPrefsChange: (next) => {
                 writePrefs(next);
                 setPrefs(next);
-                pushToast("入口偏好已保存，刷新窗口（Cmd+R）生效", "info");
               },
               onClose: () => setSettingsOpen(false),
               onSave: async () => { setSettingsOpen(false); await reload(true); },
@@ -3372,7 +3569,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               pushToast,
             })
           : null,
-        h("div", { className: "sk-toasts" }, toasts.map((toast) => h("div", { key: toast.id, className: cx("sk-toast", toast.tone === "error" && "error") }, toast.text))),
+        h(
+          "div",
+          { className: "sk-toasts", role: "status", "aria-live": "polite", "aria-atomic": "false" },
+          toasts.map((toast) => h("div", { key: toast.id, className: cx("sk-toast", toast.tone === "error" && "error") }, toast.text)),
+        ),
       );
     }
 
@@ -3540,25 +3741,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           } catch (cause) {
             return { ok: false, reason: "init-failed", error: String((cause && cause.message) || cause) };
           }
-        },
-        toggleFullscreen(el) {
-          try {
-            const sidebarRight = ctx.get("sidebarRight");
-            if (
-              sidebarRight &&
-              typeof sidebarRight.focusedTarget === "function" &&
-              typeof sidebarRight.toggleFullscreen === "function"
-            ) {
-              const target = sidebarRight.focusedTarget(el);
-              if (target) {
-                sidebarRight.toggleFullscreen(target);
-                return true;
-              }
-            }
-          } catch {
-            /* sidebar service unavailable */
-          }
-          return false;
         },
       };
 

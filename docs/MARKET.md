@@ -19,7 +19,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 | 分发物 | 地址 / 名称 | 状态 |
 | --- | --- | --- |
-| 市场索引（Discover 用） | `https://topmindspace.github.io/dsh-super-kanban/index.json` | 已上线（GitHub Pages，源目录 `docs/`；随 Release 自动更新版本） |
+| 市场索引（Discover 用） | `https://topmindspace.github.io/dsh-super-kanban/index.json` | 已上线（GitHub Pages，经典「从分支部署」：`main` 分支 `/docs`；Release 后由 workflow 自动更新索引并提交） |
 | npm 包 | `dsh-super-kanban`（npm latest） | 由 GitHub Actions 在打 tag 时自动发布（需仓库 Secret `NPM_TOKEN`）；发布可能进入 staged 待批准 |
 | Git 仓库 | `https://github.com/topmindspace/dsh-super-kanban` | 公开 |
 | 本地/手动安装 | 仓库内 `./install.sh` | 可用 |
@@ -35,6 +35,24 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 3. 在列表中选中 **Super Kanban** → 打开详情页（`versions` 里会列出索引中的全部可用版本）→ **安装** 目标版本 → 启用 → 刷新窗口（`Cmd+R`）
 
 > 如果你的 DSH 版本还没有 Discover 能力，直接使用方式 B（npm）或方式 C（Git 仓库）。
+
+### GitHub Pages 发布路径（维护者事实）
+
+落地页与索引**不是**用 GitHub Actions 部署的：仓库 Settings → Pages 使用经典模式
+**Deploy from a branch**（`main` / `/docs`），页面地址为
+`https://topmindspace.github.io/dsh-super-kanban/`。因此：
+
+- `docs/index.html` 是真实对外落地页，`docs/index.json` 是被 Discover 拉取的索引；
+- `docs/.nojekyll` 关闭 Jekyll 处理，保证 `index.json` 与静态资源按原样发布；
+- **不需要也不应添加** `.github/workflows/pages.yml`：改为 Actions 部署会改变 Pages 的发布来源
+  （需要仓库设置切换为 GitHub Actions），与现有经典部署冲突，且对"几 KB 静态文件"没有收益；
+- Release workflow 的 `market-index` job 在发布成功后重新生成 `docs/index.json` 并提交到 `main`，
+  Pages 会随 `main` 的新 commit 自动重建；
+- CI 的 `npm run check:docs` 会校验落地页（`lang`、`<title>`、指向 `./index.json` 的链接、
+  `.nojekyll`、无硬编码版本号、本地资源存在），防止页面提前失效。
+
+> 落地页显示的"当前版本"由页面在运行时 `fetch("./index.json")` 读取，不在 HTML 里写死，
+> 因此版本升级不需要改 `docs/index.html`。
 
 ### 方式 B：npm 包名
 
@@ -118,24 +136,35 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 ## 5. 发布流程（维护者）
 
 ```bash
-# 1. 版本与变更
-npm version 0.4.1            # 更新 package.json / 打 tag（版本号以本次发布为准）
-npm test && npm run validate
+# 0. 版本变更（package.json + CHANGELOG.md 必须同步）
+npm version 0.4.1 --no-git-tag-version   # 只改 package.json 的版本号（版本号以本次发布为准）
+#   - 在 CHANGELOG.md 顶部添加 "## [0.4.1] - YYYY-MM-DD" 与底部 tag 链接
+#   - 提交这一步，使工作区保持干净
+git add package.json CHANGELOG.md && git commit -m "chore: release v0.4.1"
 
-# 2. 更新市场索引（提交 commit 后）
+# 1. 更新市场索引并提交（索引的 git source 会 pin 到上一步的 commit）
 npm run market:index
-git add docs/index.json && git commit -m "chore: refresh market index"
+git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for v0.4.1"
+
+# 2. 全量自检（测试 + 校验 + 隐私 + 文档 + 版本一致性）
+npm run check
 
 # 3. 发布（二选一）
 #  A) 推荐：GitHub Actions 自动发布 npm
 #     - 先在 npmjs.com 创建 Automation token，存为仓库 Secret：NPM_TOKEN
 #     - push tag 触发 .github/workflows/release.yml
+#     - verify job 会再次执行 npm run check（含 check:docs / check:version），
+#       tag 与 package.json / CHANGELOG / 索引不一致会直接失败
 git tag v0.4.1 && git push origin main --tags
 
 #  B) 本地发布
 npm login
 npm publish --access public
 ```
+
+> 也可以直接运行 `npm run release`（`scripts/release.mjs`）：它要求工作区干净（版本 commit 已完成），
+> 自动重新生成市场索引并依次运行全部检查，然后打印需要执行的指数提交与 tag 命令。
+> `--dry-run` 只做检查与索引 schema 校验，不写文件。
 
 ### npm staged release 批准（首次发布/开启 staged publishing 时）
 

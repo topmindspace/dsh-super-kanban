@@ -5,9 +5,14 @@
  *   - session discovery + rules/LLM analysis on an automatic scan schedule
  *   - merge policy (stable session↔task binding, locked fields, history)
  *   - persistence (state.json / sessions-cache.json)
- *   - the HTTP surface consumed by plugin/client.js (see docs/DEV-CONTRACT.md)
+ *   - the HTTP surface consumed by client.js (contract: docs/CONTRACT.md)
  *
- * Public surface (also the contract with plugin/index.mjs):
+ * Module boundaries: sessions.mjs = read-only session parsing; analyzer-*.mjs =
+ * the two analysis engines; store.mjs = persistence + migrations; http.mjs =
+ * protocol/payload helpers; auth.mjs = owner admission; titles.mjs = merge
+ * scoring. This file owns board state + orchestration only.
+ *
+ * Public surface (also the contract with index.mjs):
  *   createKanbanService({ ctx }) -> { handle(req,res,{route,url,method}), start(), stop() }
  */
 import fs from "node:fs";
@@ -17,24 +22,36 @@ import { homedir } from "node:os";
 import { createSessionSource } from "./sessions.mjs";
 import { analyzeSessionRules, normalizeAnalysis, titleSimilarity } from "./analyzer-rules.mjs";
 import { createLlmAnalyzer } from "./analyzer-llm.mjs";
+import { badRequest, classifyError, clipText, conflict, decodeId, isStringArray, json, notFound, readBody } from "./http.mjs";
+import { titleMergeScore } from "./titles.mjs";
 import {
   ARTIFACT_LIMIT,
   createStore,
   DEFAULT_SETTINGS,
   EVIDENCE_LIMIT,
   emptyScanState,
+  GOAL_TEXT_LIMIT,
+  ISSUE_LIMIT,
   KEYFACT_LIMIT,
+  KEYFACT_TEXT_LIMIT,
+  MILESTONE_LIMIT,
   newManualTaskId,
+  NEXTSTEP_LIMIT,
+  NEXTSTEP_TEXT_LIMIT,
   normalizeSettingsPatch,
+  positiveSeqOrNull,
   pushHistory,
   rolloverUsage,
   shortId,
   stableTaskId,
   SUBTASK_LIMIT,
+  SUBTASK_TEXT_LIMIT,
+  TAG_LIMIT,
+  TAG_TEXT_LIMIT,
+  TITLE_TEXT_LIMIT,
   truncateTask,
 } from "./store.mjs";
 
-const API_PREFIX = "/super-kanban/api";
 const DAY = 86_400_000;
 const MAX_AI_CONCURRENCY = 2;
 const MAX_SESSIONS_PER_TASK = 12;
@@ -42,62 +59,11 @@ const MIN_AI_INTERVAL_MS = 180_000; // v2: same-session re-analysis cooldown
 const FIELD_NAMES = ["title", "goal", "status", "progress", "priority", "tags", "issues", "nextSteps", "milestones"];
 const LOCKABLE_FIELDS = [...FIELD_NAMES, "keyFacts", "subtasks", "artifacts", "goalObject"];
 const STATUSES = ["backlog", "in_progress", "blocked", "done"];
+/** Chinese labels for generated prompt text (users read the prompt, not the raw key). */
+const STATUS_LABELS = { backlog: "待办", in_progress: "进行中", blocked: "受阻", done: "已完成" };
 const PRIORITIES = ["P0", "P1", "P2", "P3"];
 const SSE_HEARTBEAT_MS = 15_000;
-
-/* ------------------------------------------------------------------ */
-/* HTTP helpers                                                        */
-/* ------------------------------------------------------------------ */
-
-function json(res, status, body) {
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-  });
-  res.end(JSON.stringify(body));
-}
-
-function readBody(req, limit = 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > limit) {
-        reject(Object.assign(new Error("request-too-large"), { code: "invalid-input" }));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      try {
-        resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {});
-      } catch {
-        reject(Object.assign(new Error("invalid-json"), { code: "invalid-input" }));
-      }
-    });
-    req.on("error", (error) => reject(Object.assign(error, { code: "invalid-input" })));
-  });
-}
-
-function badRequest(message) {
-  return Object.assign(new Error(message), { code: "invalid-input" });
-}
-
-function notFound(message) {
-  return Object.assign(new Error(message), { code: "not-found" });
-}
-
-function clipText(value, max) {
-  const text = typeof value === "string" ? value : "";
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
-function isStringArray(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
+const SSE_MAX_CLIENTS = 32;
 
 /* ------------------------------------------------------------------ */
 /* Service                                                             */
@@ -133,10 +99,26 @@ export function createKanbanService({ ctx } = {}) {
   let suppressPersist = false;
   let scanDigestBytes = []; // digest byte sizes of the current scan (usage.lastScan.digestBytesAvg)
 
-  for (const diagnostic of loaded.diagnostics) {
-    logger?.warn?.(`[super-kanban] store: ${diagnostic.kind}: ${diagnostic.message}`);
+  /** Host loggers are external code: a broken logger must never break the board. */
+  function logInfo(message) {
+    try {
+      logger?.info?.(message);
+    } catch {
+      /* ignore logger failures */
+    }
   }
-  logger?.info?.(
+  function logWarn(message) {
+    try {
+      logger?.warn?.(message);
+    } catch {
+      /* ignore logger failures */
+    }
+  }
+
+  for (const diagnostic of loaded.diagnostics) {
+    logWarn(`[super-kanban] store: ${diagnostic.kind}: ${diagnostic.message}`);
+  }
+  logInfo(
     `[super-kanban] host ready · home=${dshHome} · tasks=${state.tasks.length} · sessions cached=${Object.keys(cache.sessions).length}`,
   );
 
@@ -146,6 +128,12 @@ export function createKanbanService({ ctx } = {}) {
     if (sseClients.size === 0) return;
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const client of [...sseClients]) {
+      // A client that half-closed without firing 'close' yet is dropped instead
+      // of accumulating buffered payloads in memory.
+      if (client.res.writableEnded || client.res.destroyed) {
+        removeSseClient(client);
+        continue;
+      }
       try {
         client.res.write(payload);
       } catch {
@@ -199,7 +187,7 @@ export function createKanbanService({ ctx } = {}) {
     try {
       store.saveState(state);
     } catch (error) {
-      logger?.warn?.(`[super-kanban] failed to save state: ${String(error?.message || error)}`);
+      logWarn(`[super-kanban] failed to save state: ${String(error?.message || error)}`);
     }
   }
 
@@ -207,13 +195,13 @@ export function createKanbanService({ ctx } = {}) {
     try {
       store.saveCache(cache);
     } catch (error) {
-      logger?.warn?.(`[super-kanban] failed to save session cache: ${String(error?.message || error)}`);
+      logWarn(`[super-kanban] failed to save session cache: ${String(error?.message || error)}`);
     }
   }
 
   /** Persist state at most every few seconds during a long scan. */
   function schedulePersist() {
-    if (saveTimer || suppressPersist) return;
+    if (saveTimer || suppressPersist || stopped) return;
     saveTimer = setTimeout(() => {
       saveTimer = null;
       persistState();
@@ -371,30 +359,19 @@ export function createKanbanService({ ctx } = {}) {
     };
   }
 
-  function dedupeByText(items, limit) {
-    const seen = new Set();
-    const result = [];
-    for (const item of items || []) {
-      const text = typeof item?.text === "string" ? item.text.trim() : "";
-      if (!text) continue;
-      const key = text.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      result.push({ ...item, text });
-      if (result.length >= limit) break;
-    }
-    return result;
-  }
-
   function mergeKeyFacts(primary = [], secondary = []) {
     const merged = dedupeByText([...(primary || []), ...(secondary || [])], KEYFACT_LIMIT);
-    return merged.map((fact, index) => ({
-      id: fact.id || shortId("k", `${fact.sessionId || ""}:${fact.seq || 0}:${fact.text}:${index}`),
-      text: clipText(fact.text, 60),
-      kind: ["status", "progress", "issue", "decision", "artifact", "goal"].includes(fact.kind) ? fact.kind : "status",
-      sessionId: fact.sessionId || null,
-      seq: Number(fact.seq) || 0,
-    }));
+    return merged.map((fact, index) => {
+      // Never invent seq 0: unresolved citations stay null (UI hides them).
+      const seq = positiveSeqOrNull(fact.seq);
+      return {
+        id: fact.id || shortId("k", `${fact.sessionId || ""}:${seq ?? "na"}:${fact.text}:${index}`),
+        text: clipText(fact.text, KEYFACT_TEXT_LIMIT),
+        kind: ["status", "progress", "issue", "decision", "artifact", "goal"].includes(fact.kind) ? fact.kind : "status",
+        sessionId: fact.sessionId || null,
+        seq,
+      };
+    });
   }
 
   function mergeSubtasks(...sources) {
@@ -406,10 +383,10 @@ export function createKanbanService({ ctx } = {}) {
         if (!text) continue;
         const item = {
           id: subtask.id || shortId("s", `${subtask.source || "ai"}:${text}`),
-          text: clipText(text, 40),
+          text: clipText(text, SUBTASK_TEXT_LIMIT),
           done: subtask.done === true,
           source: ["ai", "todo", "manual"].includes(subtask.source) ? subtask.source : "ai",
-          seq: Number(subtask.seq) || 0,
+          seq: positiveSeqOrNull(subtask.seq),
         };
         if (item.source === "manual") manual.push(item);
         else others.push(item);
@@ -448,13 +425,56 @@ export function createKanbanService({ ctx } = {}) {
   }
 
   /**
-   * A task marked done must not keep unfinished subtasks (imported TODO plans can
-   * be stale); close them so progress/subtask state stays self-consistent.
+   * Unfinished subtasks the user owns (source manual) or explicitly locked via
+   * `lockedFields: ["subtasks"]`. These may never be auto-closed by an AI/rule
+   * "done" verdict: the user's checklist is authoritative for their own work.
+   */
+  function trustedUnfinishedSubtasks(task) {
+    if (!task || !Array.isArray(task.subtasks)) return [];
+    const subtasksLocked = (task.lockedFields || []).includes("subtasks");
+    return task.subtasks.filter((subtask) => !subtask.done && (subtask.source === "manual" || subtasksLocked));
+  }
+
+  /**
+   * Keep a card in_progress when an AI/rule verdict says done but the user still
+   * has unfinished manual (or locked) subtasks. The proposal stays visible in the
+   * task history, so the user can decide to finish it from the board.
+   * Returns true when the status was downgraded.
+   */
+  function keepInProgressForUnfinishedUserWork(task, engine) {
+    if (!task || task.status !== "done") return false;
+    // The user owns the status field when locked; never override their choice.
+    if ((task.lockedFields || []).includes("status")) return false;
+    const unfinished = trustedUnfinishedSubtasks(task);
+    if (unfinished.length === 0) return false;
+    const manual = unfinished.filter((subtask) => subtask.source === "manual").length;
+    const reason = manual > 0 ? `${manual} 个手动子任务` : `${unfinished.length} 个锁定的子任务`;
+    const label = engine === "llm" ? "AI" : "规则引擎";
+    task.status = "in_progress";
+    pushHistory(task, {
+      kind: "status",
+      from: "done",
+      to: "in_progress",
+      by: "ai",
+      note: `${label}建议完成，但仍有 ${reason}未完成；保持进行中，请手动确认后归档`,
+    });
+    return true;
+  }
+
+  /**
+   * A task marked done must not keep unfinished *generated* subtasks (imported
+   * TODO plans can be stale); close them so progress/subtask state stays
+   * self-consistent. User-owned (manual) subtasks and locked subtask lists are
+   * never touched automatically.
    */
   function closeSubtasksForDoneTask(task) {
     if (!task || task.status !== "done" || !Array.isArray(task.subtasks) || task.subtasks.length === 0) return false;
-    if (!task.subtasks.some((subtask) => !subtask.done)) return false;
-    task.subtasks = task.subtasks.map((subtask) => ({ ...subtask, done: true }));
+    if ((task.lockedFields || []).includes("subtasks")) return false;
+    const closable = task.subtasks.filter((subtask) => !subtask.done && subtask.source !== "manual");
+    if (closable.length === 0) return false;
+    task.subtasks = task.subtasks.map((subtask) =>
+      !subtask.done && subtask.source !== "manual" ? { ...subtask, done: true } : subtask,
+    );
     return true;
   }
 
@@ -478,7 +498,7 @@ export function createKanbanService({ ctx } = {}) {
 
   function goalObjectFor(analysis, context, status) {
     const sessionGoal = context?.sessionGoal;
-    const text = clipText(sessionGoal?.text || analysis?.goalText || analysis?.goal || "", 160);
+    const text = clipText(sessionGoal?.text || analysis?.goalText || analysis?.goal || "", GOAL_TEXT_LIMIT);
     const doneStatus = status === "done" ? "done" : null;
     if (sessionGoal?.text) {
       return { text, status: sessionGoal.status === "done" || doneStatus === "done" ? "done" : "active", source: "session" };
@@ -524,7 +544,12 @@ export function createKanbanService({ ctx } = {}) {
     }
     if (closeSubtasksForDoneTask(task)) changed = true;
     if (syncProgressFromSubtasks(task)) changed = true;
-    if (task.status === "done" && !(task.lockedFields || []).includes("progress") && task.progress !== 100) {
+    if (
+      task.status === "done" &&
+      !(task.lockedFields || []).includes("progress") &&
+      task.progress !== 100 &&
+      trustedUnfinishedSubtasks(task).length === 0
+    ) {
       task.progress = 100;
       changed = true;
     }
@@ -609,42 +634,6 @@ export function createKanbanService({ ctx } = {}) {
   }
 
   /* --------------------- cross-session duplicate merge --------------- */
-
-  function normalizeTitleKey(value) {
-    return String(value || "")
-      .toLowerCase()
-      .replace(/[^\p{Letter}\p{Number}]+/gu, "");
-  }
-
-  function titleBigrams(value) {
-    const text = normalizeTitleKey(value);
-    const set = new Set();
-    for (let index = 0; index < text.length - 1; index++) set.add(text.slice(index, index + 2));
-    return set;
-  }
-
-  function titleBigramSimilarity(left, right) {
-    const a = titleBigrams(left);
-    const b = titleBigrams(right);
-    if (a.size === 0 || b.size === 0) return 0;
-    let overlap = 0;
-    for (const gram of a) if (b.has(gram)) overlap += 1;
-    return overlap / (a.size + b.size - overlap);
-  }
-
-  function titleCharOverlap(left, right) {
-    const a = new Set(normalizeTitleKey(left));
-    const b = new Set(normalizeTitleKey(right));
-    if (a.size === 0 || b.size === 0) return 0;
-    let overlap = 0;
-    for (const char of a) if (b.has(char)) overlap += 1;
-    return overlap / Math.min(a.size, b.size);
-  }
-
-  /** Conservative duplicate score: bigram Jaccard, char overlap discounted. */
-  function titleMergeScore(left, right) {
-    return Math.max(titleBigramSimilarity(left, right), titleCharOverlap(left, right) * 0.9);
-  }
 
   function dedupeByText(items, limit) {
     const seen = new Set();
@@ -759,7 +748,7 @@ export function createKanbanService({ ctx } = {}) {
     });
     if (state.deletedLog.length > 50) state.deletedLog = state.deletedLog.slice(-50);
     truncateTask(target);
-    logger?.info?.(`[super-kanban] merged duplicate task「${clipText(source.title, 30)}」into「${clipText(target.title, 30)}」`);
+    logInfo(`[super-kanban] merged duplicate task「${clipText(source.title, 30)}」into「${clipText(target.title, 30)}」`);
   }
 
   function sessionEntryFromMeta(meta, evidenceCount = 0) {
@@ -936,44 +925,56 @@ export function createKanbanService({ ctx } = {}) {
         await runScanBody(scanMode);
       } catch (error) {
         failure = error;
-        logger?.warn?.(`[super-kanban] scan failed: ${String(error?.message || error)}`);
+        logWarn(`[super-kanban] scan failed: ${String(error?.message || error)}`);
       } finally {
-        const finishedAt = new Date();
-        state.scan.state = failure ? "error" : "done";
-        state.scan.finishedAt = finishedAt.toISOString();
-        state.scan.error = failure ? String(failure?.message || failure) : null;
-        if (failure) state.scan.message = `扫描失败：${state.scan.error}`;
-        else if (scanCancel) state.scan.message = "扫描已取消（已完成部分保留）";
-        else if (!state.scan.message || !String(state.scan.message).startsWith("扫描完成")) {
-          state.scan.message = `扫描完成：${state.scan.processed}/${state.scan.total} 个会话`;
+        // Finalization must never reject: scanPromise is the scan mutex, so a
+        // throw here would leave every future scan permanently "busy" and emit
+        // an unhandled rejection into the host process.
+        try {
+          finalizeScan(failure, startedAt);
+        } catch (error) {
+          logWarn(`[super-kanban] scan finalize failed: ${String(error?.message || error)}`);
+        } finally {
+          scanPromise = null;
+          scanAbort = null;
         }
-        state.settings.lastScanAt = finishedAt.toISOString();
-        state.activity = computeActivity();
-        const durationMs = Math.max(0, finishedAt.getTime() - startedAt.getTime());
-        const digestBytesAvg =
-          scanDigestBytes.length > 0
-            ? Math.round(scanDigestBytes.reduce((sum, value) => sum + value, 0) / scanDigestBytes.length)
-            : 0;
-        state.usage = rolloverUsage(state.usage);
-        state.usage.lastScan = {
-          calls: state.scan.aiCalls,
-          tokens: state.scan.tokens,
-          durationMs,
-          digestBytesAvg,
-        };
-        recordUsage({ calls: state.scan.aiCalls, tokens: state.scan.tokens });
-        persistState();
-        persistCache();
-        scanPromise = null;
-        scanAbort = null;
-        broadcastScan(true);
-        emitChanged("scan", state.scan.newTasks + state.scan.updatedTasks);
-        logger?.info?.(
-          `[super-kanban] scan ${failure ? "failed" : "done"} · processed=${state.scan.processed}/${state.scan.total} · new=${state.scan.newTasks} updated=${state.scan.updatedTasks} aiCalls=${state.scan.aiCalls}`,
-        );
       }
     })();
     return { ok: true, data: { accepted: true, mode: scanMode, startedAt: state.scan.startedAt } };
+  }
+
+  /** Commit one scan's outcome, usage counters and derived board data. */
+  function finalizeScan(failure, startedAt) {
+    const finishedAt = new Date();
+    state.scan.state = failure ? "error" : "done";
+    state.scan.finishedAt = finishedAt.toISOString();
+    state.scan.error = failure ? String(failure?.message || failure) : null;
+    if (failure) state.scan.message = `扫描失败：${state.scan.error}`;
+    else if (scanCancel) state.scan.message = "扫描已取消（已完成部分保留）";
+    else if (!state.scan.message || !String(state.scan.message).startsWith("扫描完成")) {
+      state.scan.message = `扫描完成：${state.scan.processed}/${state.scan.total} 个会话`;
+    }
+    state.settings.lastScanAt = finishedAt.toISOString();
+    state.activity = computeActivity();
+    const durationMs = Math.max(0, finishedAt.getTime() - startedAt.getTime());
+    const digestBytesAvg = scanDigestBytes.length
+      ? Math.round(scanDigestBytes.reduce((sum, value) => sum + value, 0) / scanDigestBytes.length)
+      : 0;
+    state.usage = rolloverUsage(state.usage);
+    state.usage.lastScan = {
+      calls: state.scan.aiCalls,
+      tokens: state.scan.tokens,
+      durationMs,
+      digestBytesAvg,
+    };
+    recordUsage({ calls: state.scan.aiCalls, tokens: state.scan.tokens });
+    persistState();
+    persistCache();
+    broadcastScan(true);
+    emitChanged("scan", state.scan.newTasks + state.scan.updatedTasks);
+    logInfo(
+      `[super-kanban] scan ${failure ? "failed" : "done"} · processed=${state.scan.processed}/${state.scan.total} · new=${state.scan.newTasks} updated=${state.scan.updatedTasks} aiCalls=${state.scan.aiCalls}`,
+    );
   }
 
   async function runScanBody(mode) {
@@ -1006,7 +1007,10 @@ export function createKanbanService({ ctx } = {}) {
         let meta = hydrationSafe(discovered);
         let parsed = null;
         const preEligible = meta ? isEligibleForAutoTask(meta, cutoff) : false;
-        const aiMissing = state.settings.aiEnabled && !cached?.meta?.aiAt;
+        // "aiMissing" re-parses a session that never got an AI verdict. Only
+        // worth the parse when a credential actually exists; otherwise every
+        // incremental scan would re-parse every unchanged session forever.
+        const aiMissing = state.settings.aiEnabled && analyzer.hasCredential() && !cached?.meta?.aiAt;
         const forceMainParse =
           preEligible && (mode === "full" || changed || !findTaskBySession(discovered.id) || aiMissing);
         if (changed || forceMainParse) {
@@ -1017,11 +1021,17 @@ export function createKanbanService({ ctx } = {}) {
             meta = entry.meta;
             cache.sessions[discovered.id] = entry;
           } catch (error) {
-            cache.sessions[discovered.id] = cache.sessions[discovered.id] || {
+            const previous = cache.sessions[discovered.id];
+            const message = String(error?.message || error);
+            // Keep the last good metadata (the board stays usable) but store the
+            // CURRENT signature: an unchanged corrupt file is then not re-read on
+            // every scan. A partially-written log keeps growing, so its sigKey
+            // changes and the next scan retries the parse automatically.
+            cache.sessions[discovered.id] = {
               sigKey: discovered.sigKey,
-              meta: { ...meta, parseError: String(error?.message || error) },
+              meta: { ...(previous?.meta || meta || {}), id: discovered.id, parseError: message },
             };
-            logger?.warn?.(`[super-kanban] skip session ${discovered.id}: ${String(error?.message || error)}`);
+            logWarn(`[super-kanban] skip session ${discovered.id}: ${message}`);
             continue;
           }
         } else if (meta) {
@@ -1074,7 +1084,7 @@ export function createKanbanService({ ctx } = {}) {
         }
       } catch (error) {
         // One broken session must never break the scan.
-        logger?.warn?.(`[super-kanban] session ${discovered.id} failed: ${String(error?.message || error)}`);
+        logWarn(`[super-kanban] session ${discovered.id} failed: ${String(error?.message || error)}`);
       }
       if (state.scan.processed % 6 === 0) schedulePersist();
     }
@@ -1089,12 +1099,12 @@ export function createKanbanService({ ctx } = {}) {
       if (aiJobs.length > 0) {
         if (!analyzer.hasCredential()) {
           state.scan.message = "未找到账号凭证，使用规则引擎分析";
-          logger?.warn?.("[super-kanban] no DeepSeek account credential found; falling back to rules engine");
+          logWarn("[super-kanban] no DeepSeek account credential found; falling back to rules engine");
         } else if (scanBudget <= 0) {
           aiBudgetExhausted = true;
           state.scan.message = `今日 AI 预算已用完（${state.usage.calls}/${state.settings.dailyAiCallLimit}），本次仅规则分析`;
           for (const job of aiJobs) job.llmBudgetExceeded = true;
-          logger?.warn?.("[super-kanban] daily AI budget exhausted; rules only this scan");
+          logWarn("[super-kanban] daily AI budget exhausted; rules only this scan");
         } else {
           state.scan.message = `AI 研判 ${aiJobs.length} 个会话（预算 ${scanBudget}）…`;
           broadcastScan(true);
@@ -1126,7 +1136,7 @@ export function createKanbanService({ ctx } = {}) {
                   const entry = cache.sessions[jobMeta.id] || { sigKey: jobMeta.sigKey, meta: jobMeta };
                   entry.meta = { ...(entry.meta || jobMeta), llmError: result.error };
                   cache.sessions[jobMeta.id] = entry;
-                  logger?.warn?.(`[super-kanban] LLM analysis degraded to rules: ${result.error}`);
+                  logWarn(`[super-kanban] LLM analysis degraded to rules: ${result.error}`);
                 }
               }),
             );
@@ -1198,7 +1208,7 @@ export function createKanbanService({ ctx } = {}) {
         }
         if (applied > 0) schedulePersist();
       } catch (error) {
-        logger?.warn?.(`[super-kanban] merge failed for ${meta.id}: ${String(error?.message || error)}`);
+        logWarn(`[super-kanban] merge failed for ${meta.id}: ${String(error?.message || error)}`);
       }
     }
 
@@ -1338,7 +1348,12 @@ export function createKanbanService({ ctx } = {}) {
     for (const source of [primary || [], secondary || []]) {
       for (const item of source) {
         if (!item || typeof item !== "object") continue;
-        const key = `${item.sessionId || ""}:${item.kind || ""}:${item.seq ?? ""}`;
+        // Unresolved citations (seq null) must dedupe by identity/content, not by
+        // a shared "null" slot, otherwise distinct quoted evidence disappears.
+        const key =
+          item.seq === null || item.seq === undefined
+            ? `${item.sessionId || ""}:${item.kind || ""}:t:${item.id || item.quote || item.text || ""}`
+            : `${item.sessionId || ""}:${item.kind || ""}:s:${item.seq}`;
         if (seen.has(key)) continue;
         seen.add(key);
         merged.push(item);
@@ -1379,12 +1394,12 @@ export function createKanbanService({ ctx } = {}) {
     const goal = goalObjectFor(analysis, context, analysis.status);
     const task = {
       id: taskId,
-      title: clipText(analysis.title, 60),
+      title: clipText(analysis.title, TITLE_TEXT_LIMIT),
       goal,
       status: STATUSES.includes(analysis.status) ? analysis.status : "backlog",
       progress,
       priority: PRIORITIES.includes(analysis.priority) ? analysis.priority : "P2",
-      tags: Array.isArray(analysis.tags) ? analysis.tags.slice(0, 4) : [],
+      tags: Array.isArray(analysis.tags) ? analysis.tags.slice(0, TAG_LIMIT) : [],
       origin: "auto",
       workspaceId: meta.workspaceId || null,
       workspaceTitle: meta.workspaceTitle || null,
@@ -1409,7 +1424,7 @@ export function createKanbanService({ ctx } = {}) {
     };
     closeSubtasksForDoneTask(task);
     syncProgressFromSubtasks(task);
-    if (task.status === "done") task.progress = 100;
+    if (task.status === "done" && trustedUnfinishedSubtasks(task).length === 0) task.progress = 100;
     syncGoalStatus(task);
     refreshSessionEvidenceCounts(task);
     pushHistory(task, {
@@ -1437,9 +1452,9 @@ export function createKanbanService({ ctx } = {}) {
       return true;
     };
 
-    if (setField("title", clipText(analysis.title, 60))) otherChanged = true;
+    if (setField("title", clipText(analysis.title, TITLE_TEXT_LIMIT))) otherChanged = true;
     if (setField("priority", PRIORITIES.includes(analysis.priority) ? analysis.priority : undefined)) otherChanged = true;
-    if (setField("tags", Array.isArray(analysis.tags) ? analysis.tags.slice(0, 4) : undefined)) otherChanged = true;
+    if (setField("tags", Array.isArray(analysis.tags) ? analysis.tags.slice(0, TAG_LIMIT) : undefined)) otherChanged = true;
     if (setField("issues", analysis.issues)) otherChanged = true;
     if (setField("nextSteps", analysis.nextSteps)) otherChanged = true;
     if (!locked.has("milestones") && Array.isArray(analysis.milestones) && analysis.milestones.length > 0) {
@@ -1458,7 +1473,7 @@ export function createKanbanService({ ctx } = {}) {
         ? goalObjectFor(analysis, context, analysis.status)
         : { ...(task.goal || { text: "", status: "none", source: "task" }) };
       if (!context.sessionGoal?.text && analysis.goalText) {
-        nextGoal.text = clipText(analysis.goalText, 160);
+        nextGoal.text = clipText(analysis.goalText, GOAL_TEXT_LIMIT);
         nextGoal.source = "task";
       }
       nextGoal.status = nextGoal.text ? (analysis.status === "done" ? "done" : nextGoal.status === "done" ? "done" : "active") : "none";
@@ -1468,10 +1483,13 @@ export function createKanbanService({ ctx } = {}) {
       }
     }
 
-    // Subtasks: deterministic todo import + LLM subtasks + user's manual items.
+    // Subtasks: AI/rule subtasks + deterministic todo import + the user's items.
+    // User-managed items always win; previously imported todo items are kept so a
+    // re-analysis that returns no subtasks cannot silently wipe them.
     if (!locked.has("subtasks")) {
       const manual = (task.subtasks || []).filter((subtask) => subtask.source === "manual");
-      const mergedSubtasks = mergeSubtasks(analysis.subtasks || [], context.subtasks || [], manual);
+      const deterministic = (task.subtasks || []).filter((subtask) => subtask.source === "todo");
+      const mergedSubtasks = mergeSubtasks(analysis.subtasks || [], context.subtasks || [], deterministic, manual);
       if (JSON.stringify(mergedSubtasks) !== JSON.stringify(task.subtasks || [])) {
         task.subtasks = mergedSubtasks;
         otherChanged = true;
@@ -1514,9 +1532,15 @@ export function createKanbanService({ ctx } = {}) {
       task.status = analysis.status;
       pushHistory(task, { kind: "status", from, to: analysis.status, by: "ai", note: `${options.engine} 研判` });
     }
+    // Trust rule: an AI/rule "done" may never silently finish user-owned work.
+    // Unfinished manual subtasks (or a locked subtask list) keep the card
+    // in_progress; the proposal is preserved in history instead.
+    if (keepInProgressForUnfinishedUserWork(task, options.engine)) otherChanged = true;
     if (closeSubtasksForDoneTask(task)) otherChanged = true;
     syncProgressFromSubtasks(task);
-    if (task.status === "done" && !locked.has("progress")) task.progress = 100;
+    if (task.status === "done" && !locked.has("progress") && trustedUnfinishedSubtasks(task).length === 0) {
+      task.progress = 100;
+    }
     if (syncGoalStatus(task)) otherChanged = true;
     if (otherChanged) {
       pushHistory(task, {
@@ -1594,7 +1618,7 @@ export function createKanbanService({ ctx } = {}) {
         state.workspaces = computeWorkspaces(discovery.workspaces, [...sessionsById.values()]);
       }
     } catch (error) {
-      logger?.warn?.(`[super-kanban] refresh session index failed: ${String(error?.message || error)}`);
+      logWarn(`[super-kanban] refresh session index failed: ${String(error?.message || error)}`);
     }
   }
 
@@ -1602,21 +1626,34 @@ export function createKanbanService({ ctx } = {}) {
     "task.create"(payload) {
       const title = typeof payload.title === "string" ? payload.title.trim() : "";
       if (!title) throw badRequest("title-required");
-      const sessionMeta = metaForSessionId(payload.sessionId);
+      const requestedSessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
+      // The session index may be empty before the first scan; look the session up
+      // on demand so a manual card can still be bound to its source session.
+      let sessionMeta = metaForSessionId(requestedSessionId);
+      if (!sessionMeta && requestedSessionId) {
+        refreshSessionIndex();
+        sessionMeta = metaForSessionId(requestedSessionId);
+      }
       const workspace = workspaceFromPayload(payload) || (sessionMeta ? workspaceById(sessionMeta.workspaceId) : null);
       const nowIso = new Date().toISOString();
       const task = {
         id: newManualTaskId(title),
-        title: clipText(title, 80),
+        title: clipText(title, TITLE_TEXT_LIMIT),
         goal: {
-          text: clipText(typeof payload.goal === "string" ? payload.goal : payload.goal?.text || "", 160),
+          // Trim like task.update does; an empty goal must end up as status none.
+          text: clipText((typeof payload.goal === "string" ? payload.goal : payload.goal?.text || "").trim(), GOAL_TEXT_LIMIT),
           status: "active",
           source: "task",
         },
         status: normalizedStatus(payload.status, "backlog"),
-        progress: Number.isFinite(Number(payload.progress)) ? Math.max(0, Math.min(100, Math.round(Number(payload.progress)))) : null,
+        progress:
+          payload.progress === null || payload.progress === undefined
+            ? null
+            : Number.isFinite(Number(payload.progress))
+              ? Math.max(0, Math.min(100, Math.round(Number(payload.progress))))
+              : null,
         priority: normalizedPriority(payload.priority, "P2"),
-        tags: isStringArray(payload.tags) ? payload.tags.slice(0, 4).map((tag) => clipText(tag, 12)) : [],
+        tags: isStringArray(payload.tags) ? payload.tags.slice(0, TAG_LIMIT).map((tag) => clipText(tag, TAG_TEXT_LIMIT)) : [],
         origin: "manual",
         workspaceId: workspace?.id || sessionMeta?.workspaceId || null,
         workspaceTitle: workspace?.title || sessionMeta?.workspaceTitle || null,
@@ -1650,7 +1687,8 @@ export function createKanbanService({ ctx } = {}) {
         archived: false,
         history: [],
       };
-      if (!task.goal.text) task.goal.status = "none";
+      // Same invariant as AI-created cards: goal.status follows task.status.
+      syncGoalStatus(task);
       if (sessionMeta) {
         state.suppressedSessions = state.suppressedSessions.filter((id) => id !== sessionMeta.id);
       }
@@ -1666,7 +1704,9 @@ export function createKanbanService({ ctx } = {}) {
       const patch = payload.patch && typeof payload.patch === "object" ? payload.patch : {};
       let otherChanged = false;
       for (const field of FIELD_NAMES) {
-        if (!(field in patch)) continue;
+        // hasOwn: a patch with "__proto__"/"constructor" keys must not be read
+        // through the prototype chain.
+        if (!Object.hasOwn(patch, field)) continue;
         const value = patch[field];
         if (field === "status") {
           const next = normalizedStatus(value, task.status);
@@ -1696,7 +1736,7 @@ export function createKanbanService({ ctx } = {}) {
         }
         if (field === "title") {
           if (typeof value === "string") {
-            const next = clipText(value.trim(), 60);
+            const next = clipText(value.trim(), TITLE_TEXT_LIMIT);
             if (next && next !== task.title) {
               task.title = next;
               otherChanged = true;
@@ -1707,7 +1747,7 @@ export function createKanbanService({ ctx } = {}) {
         if (field === "goal") {
           const goalText = typeof value === "string" ? value : value?.text;
           if (typeof goalText === "string") {
-            const next = { ...(task.goal || {}), text: clipText(goalText.trim(), 160), source: "task" };
+            const next = { ...(task.goal || {}), text: clipText(goalText.trim(), GOAL_TEXT_LIMIT), source: "task" };
             next.status = next.text ? (value?.status === "done" || task.status === "done" ? "done" : "active") : "none";
             if (JSON.stringify(next) !== JSON.stringify(task.goal)) {
               task.goal = next;
@@ -1718,21 +1758,28 @@ export function createKanbanService({ ctx } = {}) {
         }
         if (field === "tags") {
           if (isStringArray(value)) {
-            task.tags = value.slice(0, 6).map((tag) => clipText(tag, 12));
+            task.tags = value.slice(0, TAG_LIMIT).map((tag) => clipText(tag, TAG_TEXT_LIMIT));
             otherChanged = true;
           }
           continue;
         }
         if (field === "nextSteps") {
-          if (isStringArray(value)) {
-            task.nextSteps = value.slice(0, 8).map((step) => clipText(step, 160));
+          if (Array.isArray(value)) {
+            // Accept plain strings (normal UI payload) and {text} records; other
+            // shapes are dropped instead of being persisted unvalidated.
+            task.nextSteps = value
+              .slice(0, NEXTSTEP_LIMIT)
+              .map((step) => clipText(typeof step === "string" ? step : step?.text, NEXTSTEP_TEXT_LIMIT))
+              .filter(Boolean);
             otherChanged = true;
           }
           continue;
         }
         if (field === "issues" || field === "milestones") {
           if (Array.isArray(value)) {
-            task[field] = value.slice(0, field === "issues" ? 8 : 20);
+            // truncateTask() below sanitizes items; cap the array shape here so
+            // overlong payloads never reach the task object unbounded.
+            task[field] = value.slice(0, field === "issues" ? ISSUE_LIMIT : MILESTONE_LIMIT);
             otherChanged = true;
           }
           continue;
@@ -1816,9 +1863,15 @@ export function createKanbanService({ ctx } = {}) {
     "task.relink"(payload) {
       const task = requireTask(payload);
       if (!isStringArray(payload.sessionIds)) throw badRequest("sessionIds-required");
+      // Ids are opaque lookup keys persisted into state.json: reject path-ish or
+      // absurdly long values instead of storing attacker-shaped strings.
+      const sessionIds = payload.sessionIds
+        .map((id) => (id.length <= 200 && !id.includes("\0") && !id.includes("/") && !id.includes("\\") ? id : null))
+        .filter(Boolean);
+      if (sessionIds.length === 0) throw badRequest("sessionIds-invalid");
       refreshSessionIndex();
       const sessions = [];
-      for (const sessionId of payload.sessionIds.slice(0, MAX_SESSIONS_PER_TASK)) {
+      for (const sessionId of sessionIds.slice(0, MAX_SESSIONS_PER_TASK)) {
         const meta = metaForSessionId(sessionId);
         sessions.push(meta ? sessionEntryFromMeta(meta, 0) : { id: sessionId, title: sessionId, seqEnd: 0, evidenceCount: 0 });
       }
@@ -1830,7 +1883,7 @@ export function createKanbanService({ ctx } = {}) {
         task.workspaceTitle = firstMeta.workspaceTitle || task.workspaceTitle;
         task.workspacePath = firstMeta.workspacePath || task.workspacePath;
       }
-      state.suppressedSessions = state.suppressedSessions.filter((id) => !payload.sessionIds.includes(id));
+      state.suppressedSessions = state.suppressedSessions.filter((id) => !sessionIds.includes(id));
       task.updatedAt = new Date().toISOString();
       pushHistory(task, { kind: "edit", by: "user", note: `重新关联 ${sessions.length} 个来源会话` });
       if (task.origin === "auto") task.origin = "auto+edited";
@@ -1852,11 +1905,7 @@ export function createKanbanService({ ctx } = {}) {
 
     async "task.analyze"(payload) {
       const task = requireTask(payload);
-      if (scanPromise) {
-        const error = new Error("扫描进行中，请稍后再试");
-        error.code = "busy";
-        throw error;
-      }
+      if (scanPromise) throw conflict("扫描进行中，请稍后再试");
       refreshSessionIndex();
       const sessionIds = [...new Set([task.primarySessionId, ...(task.sessions || []).map((session) => session.id)].filter(Boolean))];
       if (sessionIds.length === 0) throw badRequest("task-has-no-session");
@@ -1877,7 +1926,7 @@ export function createKanbanService({ ctx } = {}) {
         try {
           parsed = source.loadParsed(meta);
         } catch (error) {
-          logger?.warn?.(`[super-kanban] analyze session ${sessionId} failed: ${String(error?.message || error)}`);
+          logWarn(`[super-kanban] analyze session ${sessionId} failed: ${String(error?.message || error)}`);
           continue;
         }
         parsedAny += 1;
@@ -1923,9 +1972,9 @@ export function createKanbanService({ ctx } = {}) {
             applyAiMeta(sessionId, meta, { digestBytes: Buffer.byteLength(digest, "utf8") });
           } else if (result.code === "budget") {
             budgetHit = true;
-            logger?.warn?.("[super-kanban] task.analyze budget exhausted; rules fallback");
+            logWarn("[super-kanban] task.analyze budget exhausted; rules fallback");
           } else {
-            logger?.warn?.(`[super-kanban] task.analyze LLM degraded: ${result.error}`);
+            logWarn(`[super-kanban] task.analyze LLM degraded: ${result.error}`);
           }
         }
         // Explicit analyze updates exactly this task (scan owns auto splitting).
@@ -1961,7 +2010,7 @@ export function createKanbanService({ ctx } = {}) {
       lines.push("## 任务");
       lines.push(`- 标题：${task.title}`);
       lines.push(`- 目标：${task.goal?.text || "未设置（请根据标题与会话判断）"}`);
-      lines.push(`- 当前状态：${task.status}${Number.isFinite(task.progress) ? `（进度 ${task.progress}%）` : ""}`);
+      lines.push(`- 当前状态：${STATUS_LABELS[task.status] || task.status}${Number.isFinite(task.progress) ? `（进度 ${task.progress}%）` : ""}`);
       if (task.workspaceTitle) lines.push(`- 工作区：${task.workspaceTitle}`);
       const keyFacts = (task.keyFacts || []).slice(0, 5);
       if (keyFacts.length) {
@@ -2057,7 +2106,15 @@ export function createKanbanService({ ctx } = {}) {
       if (!text) throw badRequest("text-required");
       task.subtasks = mergeSubtasks(
         task.subtasks || [],
-        [{ id: shortId("s", `manual:${task.id}:${Date.now()}:${text}`), text: clipText(text, 40), done: false, source: "manual", seq: 0 }],
+        [
+          {
+            id: shortId("s", `manual:${task.id}:${Date.now()}:${text}`),
+            text: clipText(text, SUBTASK_TEXT_LIMIT),
+            done: false,
+            source: "manual",
+            seq: null,
+          },
+        ],
       );
       reopenIfSubtasksUnfinished(task);
       syncProgressFromSubtasks(task);
@@ -2089,11 +2146,7 @@ export function createKanbanService({ ctx } = {}) {
       const original = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
       if (!original) throw badRequest("prompt-required");
       if (original.length > 3000) throw badRequest("prompt-too-long");
-      if (scanPromise) {
-        const error = new Error("扫描进行中，请稍后再试");
-        error.code = "busy";
-        throw error;
-      }
+      if (scanPromise) throw conflict("扫描进行中，请稍后再试");
       const dailyRemaining = dailyAiRemaining();
       if (!state.settings.aiEnabled || !analyzer.hasCredential() || dailyRemaining <= 0) {
         return { prompt: original, polished: false };
@@ -2129,8 +2182,9 @@ export function createKanbanService({ ctx } = {}) {
       const patch = payload.patch && typeof payload.patch === "object" ? payload.patch : payload;
       const normalized = normalizeSettingsPatch(patch);
       const previous = state.settings;
+      // normalizeSettingsPatch only returns contract settings keys, so a hostile
+      // patch can never add __proto__/lastScanAt/unknown properties here.
       state.settings = { ...state.settings, ...normalized };
-      if (Object.prototype.hasOwnProperty.call(normalized, "lastScanAt")) state.settings.lastScanAt = normalized.lastScanAt;
       if (JSON.stringify(previous) !== JSON.stringify(state.settings)) {
         state.workspaces = state.workspaces.map((workspace) => ({
           ...workspace,
@@ -2144,11 +2198,7 @@ export function createKanbanService({ ctx } = {}) {
 
     "scan.start"(payload) {
       const result = startScan(payload.mode === "full" ? "full" : "incremental");
-      if (!result.ok) {
-        const error = new Error(result.message || "扫描进行中");
-        error.code = result.error || "busy";
-        throw error;
-      }
+      if (!result.ok) throw Object.assign(new Error(result.message || "扫描进行中"), { code: result.error || "busy" });
       return result.data;
     },
 
@@ -2177,6 +2227,11 @@ export function createKanbanService({ ctx } = {}) {
   /* ------------------------------ routes --------------------------- */
 
   function handleSse(req, res) {
+    if (sseClients.size >= SSE_MAX_CLIENTS) {
+      // Bound host memory: every open tab holds a socket + timer.
+      json(res, 429, { ok: false, error: "too-many-clients", message: "too many event streams" });
+      return;
+    }
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
@@ -2194,16 +2249,20 @@ export function createKanbanService({ ctx } = {}) {
     }, SSE_HEARTBEAT_MS);
     if (typeof client.heartbeat.unref === "function") client.heartbeat.unref();
     sseClients.add(client);
+    const cleanup = () => removeSseClient(client);
+    // 'close' is the normal path; 'error' must be handled too, otherwise a
+    // socket error surfaces as an unhandled EventEmitter error and can take the
+    // host process down.
+    req.on("close", cleanup);
+    req.on("error", cleanup);
+    res.on("close", cleanup);
+    res.on("error", cleanup);
     try {
       res.write(`event: scan\ndata: ${JSON.stringify(state.scan)}\n\n`);
       res.write(`event: changed\ndata: ${JSON.stringify({ reason: "init", tasksChanged: state.tasks.length })}\n\n`);
     } catch {
       removeSseClient(client);
     }
-    const cleanup = () => removeSseClient(client);
-    req.on("close", cleanup);
-    req.on("error", cleanup);
-    res.on("close", cleanup);
   }
 
   function findSessionMeta(sessionId) {
@@ -2222,7 +2281,7 @@ export function createKanbanService({ ctx } = {}) {
         return meta;
       }
     } catch (error) {
-      logger?.warn?.(`[super-kanban] session lookup failed: ${String(error?.message || error)}`);
+      logWarn(`[super-kanban] session lookup failed: ${String(error?.message || error)}`);
     }
     return null;
   }
@@ -2236,7 +2295,9 @@ export function createKanbanService({ ctx } = {}) {
 
   function buildSessionResponse(sessionId, { after, limit }) {
     const meta = findSessionMeta(sessionId);
-    if (!meta) return null;
+    // A hand-edited/corrupt cache entry may have no usable file path; treat it as
+    // an unknown session instead of throwing a 500 from readFileSync(undefined).
+    if (!meta || typeof meta.file !== "string" || !meta.file) return null;
     const parsed = source.loadParsed(meta);
     const events = source.readApiEvents(parsed, { after, limit });
     const workspace = meta.workspaceId ? workspaceById(meta.workspaceId) : null;
@@ -2320,12 +2381,18 @@ export function createKanbanService({ ctx } = {}) {
       }
       if (route === "/command" && method === "POST") {
         const body = await readBody(req);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          json(res, 400, { ok: false, error: "invalid-input", message: "command body must be a JSON object" });
+          return;
+        }
         const op = typeof body.op === "string" ? body.op : "";
-        const handler = ops[op];
-        if (!handler) {
+        // hasOwn: ops inherits Object.prototype, so "constructor"/"toString"
+        // must be rejected as unknown ops instead of being called.
+        if (!Object.hasOwn(ops, op)) {
           json(res, 400, { ok: false, error: "unknown-op", message: `unknown op: ${op}` });
           return;
         }
+        const handler = ops[op];
         try {
           const data = await handler(body.payload && typeof body.payload === "object" ? body.payload : {});
           json(res, 200, { ok: true, data });
@@ -2354,16 +2421,22 @@ export function createKanbanService({ ctx } = {}) {
         return;
       }
       if (route.startsWith("/session/") && method === "GET") {
-        const sessionId = decodeURIComponent(route.slice("/session/".length));
+        // decodeId rejects malformed escapes and path separators: a session id is
+        // an opaque lookup key, never a filesystem path.
+        const sessionId = decodeId(route.slice("/session/".length));
         if (!sessionId) {
-          json(res, 400, { ok: false, error: "invalid-input", message: "session id required" });
+          json(res, 400, { ok: false, error: "invalid-input", message: "invalid session id" });
           return;
         }
-        const after = url?.searchParams?.get("after");
-        const limit = url?.searchParams?.get("limit");
+        // Empty/absent params keep the documented defaults; only real numbers
+        // are paging values (a non-numeric ?limit= must not disable the cap).
+        const afterParam = url?.searchParams?.get("after");
+        const limitParam = url?.searchParams?.get("limit");
+        const afterRaw = afterParam === null || afterParam === "" ? Number.NaN : Number(afterParam);
+        const limitRaw = limitParam === null || limitParam === "" ? Number.NaN : Number(limitParam);
         const payload = buildSessionResponse(sessionId, {
-          after: after === null || after === undefined || after === "" ? null : Number(after),
-          limit: limit ? Number(limit) : 200,
+          after: Number.isFinite(afterRaw) ? afterRaw : null,
+          limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 200,
         });
         if (!payload) {
           json(res, 404, { ok: false, error: "session-not-found", message: `session not found: ${sessionId}` });
@@ -2374,9 +2447,14 @@ export function createKanbanService({ ctx } = {}) {
       }
       json(res, 404, { ok: false, error: "not-found", route });
     } catch (error) {
-      logger?.warn?.(`[super-kanban] request failed ${method} ${route}: ${String(error?.message || error)}`);
+      logWarn(`[super-kanban] request failed ${method} ${route}: ${String(error?.message || error)}`);
+      const status = classifyError(error);
       if (!res.headersSent) {
-        json(res, 500, { ok: false, error: "internal", message: String(error?.message || error) });
+        try {
+          json(res, status, { ok: false, error: error?.code || "internal", message: String(error?.message || error) });
+        } catch {
+          /* socket already closed */
+        }
       } else {
         try {
           res.end();
@@ -2415,13 +2493,19 @@ export function createKanbanService({ ctx } = {}) {
     stopped = true;
     scanCancel = true;
     if (startupTimer) clearTimeout(startupTimer);
+    startupTimer = null;
     if (autoTimer) clearInterval(autoTimer);
+    autoTimer = null;
     if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
     if (scanBroadcastTimer) clearTimeout(scanBroadcastTimer);
+    scanBroadcastTimer = null;
     for (const client of [...sseClients]) removeSseClient(client);
+    // Flush any state the running scan already produced; the scan itself stops at
+    // its next checkpoint and its finalizer is exception-isolated.
     persistState();
     persistCache();
-    logger?.info?.("[super-kanban] host service stopped");
+    logInfo("[super-kanban] host service stopped");
   }
 
   // The plugin entry never calls start() today; boot autonomously but keep the

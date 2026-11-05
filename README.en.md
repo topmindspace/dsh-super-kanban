@@ -47,10 +47,10 @@ Super Kanban turns those conversations into a maintainable board:
 | 🤝 Session hand-off | "Continue this task" builds a structured prompt and (after your confirmation) puts it in the original or a new session input — never sends automatically |
 | ✅ Subtasks and goals | Subtask checklists (importable from session todos, writes back progress), task goal, and DSH Session Goal tracking |
 | 📦 Artifact tracking | Collects deliverables and written files; click to open them in the DSH document preview |
-| 🧾 Key facts first | Cards keep only title / meta / progress; the drawer leads with 3–6 key facts and keeps raw evidence collapsed |
+| 🧾 Key facts first | Cards keep only title / meta / progress; the drawer leads with 3 key facts (expandable to 6) and keeps raw evidence collapsed |
 | ✍️ Manual control | Create, edit, drag between columns, archive, delete, lock fields — AI never overwrites what you locked |
 | 🔄 Continuous maintenance | First scan in seconds, then incremental scans; new sessions join automatically and old tasks keep updating |
-| 🧠 Explainable | Every inference carries a confidence and a one-line reason — no black-box status changes |
+| 🧠 Explainable | The drawer shows the analysis engine / model / confidence / timestamp and a one-line reason, and any single card can be re-analyzed on demand — no black-box status changes |
 
 ## Features
 
@@ -68,6 +68,12 @@ Super Kanban turns those conversations into a maintainable board:
 - **Incremental gating**: the model is called only when user messages increase, a turn ends, or the session is analyzed for the first time. Live turns are never re-analyzed, and there is a minimum interval per session.
 - **Controllable budget**: per-scan and daily AI call limits are configurable; exceeding them automatically falls back to the rules engine. The settings page shows today's calls and tokens.
 - Re-scanning already analyzed sessions results in **zero AI calls**.
+
+### AI legibility and re-analysis
+
+- **Analysis block**: for analyzed tasks the drawer shows whether the result came from "AI 研判" (LLM) or "规则推断" (local rules), with the model, confidence, last-analysis time and a one-line reason; long reasons expand. "可能已过期" (possibly stale) appears only when the **source session had new activity after the analysis (more than 5 minutes later)** — with no new activity the previous analysis stays valid.
+- **Re-analyze one card**: drawer "⋯" → "重新研判" (re-analyze) re-runs analysis for that card only; while a scan is running it asks you to retry later, and when AI is offline or over budget it falls back to the rules engine and says so.
+- **Persistent scan outcome**: the stats line always ends with the last scan result, e.g. "上次扫描 2 分钟前 · 扫描完成：28/28 个会话 · 本次无 AI 调用" (last scan 2 minutes ago · scan finished: 28/28 sessions · no AI calls this time); failures show the reason plus "重试" (retry), running scans show progress plus "取消" (cancel). With AI disabled the scan button tooltip reads "扫描（仅规则）" (rules-only scan).
 
 ### Data and privacy
 
@@ -92,7 +98,8 @@ The same board can be opened in two ways:
 
 - **Right sidebar fullscreen**: the fullscreen control on the right sidebar header expands the board to the whole viewport; you can leave it at any time.
 - **Switching**: the "open in right sidebar" icon in the full-page header, or the "open as full page" icon in the right sidebar board.
-- **Entry preferences**: board settings → "Display and entry" offers "Both (default) / Full page only / Right sidebar only"; refresh the window after changing.
+- **Sidebar filters**: the right-sidebar layout keeps the workspace filter dropdown at **every width**; the narrow tier only compresses card metadata instead of hiding the filter entry.
+- **Entry preferences**: board settings → "Display and entry" offers "Both (default) / Full page only / Right sidebar only"; they are only written when you click "保存设置" (save settings), then take effect after reloading the window (entries already registered in the current window stay unchanged).
 
 ## Installation
 
@@ -108,7 +115,7 @@ The same board can be opened in two ways:
 3. Find **Super Kanban** in the list → open its page (the index lists every available version) → **Install** the version you want → enable
 4. Press `Cmd+R` in the DSH window (restart DSH if needed)
 
-> The market index becomes available after the first release is published to GitHub Pages; its content comes from this repository's `docs/`.
+> The market index is published from this repository's `docs/` via GitHub Pages (classic "deploy from a branch": branch `main`, folder `/docs`); its content is the committed `docs/index.json`.
 
 ### Option B: npm package
 
@@ -130,7 +137,7 @@ cd dsh-super-kanban
 ./install.sh -y       # link into the default desktop profile and register the plugin
 ```
 
-Or choose "local directory" in the DSH plugin page and point it at this repository root. After installing, reload the window and "任务看板" appears in the left sidebar.
+Or choose "local directory" in the DSH plugin page and point it at this repository root. `install.sh` needs `bash` and `python3` (usually already present on macOS/desktop setups). After installing, reload the window and "任务看板" appears in the left sidebar.
 
 ### Updating the plugin (important)
 
@@ -151,19 +158,21 @@ Detailed install / update / verification / rollback steps are in [docs/INSTALL.m
 
 1. Click **任务看板** in the left sidebar (or the board icon in a conversation header for the right-sidebar form).
 2. **Board**: four columns — Backlog / In progress / Blocked / Done; column headers show counts and status colors.
-3. **Cards**: status dot, title with an AI/rules marker, source workspace and last-activity time, plus restrained priority, issue count, artifact count, subtask progress and a progress line.
+3. **Cards**: status dot, title with an AI/rules marker, source workspace and last-activity time, plus restrained priority, issue count, artifact count, subtask progress and a progress line; done cards drop the progress line and keep only the status dot, archived cards carry an "已归档" (archived) marker.
 4. **Detail drawer** (click a card):
    - One-line status summary (click "Edit" to change fields)
-   - **Key facts** (3–6 items: key progress / decisions / issues from the session)
+   - **AI analysis**: engine ("AI 研判" / "规则推断"), model, confidence, last-analysis time and reason; "可能已过期" (possibly stale) appears when the source session had new activity after the analysis; the header "⋯" menu has "重新研判" to re-analyze this card only
+   - **Key facts** (3 shown by default, the rest behind "expand all")
    - **Subtasks**: check / add / delete; "import todos from session"; progress writes back automatically
-   - **Issues / next steps**
+   - **Issues / next steps**: 3 shown by default each, expandable to all
    - **Session linkage**: continue this task / open session
    - **Artifacts**: click to open in the DSH right-sidebar document preview
-   - Evidence and history (collapsed by default)
-5. **Filters**: workspace, priority, origin, tags, keyword search, show archived.
+   - Evidence and history (collapsed by default; the evidence list only shows the `#N` badge when the item resolves to a session event)
+   - While editing, a background update keeps your draft and shows "后台已更新；保存将覆盖 AI 的新结果" (background updated; saving will overwrite the new AI result)
+5. **Filters**: workspace, priority, origin, tags, keyword search (covers title / goal / key facts / issues / next steps / source sessions), show archived.
 6. **Toolbar** (persistent in the header): search, scan, settings gear, open in right sidebar, new task; the "⋯" menu only contains "Export JSON".
-7. **Scan**: click the scan button to trigger an incremental scan immediately; progress is shown live.
-8. **Settings** (gear icon): AI toggle, auto-scan, scan interval, initial scan range, AI budget, display and entry, excluded workspaces.
+7. **Scan**: click the scan button to trigger an incremental scan immediately; the stats line persistently shows the previous scan outcome, live progress plus "cancel" while running, and the failure reason plus "retry" on errors.
+8. **Settings** (gear icon): AI toggle, auto-scan, scan interval, initial scan range, AI budget (per-scan limit / daily limit), display and entry, excluded workspaces; entry preferences are only written when you click "保存设置" (save settings) and take effect after reloading the window.
 
 ### How "Continue this task" works
 
@@ -178,8 +187,18 @@ Detailed install / update / verification / rollback steps are in [docs/INSTALL.m
 
 - Automatic tasks are anchored to their source session; repeated scans update the same card instead of creating duplicates.
 - Fields you edit and lock (editing locks by default) are never overwritten by AI; unlock them in the drawer to hand them back.
-- Manual tasks (origin = manual) are never changed by automatic scans.
-- New cards do not need a session; once linked, AI fills in the analysis on the next scan.
+- Manual tasks (origin = manual) are never changed by automatic scans; new cards do not need a session.
+- **User work wins**: when AI/rules propose "done" but unfinished manual subtasks (or a locked subtask list) remain, the card stays "in progress" and a history note records why; a status you locked always wins; generated subtasks are auto-checked when the task is done.
+- The current release does **not** provide a UI to link/change a task's source session yet (the host interface exists; the UI is on the roadmap).
+
+### Not implemented yet (roadmap)
+
+The following are explicitly **not implemented**; please do not expect them from this release:
+
+- Linking/replacing a task's source session from the UI, or ignoring a session so it never creates cards (host ops exist, UI pending);
+- One-click quick capture of a task from the current session;
+- Board backup and import (only JSON export exists today);
+- UI internationalization (i18n); the UI is Chinese today, while the docs are bilingual.
 
 ### Shortcuts
 
@@ -252,7 +271,7 @@ By default incremental scans only analyze **changed sessions**; the per-scan AI 
 | DeepSeek Harness | `>= 0.2.1-rc.5 < 0.3.0` (verified on 0.2.1-rc.5 desktop) |
 | Node.js | `>= 22.19.0` (uses the built-in `node:zlib` zstd API) |
 | Platform | Verified on macOS desktop; other desktop platforms should work but are not individually verified |
-| Third-party dependencies | None (plugin and tooling scripts are dependency-free) |
+| Third-party dependencies | None (plugin and `scripts/` validators are dependency-free) |
 
 > The plugin relies on DSH's third-party plugin interfaces; major DSH upgrades may break compatibility. If the entry disappears after upgrading DSH, reinstall the plugin first — board data will not be lost.
 
@@ -268,7 +287,7 @@ A: Press `Cmd+R` to reload the window; restart DSH if it is still missing. If it
 A: Click the scan button in the header to trigger a manual scan, or check that "Auto scan" is enabled in settings.
 
 **Q: The AI judgment is wrong.**
-A: Open the card and edit the fields directly (editing locks them, so AI won't overwrite them later). To make AI re-judge it, continue the source session and wait for the next scan — the card updates automatically.
+A: Open the task drawer → "⋯" in the header → "重新研判" (re-analyze) to re-run analysis for that card only; or edit the fields directly (editing locks them, so AI won't overwrite them later). If the result is marked "可能已过期" (possibly stale), re-analyze it or wait for the next scan.
 
 **Q: I don't want certain workspaces on the board.**
 A: Settings gear in the board header → Excluded workspaces (multi-select).
@@ -280,17 +299,20 @@ A: An incremental scan calls `deepseek-flash` once per **changed** session; the 
 A: `~/.dsh/storages/super-kanban/` (`state.json` / `sessions-cache.json` / `backups/`). Uninstalling the plugin does not delete it.
 
 **Q: Can I export the board?**
-A: "⋯" in the board header → Export JSON, which downloads `super-kanban-YYYYMMDD.json`.
+A: "⋯" in the board header → Export JSON, which downloads `super-kanban-YYYY-MM-DD.json` (for example `super-kanban-2026-11-05.json`). The settings dialog also has an Export JSON button.
 
 ## Development and contributing
 
-- Zero third-party dependencies; tests run with `node --test`; `scripts/` contains validators, the privacy scanner and the market index generator.
+- Zero third-party dependencies; tests run with `node --test`; `scripts/` contains the validators, docs/version consistency checkers, the privacy scanner, the market index generator and the release helper.
 - Common commands:
 
 ```bash
 npm test              # unit tests
 npm run validate      # manifest, cordis patch, files and market index checks
 npm run check:privacy # scan for personal paths / credentials / session ids
+npm run check:docs    # links, anchors, screenshots and README.zh/en structure
+npm run check:version # package.json / CHANGELOG / market index / compatibility consistency
+npm run check         # run every check above (recommended before a PR)
 npm run market:index  # regenerate docs/index.json
 ```
 

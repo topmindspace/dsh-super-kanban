@@ -113,6 +113,10 @@ export const CONTENT_RULES = [
   {
     id: "api-key",
     regex: new RegExp(join("(?:^|[^A-Za-z0-9._-])", "s", "k-[A-Za-z0-9_-]{20,}"), "g"),
+    // Long kebab-case UI identifiers (`sk-settings-exclude-label`, used as
+    // element ids / aria-labelledby values) are not credentials: real API keys
+    // do not consist of 3+ all-lowercase word segments.
+    allow: (value) => /(?:^|[^A-Za-z0-9._-])sk-(?:[a-z][a-z0-9]*-){2,}[a-z][a-z0-9]*$/u.test(value),
   },
   {
     id: "aws-access-key",

@@ -25,6 +25,8 @@ logs and fixtures before submitting.
 - [ ] `npm test`
 - [ ] `npm run validate`
 - [ ] `npm run check:privacy`
+- [ ] `npm run check:docs` (docs, links, screenshots or workflows changed)
+- [ ] `npm run check:version` (version, CHANGELOG or compatibility claims changed)
 - [ ] `node --check` passes for the JavaScript files I touched
 - [ ] `npm pack --dry-run` shows the expected package contents (when packaging changed)
 - [ ] Added or updated tests for the behaviour change

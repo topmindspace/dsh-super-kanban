@@ -35,9 +35,14 @@ const ASYNC_SIGNAL_KINDS = new Set(["agent-message", "subagent-settled", "tool-j
 /**
  * Decompress an append-only DSH session buffer.
  * Returns "" for an empty buffer; throws only when nothing could be decoded.
+ * A truncated final frame degrades to the events that are still decodable.
  */
 export function decompressSessionBuffer(buf) {
   if (!buf || buf.length === 0) return "";
+  if (!Buffer.isBuffer(buf)) {
+    if (buf instanceof Uint8Array) buf = Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+    else return "";
+  }
   const starts = [];
   let cursor = 0;
   while ((cursor = buf.indexOf(ZSTD_MAGIC, cursor)) !== -1) {
@@ -105,8 +110,10 @@ export function parseJsonlEvents(text) {
         badLines += 1;
         continue;
       }
-      if (typeof event.seq !== "number") event.seq = index;
-      if (typeof event.time !== "number") event.time = 0;
+      // JSON allows huge/overflowing numbers (e.g. 1e999 → Infinity); those would
+      // poison sorting and Date math, so normalize them defensively.
+      if (typeof event.seq !== "number" || !Number.isFinite(event.seq)) event.seq = index;
+      if (typeof event.time !== "number" || !Number.isFinite(event.time) || Math.abs(event.time) > 8.64e15) event.time = 0;
       events.push(event);
     } catch {
       badLines += 1;
@@ -148,7 +155,7 @@ function shortHash(value, length = 10) {
 }
 
 export function isoDay(time) {
-  if (!time) return null;
+  if (!time || !Number.isFinite(time) || Math.abs(time) > 8.64e15) return null;
   return new Date(time).toISOString().slice(0, 10);
 }
 
@@ -266,6 +273,7 @@ export function extractArtifacts(parsed, { workspacePath = null, max = LOCAL_ART
   const seen = new Set();
   const chosen = [];
   for (const candidate of candidates) {
+    if (chosen.length >= max) break;
     if (seen.has(candidate.absPath)) continue;
     // Only advertise artifacts that still exist on disk (DSH preview must open).
     try {
@@ -275,7 +283,6 @@ export function extractArtifacts(parsed, { workspacePath = null, max = LOCAL_ART
     }
     seen.add(candidate.absPath);
     chosen.push(candidate);
-    if (chosen.length >= max) break;
   }
   return chosen.map((candidate) => ({
     id: `a_${shortHash(`${parsed.id}:${candidate.absPath}`)}`,
@@ -352,17 +359,6 @@ export function toolBrief(parsed, { baselineSeq = 0, workspacePath = null } = {}
     if (names.length >= 8) break;
   }
   return { files, commandNames: names.slice(0, 5) };
-}
-
-/** Trim a digest to a UTF-8 byte budget, keeping the head (higher priority). */
-function fitDigest(sections, maxBytes) {
-  let text = sections.filter(Boolean).join("\n");
-  while (Buffer.byteLength(text, "utf8") > maxBytes && text.length > 0) {
-    const excess = Buffer.byteLength(text, "utf8") - maxBytes;
-    const trimChars = Math.max(1, Math.ceil(excess / 2));
-    text = text.slice(0, Math.max(0, text.length - trimChars));
-  }
-  return text;
 }
 
 /**
@@ -466,13 +462,17 @@ export function createSessionSource({ dshHome } = {}) {
     let registry = { workspaces: [], sessionWorkspace: new Map() };
     try {
       const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-      const table = raw?.tables?.workspaces || {};
-      const order = Array.isArray(raw?.global?.workspaceIds) ? raw.global.workspaceIds : Object.keys(table);
+      if (!raw || typeof raw !== "object" || Array.isArray(raw) || !raw.tables || typeof raw.tables !== "object") {
+        diagnostics.push({ kind: "workspace-registry", message: "workspace.json has an unexpected shape" });
+        return { workspaces: [], sessionWorkspace: new Map(), diagnostics };
+      }
+      const table = raw.tables.workspaces && typeof raw.tables.workspaces === "object" ? raw.tables.workspaces : {};
+      const order = Array.isArray(raw.global?.workspaceIds) ? raw.global.workspaceIds : Object.keys(table);
       const workspaces = [];
       const sessionWorkspace = new Map();
       for (const id of order) {
         const entry = table[id];
-        if (!entry || !entry.path) continue;
+        if (!entry || typeof entry.path !== "string" || !entry.path) continue;
         const workspace = {
           id,
           title: entry.title || basenameOf(entry.path),
@@ -733,6 +733,9 @@ export function createSessionSource({ dshHome } = {}) {
    */
   function parseEvents(meta, events, diagnostics = []) {
     const sessionEvent = events.find((event) => event.type === "session") || {};
+    // `session` events carry their payload as `{type, seq, time, data:{id,cwd,…}}`.
+    // Keep a flat-event fallback for older logs written before that envelope.
+    const sessionInfo = sessionEvent.data && typeof sessionEvent.data === "object" ? sessionEvent.data : sessionEvent;
     const users = [];
     const assistants = [];
     const toolCallsById = new Map();
@@ -911,14 +914,14 @@ export function createSessionSource({ dshHome } = {}) {
     ]) {
       for (const item of list) if (!timeBySeq.has(item.seq)) timeBySeq.set(item.seq, item.time);
     }
-    const parentSession = typeof sessionEvent.parentSession === "string" ? sessionEvent.parentSession : meta.parentSession;
-    const delegationDepth = Number.isFinite(sessionEvent.delegationDepth)
-      ? Number(sessionEvent.delegationDepth)
+    const parentSession = typeof sessionInfo.parentSession === "string" ? sessionInfo.parentSession : meta.parentSession;
+    const delegationDepth = Number.isFinite(sessionInfo.delegationDepth)
+      ? Number(sessionInfo.delegationDepth)
       : parentSession
         ? Math.max(1, meta.delegationDepth || 1)
         : 0;
-    const createdAt = Number(sessionEvent.createdAt) || meta.createdAt || (events[0]?.time ?? 0);
-    const cwd = typeof sessionEvent.cwd === "string" ? sessionEvent.cwd : meta.cwd;
+    const createdAt = Number(sessionInfo.createdAt) || meta.createdAt || (events[0]?.time ?? 0);
+    const cwd = typeof sessionInfo.cwd === "string" ? sessionInfo.cwd : meta.cwd;
     const resolvedTitle =
       readableTitle(meta.title, users[0]?.text) ||
       readableTitle(title, users[0]?.text) ||
@@ -948,11 +951,11 @@ export function createSessionSource({ dshHome } = {}) {
       parentSession,
       delegationDepth,
       session: {
-        id: sessionEvent.id || meta.id,
+        id: sessionInfo.id || meta.id,
         createdAt,
         cwd: cwd || null,
-        origin: sessionEvent.origin || (delegationDepth > 0 ? "subagent" : "main"),
-        agentPreset: sessionEvent.agentPreset || null,
+        origin: sessionInfo.origin || (delegationDepth > 0 ? "subagent" : "main"),
+        agentPreset: sessionInfo.agentPreset || null,
       },
       title: resolvedTitle,
       titleSource,
@@ -1236,7 +1239,8 @@ export function createSessionSource({ dshHome } = {}) {
     }
 
     events.sort((a, b) => a.seq - b.seq || a.time - b.time);
-    const capped = Math.min(Math.max(1, limit), 500);
+    // Sanitize the paging window: a non-numeric ?limit= must not disable the cap.
+    const capped = Number.isFinite(limit) ? Math.min(Math.max(1, Math.floor(limit)), 500) : 200;
     if (after !== null && Number.isFinite(after)) {
       return events.filter((event) => event.seq > after).slice(0, capped);
     }

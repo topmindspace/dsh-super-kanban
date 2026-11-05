@@ -52,12 +52,36 @@
 
       <section>
         <h2>市场索引（供 Discover 添加）</h2>
-        <p><a href="./index.json">index.json</a> · format 1 · 当前版本 0.3.0 · MIT</p>
+        <p>
+          <a href="./index.json">index.json</a> · format 1 ·
+          <span id="index-version">版本列表以 index.json 为准</span> · MIT
+        </p>
+        <p class="muted">
+          本页与 <code>index.json</code> 由仓库 <code>docs/</code> 目录发布到 GitHub Pages；
+          每次 Release 后由维护者重新生成索引，页面上的版本号直接读取索引文件。
+        </p>
       </section>
 
       <footer>
         Super Kanban 是社区第三方插件，非 DeepSeek 官方产品。只读本机 DSH 会话，数据不出本机。
       </footer>
     </main>
+    <script>
+      // Keep the displayed version in sync with docs/index.json (no hard-coded version).
+      fetch("./index.json")
+        .then(function (response) {
+          if (!response.ok) throw new Error(String(response.status));
+          return response.json();
+        })
+        .then(function (index) {
+          var plugin = (index.plugins || [])[0];
+          var version = plugin && plugin.versions && plugin.versions[0] && plugin.versions[0].version;
+          var target = document.getElementById("index-version");
+          if (version && target) target.textContent = "当前版本 " + version;
+        })
+        .catch(function () {
+          /* keep the static fallback above */
+        });
+    </script>
   </body>
 </html>

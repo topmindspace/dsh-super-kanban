@@ -26,7 +26,53 @@ export const ARTIFACT_LIMIT = 6;
 export const HISTORY_LIMIT = 20;
 export const EVIDENCE_QUOTE_LIMIT = 160;
 export const KEYFACT_TEXT_LIMIT = 60;
-export const SUBTASK_TEXT_LIMIT = 40;
+
+/**
+ * Persisted text limits — the single source of truth for host-side truncation.
+ *
+ * `task.create`, `task.update` and `truncateTask` (used on load and save) all
+ * read these constants, so a value can never be clipped differently depending
+ * on which code path wrote it. The board UI must use the same maxima:
+ *   title ≤80, goal ≤280, tags ≤4×12, subtasks ≤12×60,
+ *   issues ≤5×160, nextSteps ≤5×160, milestones ≤20×120,
+ *   keyFacts ≤6×60, evidence ≤8 (text ≤200, quote ≤160), artifact name ≤80.
+ */
+export const TITLE_TEXT_LIMIT = 80;
+export const GOAL_TEXT_LIMIT = 280;
+export const TAG_LIMIT = 4;
+export const TAG_TEXT_LIMIT = 12;
+export const SUBTASK_TEXT_LIMIT = 60;
+export const ISSUE_LIMIT = 5;
+export const ISSUE_TEXT_LIMIT = 160;
+export const NEXTSTEP_LIMIT = 5;
+export const NEXTSTEP_TEXT_LIMIT = 160;
+export const MILESTONE_LIMIT = 20;
+export const MILESTONE_TEXT_LIMIT = 120;
+export const ARTIFACT_NAME_LIMIT = 80;
+export const EVIDENCE_TEXT_LIMIT = 200;
+
+/** Frozen snapshot of the persisted maxima (exported for docs/client parity). */
+export const TEXT_LIMITS = Object.freeze({
+  title: TITLE_TEXT_LIMIT,
+  goal: GOAL_TEXT_LIMIT,
+  tags: TAG_LIMIT,
+  tagText: TAG_TEXT_LIMIT,
+  subtasks: SUBTASK_LIMIT,
+  subtaskText: SUBTASK_TEXT_LIMIT,
+  issues: ISSUE_LIMIT,
+  issueText: ISSUE_TEXT_LIMIT,
+  nextSteps: NEXTSTEP_LIMIT,
+  nextStepText: NEXTSTEP_TEXT_LIMIT,
+  milestones: MILESTONE_LIMIT,
+  milestoneText: MILESTONE_TEXT_LIMIT,
+  keyFacts: KEYFACT_LIMIT,
+  keyFactText: KEYFACT_TEXT_LIMIT,
+  evidence: EVIDENCE_LIMIT,
+  evidenceText: EVIDENCE_TEXT_LIMIT,
+  evidenceQuote: EVIDENCE_QUOTE_LIMIT,
+  artifactName: ARTIFACT_NAME_LIMIT,
+});
+
 const BACKUP_KEEP = 10;
 
 export const DEFAULT_SETTINGS = {
@@ -43,8 +89,17 @@ export const DEFAULT_SETTINGS = {
   dailyAiCallLimit: 150,
 };
 
+/**
+ * The user's local calendar day as `YYYY-MM-DD`.
+ * The AI daily budget and the "今日" counters must follow the user's day, not
+ * the UTC day (they disagree near midnight for every non-UTC timezone).
+ */
 export function todayKey(now = Date.now()) {
-  return new Date(now).toISOString().slice(0, 10);
+  const date = new Date(now);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 export function emptyUsage() {
@@ -56,7 +111,7 @@ export function emptyUsage() {
   };
 }
 
-/** Roll the daily counters over at midnight (UTC day boundary). */
+/** Roll the daily counters over at the user's local midnight. */
 export function rolloverUsage(usage, now = Date.now()) {
   const base = usage && typeof usage === "object" ? usage : emptyUsage();
   const date = todayKey(now);
@@ -147,30 +202,86 @@ function clipText(value, max) {
   return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
 }
 
+/** Positive integer sequence number, or null when absent/invalid (never 0). */
+export function positiveSeqOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
+}
+
+/** Sanitize one issue entry (objects from the analyzer, strings via the API). */
+export function normalizeIssueRecord(item) {
+  if (typeof item === "string") {
+    const text = clipText(item, ISSUE_TEXT_LIMIT);
+    return text ? { text, severity: "medium", sessionId: null, seq: null } : null;
+  }
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const text = clipText(typeof item.text === "string" ? item.text : "", ISSUE_TEXT_LIMIT);
+  if (!text) return null;
+  const record = {
+    text,
+    severity: ["high", "medium", "low"].includes(item.severity) ? item.severity : "medium",
+    sessionId: typeof item.sessionId === "string" ? item.sessionId : null,
+    seq: positiveSeqOrNull(item.seq),
+  };
+  if (typeof item.id === "string" && item.id) record.id = item.id;
+  return record;
+}
+
+/** Sanitize one milestone entry (v1 field still surfaced by the client). */
+export function normalizeMilestoneRecord(item) {
+  if (typeof item === "string") {
+    const text = clipText(item, MILESTONE_TEXT_LIMIT);
+    return text ? { text, done: false, sessionId: null, seq: null } : null;
+  }
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const text = clipText(typeof item.text === "string" ? item.text : "", MILESTONE_TEXT_LIMIT);
+  if (!text) return null;
+  const record = {
+    text,
+    done: item.done === true,
+    sessionId: typeof item.sessionId === "string" ? item.sessionId : null,
+    seq: positiveSeqOrNull(item.seq),
+  };
+  if (typeof item.id === "string" && item.id) record.id = item.id;
+  return record;
+}
+
 /** Keep task payloads bounded before persisting/serving them (v2 caps). */
 export function truncateTask(task) {
   if (!task) return task;
   if (Array.isArray(task.evidence)) {
-    task.evidence = task.evidence.slice(0, EVIDENCE_LIMIT).map((item) => ({
-      ...item,
-      text: clipText(item?.text, 200),
-      quote: clipText(item?.quote, EVIDENCE_QUOTE_LIMIT),
-    }));
+    task.evidence = task.evidence
+      .filter((item) => item && typeof item === "object")
+      .slice(0, EVIDENCE_LIMIT)
+      .map((item) => ({
+        ...item,
+        text: clipText(item.text, EVIDENCE_TEXT_LIMIT),
+        quote: clipText(item.quote, EVIDENCE_QUOTE_LIMIT),
+      }));
   } else {
     task.evidence = [];
   }
   if (Array.isArray(task.keyFacts)) {
-    task.keyFacts = task.keyFacts.slice(0, KEYFACT_LIMIT).map((item) => ({ ...item, text: clipText(item?.text, KEYFACT_TEXT_LIMIT) }));
+    task.keyFacts = task.keyFacts
+      .filter((item) => item && typeof item === "object")
+      .slice(0, KEYFACT_LIMIT)
+      .map((item) => ({ ...item, text: clipText(item.text, KEYFACT_TEXT_LIMIT) }));
   } else {
     task.keyFacts = [];
   }
   if (Array.isArray(task.subtasks)) {
-    task.subtasks = task.subtasks.slice(0, SUBTASK_LIMIT).map((item) => ({ ...item, text: clipText(item?.text, SUBTASK_TEXT_LIMIT) }));
+    task.subtasks = task.subtasks
+      .filter((item) => item && typeof item === "object")
+      .slice(0, SUBTASK_LIMIT)
+      .map((item) => ({ ...item, text: clipText(item.text, SUBTASK_TEXT_LIMIT) }));
   } else {
     task.subtasks = [];
   }
   if (Array.isArray(task.artifacts)) {
-    task.artifacts = task.artifacts.slice(0, ARTIFACT_LIMIT).map((item) => ({ ...item, name: clipText(item?.name, 80) }));
+    task.artifacts = task.artifacts
+      .filter((item) => item && typeof item === "object")
+      .slice(0, ARTIFACT_LIMIT)
+      .map((item) => ({ ...item, name: clipText(item.name, ARTIFACT_NAME_LIMIT) }));
   } else {
     task.artifacts = [];
   }
@@ -178,23 +289,43 @@ export function truncateTask(task) {
     task.history = task.history.slice(-HISTORY_LIMIT);
   }
   if (!Array.isArray(task.lockedFields)) task.lockedFields = [];
-  if (!Array.isArray(task.tags)) task.tags = [];
-  else task.tags = task.tags.slice(0, 4);
-  if (!Array.isArray(task.issues)) task.issues = [];
-  else task.issues = task.issues.slice(0, 5);
-  if (!Array.isArray(task.nextSteps)) task.nextSteps = [];
-  else task.nextSteps = task.nextSteps.slice(0, 5);
-  if (!Array.isArray(task.milestones)) task.milestones = [];
-  else task.milestones = task.milestones.slice(0, 20);
+  if (Array.isArray(task.tags)) {
+    task.tags = task.tags
+      .filter((tag) => typeof tag === "string")
+      .slice(0, TAG_LIMIT)
+      .map((tag) => clipText(tag, TAG_TEXT_LIMIT));
+  } else {
+    task.tags = [];
+  }
+  if (Array.isArray(task.issues)) {
+    // Filter invalid entries before applying the cap, so junk cannot push real
+    // entries out of the persisted list.
+    task.issues = task.issues.map(normalizeIssueRecord).filter(Boolean).slice(0, ISSUE_LIMIT);
+  } else {
+    task.issues = [];
+  }
+  if (Array.isArray(task.nextSteps)) {
+    task.nextSteps = task.nextSteps
+      .map((step) => clipText(typeof step === "string" ? step : step?.text, NEXTSTEP_TEXT_LIMIT))
+      .filter(Boolean)
+      .slice(0, NEXTSTEP_LIMIT);
+  } else {
+    task.nextSteps = [];
+  }
+  if (Array.isArray(task.milestones)) {
+    task.milestones = task.milestones.map(normalizeMilestoneRecord).filter(Boolean).slice(0, MILESTONE_LIMIT);
+  } else {
+    task.milestones = [];
+  }
   if (!Array.isArray(task.sessions)) task.sessions = [];
-  if (typeof task.title === "string") task.title = clipText(task.title, 60);
+  if (typeof task.title === "string") task.title = clipText(task.title, TITLE_TEXT_LIMIT);
   if (task.goal && typeof task.goal === "object") {
-    task.goal.text = clipText(task.goal.text, 160);
+    task.goal.text = clipText(task.goal.text, GOAL_TEXT_LIMIT);
     if (!["active", "done", "none"].includes(task.goal.status)) task.goal.status = task.goal.text ? "active" : "none";
     if (!["session", "task"].includes(task.goal.source)) task.goal.source = "task";
   } else {
     const text = typeof task.goal === "string" ? task.goal : "";
-    task.goal = { text: clipText(text, 160), status: text ? "active" : "none", source: "task" };
+    task.goal = { text: clipText(text, GOAL_TEXT_LIMIT), status: text ? "active" : "none", source: "task" };
   }
   if (!task.sessionContext || typeof task.sessionContext !== "object") task.sessionContext = null;
   return task;
@@ -226,10 +357,10 @@ function migrateTaskV1V2(task) {
     source: "manual",
     seq: Number(milestone?.seq) || 0,
   }));
-  const goalText = clipText(typeof task.goal === "string" ? task.goal : task.goal?.text || "", 160);
+  const goalText = clipText(typeof task.goal === "string" ? task.goal : task.goal?.text || "", GOAL_TEXT_LIMIT);
   return {
     ...task,
-    title: clipText(task.title, 60),
+    title: clipText(task.title, TITLE_TEXT_LIMIT),
     goal: {
       text: goalText,
       status: goalText ? (task.status === "done" ? "done" : "active") : "none",
@@ -256,18 +387,33 @@ function migrateTaskV1V2(task) {
   };
 }
 
+/** True for JSON objects (arrays/null excluded). */
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Task records from untrusted JSON; non-objects are dropped, not crashed on. */
+function taskList(value) {
+  return (Array.isArray(value) ? value : []).filter(isRecord);
+}
+
+/** String list from untrusted JSON (ids are opaque strings). */
+function stringList(value) {
+  return (Array.isArray(value) ? value : []).filter((item) => typeof item === "string");
+}
+
 function migrateStateV1V2(raw) {
   const state = createEmptyState();
-  state.tasks = (Array.isArray(raw.tasks) ? raw.tasks : []).map((task) => truncateTask(migrateTaskV1V2(task)));
-  if (raw.settings && typeof raw.settings === "object") {
+  state.tasks = taskList(raw.tasks).map((task) => truncateTask(migrateTaskV1V2(task)));
+  if (isRecord(raw.settings)) {
     state.settings = { ...DEFAULT_SETTINGS, ...normalizeSettingsPatch(raw.settings), lastScanAt: raw.settings.lastScanAt || null };
   }
-  if (Array.isArray(raw.ignoredSessions)) state.ignoredSessions = raw.ignoredSessions;
-  if (Array.isArray(raw.suppressedSessions)) state.suppressedSessions = raw.suppressedSessions;
-  if (Array.isArray(raw.deletedLog)) state.deletedLog = raw.deletedLog;
-  if (Array.isArray(raw.workspaces)) state.workspaces = raw.workspaces;
-  if (Array.isArray(raw.activity)) state.activity = raw.activity;
-  if (raw.scan && typeof raw.scan === "object") state.scan = { ...emptyScanState(), ...raw.scan };
+  if (Array.isArray(raw.ignoredSessions)) state.ignoredSessions = stringList(raw.ignoredSessions);
+  if (Array.isArray(raw.suppressedSessions)) state.suppressedSessions = stringList(raw.suppressedSessions);
+  if (Array.isArray(raw.deletedLog)) state.deletedLog = raw.deletedLog.filter(isRecord);
+  if (Array.isArray(raw.workspaces)) state.workspaces = raw.workspaces.filter(isRecord);
+  if (Array.isArray(raw.activity)) state.activity = raw.activity.filter(isRecord);
+  if (isRecord(raw.scan)) state.scan = { ...emptyScanState(), ...raw.scan };
   state.usage = rolloverUsage(raw.usage);
   return state;
 }
@@ -324,7 +470,7 @@ export function createStore({ dshHome, logger } = {}) {
       log.warn?.(`[super-kanban] store file moved to ${target}: ${String(error?.message || error)}`);
       const backups = fs
         .readdirSync(backupsDir)
-        .filter((name) => /\.(corrupt|v1)$/.test(name))
+        .filter((name) => /\.(corrupt|v1|migrate-failed)$/.test(name))
         .sort();
       for (const name of backups.slice(0, Math.max(0, backups.length - BACKUP_KEEP))) {
         try {
@@ -417,7 +563,13 @@ export function createStore({ dshHome, logger } = {}) {
 
     const cache = createEmptyCache();
     if (cacheRead.data) {
-      if (cacheRead.data.sessions && typeof cacheRead.data.sessions === "object") cache.sessions = cacheRead.data.sessions;
+      if (isRecord(cacheRead.data.sessions)) {
+        for (const [id, entry] of Object.entries(cacheRead.data.sessions)) {
+          // Only entries the scanner can actually consume: a corrupt cache must
+          // degrade to "scan this session again", never crash the scan.
+          if (isRecord(entry) && isRecord(entry.meta)) cache.sessions[id] = entry;
+        }
+      }
       if (typeof cacheRead.data.updatedAt === "string") cache.updatedAt = cacheRead.data.updatedAt;
       const cacheVersion = Number(cacheRead.data.version) || 1;
       if (cacheVersion < STORE_VERSION) {
@@ -440,16 +592,18 @@ export function createStore({ dshHome, logger } = {}) {
   }
 
   function copyFields(target, raw) {
-    target.tasks = Array.isArray(raw.tasks) ? raw.tasks : [];
-    if (raw.settings && typeof raw.settings === "object") {
+    // Hand-edited/partially corrupted JSON must never crash the board later:
+    // keep only records with the shape the rest of the service assumes.
+    target.tasks = taskList(raw.tasks);
+    if (isRecord(raw.settings)) {
       target.settings = { ...DEFAULT_SETTINGS, ...normalizeSettingsPatch(raw.settings), lastScanAt: raw.settings.lastScanAt || null };
     }
-    if (Array.isArray(raw.ignoredSessions)) target.ignoredSessions = raw.ignoredSessions;
-    if (Array.isArray(raw.suppressedSessions)) target.suppressedSessions = raw.suppressedSessions;
-    if (Array.isArray(raw.deletedLog)) target.deletedLog = raw.deletedLog;
-    if (Array.isArray(raw.workspaces)) target.workspaces = raw.workspaces;
-    if (Array.isArray(raw.activity)) target.activity = raw.activity;
-    if (raw.scan && typeof raw.scan === "object") target.scan = { ...emptyScanState(), ...raw.scan };
+    if (Array.isArray(raw.ignoredSessions)) target.ignoredSessions = stringList(raw.ignoredSessions);
+    if (Array.isArray(raw.suppressedSessions)) target.suppressedSessions = stringList(raw.suppressedSessions);
+    if (Array.isArray(raw.deletedLog)) target.deletedLog = raw.deletedLog.filter(isRecord);
+    if (Array.isArray(raw.workspaces)) target.workspaces = raw.workspaces.filter(isRecord);
+    if (Array.isArray(raw.activity)) target.activity = raw.activity.filter(isRecord);
+    if (isRecord(raw.scan)) target.scan = { ...emptyScanState(), ...raw.scan };
     target.usage = rolloverUsage(raw.usage);
     for (const task of target.tasks) truncateTask(task);
   }

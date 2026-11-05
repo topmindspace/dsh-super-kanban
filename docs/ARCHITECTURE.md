@@ -34,15 +34,25 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | --- | --- |
 | `index.mjs` | Host 入口：挂载 `/super-kanban/api` 前缀路由，校验 owner 身份，启动/停止服务 |
 | `client.js` | 浏览器半边：单文件 bundle，注册面板 / 入口 / 右侧栏 tab / 会话头部按钮 |
-| `server/service.mjs` | 服务主体：HTTP 路由、状态编排、扫描调度、命令处理、SSE 广播 |
+| `server/service.mjs` | 服务主体：路由分发、状态编排、扫描调度、命令处理、SSE 广播 |
 | `server/sessions.mjs` | 会话扫描与解析：发现、zstd 解压、事件解析、摘要 / 证据 / 子任务 / 产物提取 |
 | `server/analyzer-rules.mjs` | 本地规则引擎：从解析结果推导任务、状态、进度、问题、优先级 |
 | `server/analyzer-llm.mjs` | 可选 LLM 引擎：调用 DeepSeek 推理接口，预算控制、JSON 解析、降级 |
 | `server/store.mjs` | 持久化：`state.json` / `sessions-cache.json`，原子写、裁剪、版本迁移、损坏恢复 |
+| `server/auth.mjs` | owner 鉴权决策表：归一化 `connection.admit()` 结果，异常/畸形输入一律 fail-closed 403 |
+| `server/http.mjs` | HTTP 公共设施：JSON 响应、受控请求体读取、错误分类、id / 载荷校验 |
+| `server/titles.mjs` | 标题相似度：为跨扫描合并（merge gate）提供确定性的纯字符串打分 |
 | `cordis.patch.yml` | Cordis bundle patch：把 host 插件插入 profile |
 | `install.sh` / `uninstall.sh` | 把仓库链接进 DSH profile / 回滚 |
-| `scripts/` | 校验、隐私扫描、市场索引生成、发布辅助 |
-| `tests/` | `node --test` 套件（store / analyzer / package / market-index / privacy） |
+| `scripts/` | 校验、文档检查、版本一致性、隐私扫描、市场索引生成、发布辅助 |
+| `tests/` | `node --test` 套件（store / analyzer / sessions / service / http / auth / titles / host-entry / package / market-index / privacy） |
+| `docs/` | 公开文档、截图、GitHub Pages 落地页（`index.html`）与插件市场索引（`index.json`） |
+| `.github/` | CI、发布工作流、Dependabot、Issue/PR 模板 |
+| `CHANGELOG.md` | Keep a Changelog 格式的版本变更记录 |
+| `dev/` | 维护者本地开发/截图/验收工具（**已在 `.gitignore` 中忽略，不随仓库分发**；见 `dev/README.md`） |
+| `internal/docs-internal/` | 历史设计/QA 归档（**同样被 git 忽略**；见该目录 README） |
+
+> npm 发布包只包含 `package.json` 的 `files` 列表（`index.mjs`、`client.js`、`cordis.patch.yml`、`server/`、`icon.svg`、`CHANGELOG.md`）；`docs/`、`dev/`、`internal/`、`.github/` 不进入 tarball。
 
 ## Host 半边
 
@@ -50,7 +60,9 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 
 1. 创建 `createKanbanService({ ctx })`，通过 `ctx.effect` 管理服务生命周期；
 2. `ctx.inject(["connection", "webServer"])` 后，把 `/super-kanban/api` 注册为前缀路由；
-3. 每个请求先经过 `connection.admit(req)`：只有 `owner` 身份的 peer 允许访问，其他返回 403；
+3. 每个请求先经过 `server/auth.mjs` 的 `ownerAdmission(connection, req)`：内部调用 `connection.admit(req)`，
+   只有 `owner` 身份的 peer 允许访问；返回 `{ok:false, status}`（通常 403）时直接拒绝，admission 抛错或返回
+   非预期结构时同样 fail-closed；
 4. 路由处理统一交给 `service.handle(req, res, { route, url, method })`，错误不会打穿 host。
 
 因为 DSH 的 API 只服务本机（回环地址），加上 owner 鉴权，看板 API 不会暴露给其他网络来源。
@@ -87,9 +99,13 @@ store.saveState()              原子写（tmp + rename）；扫描进度经 SSE
 
 - **会话锚点**：自动任务以 `primarySessionId` 为种子生成稳定 ID，重复扫描不会重复建卡。
 - **增量门控**：仅在「用户消息数增加、上一轮 turn 已结束、首次分析、手动重新研判」时调用模型；活跃 turn 内不重复分析；同一会话有最小间隔。
-- **预算**：单次扫描 AI 调用上限、每日上限（设置可调），超限自动降级规则引擎并在扫描消息中提示。
+- **预算**：单次扫描 AI 调用上限、每日上限（设置可调），超限自动降级规则引擎并在扫描消息中提示；
+  每日计数按**用户本地日历日**滚动（`todayKey`），不是 UTC 日。
+- **用户工作优先（trust rule）**：AI/规则判定 `done` 但仍有未完成的 `source:"manual"` 子任务、或
+  `lockedFields` 含 `subtasks` 的未完成清单时，状态降级为 `in_progress` 并写历史说明；锁定的 `status` 优先；
+  `done` 时生成类子任务自动勾选，手动子任务不动；用户取消勾选会让卡回到 `in_progress`。
 - **隔离失败**：单个会话解析失败只记录日志并跳过，不影响其他会话和看板。
-- **并发保护**：扫描进行中再次触发返回 busy；支持取消。
+- **并发保护**：扫描进行中再次触发返回 busy；支持取消；扫描结论写入 `scan.message` 供界面常驻展示。
 
 ### 两个分析引擎
 
@@ -106,7 +122,10 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 - `sessions-cache.json`：`sessions[sessionId] = { sigKey, meta }`，用于跳过未变化会话与 AI 门控。
 - 写入是原子的（临时文件 + rename）；解析失败的文件会移动到 `backups/` 后以默认值重建。
 - `version` 变化时执行迁移（v1 → v2），迁移失败同样走备份 + 重建路径。
-- 载荷裁剪：evidence ≤8、keyFacts ≤6、subtasks ≤12、artifacts ≤6、history ≤20、quote ≤160 字符。
+- 文本与载荷上限统一由 `TEXT_LIMITS` 常量定义（title 80 / goal 280 / tags 4×12 / subtasks 12×60 /
+  issues·nextSteps 5×160 / milestones 20×120 / keyFacts 6×60 / evidence 8（text 200、quote 160）/
+  artifact name 80 / history 20）；加载与保存走同一个 `truncateTask`，客户端表单镜像同一组上限。
+- `seq` 由 `positiveSeqOrNull` 归一化：正整数或 `null`（永不为 0），无法定位时间线时 UI 不显示 `#N`。
 
 ### HTTP API
 
@@ -119,6 +138,7 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 | `GET /session/:id` | 单会话事件时间线（证据跳转用） |
 | `GET /export` | 导出完整看板 JSON |
 | `GET /events` | 可选 SSE：扫描进度与任务变化 |
+| `GET /ping` | 存活探测（开发脚本用，不含敏感数据） |
 
 ## 浏览器半边（`client.js`）
 
@@ -138,6 +158,9 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 
 - 首屏拉取 `/state`，之后每 4 秒轮询（页面隐藏时暂停）；扫描中加快刷新；SSE 可用时优先使用。
 - 所有写操作走 `POST /command`：界面先乐观更新，失败回滚并 toast。
+- 抽屉展示 `task.ai`（引擎 / 模型 / 置信度 / 时间 / 理由）；来源会话在研判后又有新活动
+  （`lastActivityAt > analyzedAt + 5 分钟`）才提示「可能已过期」；「重新研判」调用
+  `task.analyze`；编辑中的草稿在后台更新后保留并显示提醒。
 - 抽屉、浮层、筛选等纯 UI 状态保存在本地（localStorage / 组件状态），不入库。
 - 深浅色、字体、圆角全部使用 DSH 设计 token，不引入外部字体 / 图片 / 网络资源。
 
@@ -150,7 +173,9 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 ### 页头与入口（v0.4 实现细节）
 
 - 全页看板页头常驻：搜索、扫描、设置齿轮、在右侧栏打开、主按钮「新建」；「⋯」菜单只保留「导出 JSON」。
-- 右侧栏看板页头常驻：扫描、设置、在全页面板打开、新建、「⋯」（仅导出 JSON）。
+- 统计行常驻：状态计数 + 归档数 + 上一次扫描结论（运行中 / 失败+重试 / 完成）；扫描按钮在 AI 关闭时标题为「扫描（仅规则）」。
+- 右侧栏看板页头常驻：扫描、设置、在全页面板打开、新建、「⋯」（仅导出 JSON）；任何宽度都保留工作区筛选。
+- 卡片：完成卡不绘制进度线、归档卡带「已归档」标记；抽屉含 AI 研判块与「⋯」→「重新研判」。
 - 页头按钮的排列与图标属于浏览器半的**实现细节**，不在 Host/浏览器契约内；契约只约束注册的 slot / tab / 数据接口（见 [CONTRACT.md](CONTRACT.md)）。
 
 ### 与 DSH 其他服务的联动
@@ -232,9 +257,15 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 
 `tests/` 下是零依赖的 `node --test` 套件：
 
-- `store.test.mjs`：默认值、裁剪、v1→v2 迁移、损坏恢复；
+- `store.test.mjs` / `store-robustness.test.mjs`：默认值、裁剪、v1→v2 迁移、损坏文件与畸形 JSON 的自愈；
 - `analyzer.test.mjs`：规则引擎的状态 / 进度 / 问题判断；
-- `package.test.mjs`：包清单、files 列表、DSH 声明；
+- `analyzer-llm.test.mjs`：LLM 引擎的预算、超时、非法响应与降级；
+- `sessions.test.mjs`：会话发现、事件解析、digest 预算、产物 / 子任务提取；
+- `service.test.mjs`：扫描 / 合并 / 命令编排（不启动 DSH）；
+- `http.test.mjs` / `auth.test.mjs`：HTTP 设施与载荷校验 / owner 鉴权 fail-closed；
+- `titles.test.mjs`：合并用的标题相似度；
+- `host-entry.test.mjs`：Cordis 入口（路由前缀、鉴权接线、生命周期）；
+- `package.test.mjs`：包清单、files 列表、DSH 声明与脚本质量门；
 - `market-index.test.mjs`：市场索引格式与生成；
 - `check-privacy.test.mjs`：隐私扫描器的规则与豁免。
 

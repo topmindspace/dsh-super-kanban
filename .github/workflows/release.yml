@@ -1,9 +1,9 @@
 name: Release
 
-# Push a version tag (for example `v0.3.0`) to publish the exact package version
+# Push a version tag (for example `v0.4.1`) to publish the exact package version
 # to npm with provenance and create the matching GitHub Release:
 #
-#   git tag -a v0.3.0 -m "v0.3.0"
+#   git tag -a v0.4.1 -m "v0.4.1"
 #   git push origin main --tags
 #
 # Required repository secret: NPM_TOKEN (npm automation token with publish
@@ -54,6 +54,14 @@ jobs:
 
       - name: Privacy scan
         run: npm run check:privacy
+
+      - name: Documentation links, screenshots and structure
+        run: npm run check:docs
+
+      # Blocks a tag when package.json, CHANGELOG.md, docs/index.json, SECURITY.md
+      # or the documented compatibility ranges disagree with each other.
+      - name: Version, changelog and compatibility consistency
+        run: npm run check:version
 
       - name: Ensure the plugin-market index is committed
         run: |

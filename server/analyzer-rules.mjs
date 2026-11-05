@@ -454,6 +454,89 @@ function asText(value, limit) {
 }
 
 /**
+ * Timeline text candidates for quote→seq recovery, cached per parsed session
+ * (WeakMap keeps it GC-friendly; a scan reuses the same parsed object).
+ * @type {WeakMap<object, Array<{seq:number, text:string}>>}
+ */
+const TIMELINE_CACHE = new WeakMap();
+const EMPTY_TIMELINE = Object.freeze([]);
+
+function timelineOf(parsed) {
+  if (!parsed || typeof parsed !== "object") return EMPTY_TIMELINE;
+  const cached = TIMELINE_CACHE.get(parsed);
+  if (cached) return cached;
+  const items = [];
+  const push = (seq, text) => {
+    const number = Number(seq);
+    const value = typeof text === "string" ? text.trim() : "";
+    if (!Number.isFinite(number) || number <= 0 || !value) return;
+    items.push({ seq: Math.floor(number), text: value });
+  };
+  for (const message of parsed.users || []) push(message?.seq, message?.text);
+  for (const message of parsed.assistants || []) push(message?.seq, message?.text);
+  for (const result of parsed.toolResults || []) push(result?.seq, result?.text);
+  for (const snapshot of parsed.todoSnapshots || []) {
+    push(snapshot?.seq, (snapshot?.todos || []).map((todo) => todo?.content || "").join("\n"));
+  }
+  for (const deliverable of parsed.deliverables || []) {
+    push(
+      deliverable?.seq,
+      (deliverable?.files || []).map((file) => `${file?.path || ""}${file?.description ? ` —— ${file.description}` : ""}`).join("\n"),
+    );
+  }
+  for (const error of parsed.errors || []) push(error?.seq, error?.text);
+  for (const signal of parsed.signals || []) push(signal?.seq, signal?.text);
+  for (const notice of parsed.systemNotices || []) push(notice?.seq, notice?.text);
+  items.sort((left, right) => left.seq - right.seq || left.text.localeCompare(right.text));
+  TIMELINE_CACHE.set(parsed, items);
+  return items;
+}
+
+/**
+ * Resolve a model-provided seq against the real session timeline.
+ *
+ * Accept a seq only when it is a positive integer known to `parsed.timeBySeq`;
+ * otherwise recover it from an exact quote match (then the tightest containing
+ * event). Unresolved seqs become `null`, never 0 — the UI renders 0 as a
+ * misleading `#0` citation.
+ *
+ * @param {unknown} rawSeq
+ * @param {unknown} quote evidence quote / issue text / fact text
+ * @param {object} [parsed]
+ * @returns {number|null}
+ */
+export function resolveAnalysisSeq(rawSeq, quote, parsed) {
+  const timeBySeq = parsed?.timeBySeq instanceof Map ? parsed.timeBySeq : null;
+  const numeric = Number(rawSeq);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const seq = Math.floor(numeric);
+    if (!timeBySeq || timeBySeq.has(seq)) return seq;
+  }
+  const needle = typeof quote === "string" ? quote.trim() : "";
+  if (!needle) return null;
+  const timeline = timelineOf(parsed);
+  if (timeline.length === 0) return null;
+  const exact = timeline.find((event) => event.text === needle);
+  if (exact) return exact.seq;
+  let best = null;
+  for (const event of timeline) {
+    if (!event.text.includes(needle)) continue;
+    if (!best || event.text.length < best.text.length || (event.text.length === best.text.length && event.seq < best.seq)) {
+      best = event;
+    }
+  }
+  return best ? best.seq : null;
+}
+
+/** Resolve seq + wall-clock time for one normalized analysis item. */
+function resolveSeqTime(rawSeq, quote, parsed) {
+  const seq = resolveAnalysisSeq(rawSeq, quote, parsed);
+  const timeBySeq = parsed?.timeBySeq instanceof Map ? parsed.timeBySeq : null;
+  const time = seq !== null && timeBySeq ? Number(timeBySeq.get(seq)) || 0 : 0;
+  return { seq, time };
+}
+
+/**
  * Validate/normalize one analysis task coming from the LLM (or a manual payload).
  * Returns null when the object has no usable title.
  */
@@ -471,18 +554,19 @@ export function normalizeAnalysis(raw, parsed, { engine = "llm", model = null } 
         : null;
   const sessionId = parsed?.id || parsed?.sessionId || null;
   const sessionTitle = parsed?.title || parsed?.sessionTitle || null;
-  const seqTime = parsed?.timeBySeq || new Map();
-  const seqToTime = (seq) => (seqTime instanceof Map ? seqTime.get(Number(seq)) : undefined);
-
   const issues = (Array.isArray(raw.issues) ? raw.issues : [])
     .slice(0, 3)
-    .map((issue, index) => ({
-      id: `i_${(sessionId || "x").slice(-6)}_${Number(issue?.seq) || 0}_${index}`,
-      text: asText(issue?.text, 60),
-      severity: SEVERITIES.includes(issue?.severity) ? issue.severity : "medium",
-      sessionId,
-      seq: Number(issue?.seq) || 0,
-    }))
+    .map((issue, index) => {
+      const text = asText(issue?.text, 60);
+      const seq = resolveAnalysisSeq(issue?.seq, text, parsed);
+      return {
+        id: `i_${(sessionId || "x").slice(-6)}_${seq ?? "na"}_${index}`,
+        text,
+        severity: SEVERITIES.includes(issue?.severity) ? issue.severity : "medium",
+        sessionId,
+        seq,
+      };
+    })
     .filter((issue) => issue.text);
 
   const milestones = (Array.isArray(raw.milestones) ? raw.milestones : [])
@@ -492,21 +576,21 @@ export function normalizeAnalysis(raw, parsed, { engine = "llm", model = null } 
       text: asText(milestone?.text, 120),
       done: milestone?.done === true,
       sessionId,
-      seq: Number(milestone?.seq) || 0,
+      seq: resolveAnalysisSeq(milestone?.seq, asText(milestone?.text, 240), parsed),
     }))
     .filter((milestone) => milestone.text);
 
   const keyFacts = (Array.isArray(raw.keyFacts) ? raw.keyFacts : [])
     .slice(0, 5)
     .map((fact, index) => {
-      const seq = Number(fact?.seq) || 0;
+      const text = asText(fact?.text, 60);
       const kind = ["status", "progress", "issue", "decision", "artifact", "goal"].includes(fact?.kind) ? fact.kind : "status";
       return {
         id: `k_${(sessionId || "x").slice(-6)}_${index}`,
-        text: asText(fact?.text, 60),
+        text,
         kind,
         sessionId,
-        seq,
+        seq: resolveAnalysisSeq(fact?.seq, text, parsed),
       };
     })
     .filter((fact) => fact.text);
@@ -518,7 +602,7 @@ export function normalizeAnalysis(raw, parsed, { engine = "llm", model = null } 
       text: asText(subtask?.text, 40),
       done: subtask?.done === true,
       source: "ai",
-      seq: Number(subtask?.seq) || 0,
+      seq: resolveAnalysisSeq(subtask?.seq, asText(subtask?.text, 240), parsed),
     }))
     .filter((subtask) => subtask.text);
 
@@ -526,10 +610,12 @@ export function normalizeAnalysis(raw, parsed, { engine = "llm", model = null } 
     .filter((item) => EVIDENCE_KINDS.includes(item?.kind))
     .slice(0, 5)
     .map((item, index) => {
-      const seq = Number(item.seq) || 0;
-      const time = seqToTime(seq) || 0;
+      const quote = asText(item.quote, 160) || asText(item.text, 160);
+      // Accept the model seq only when it exists in the real timeline; otherwise
+      // recover it from the quote. Unresolved seqs are null (never a fake #0).
+      const { seq, time } = resolveSeqTime(item.seq, quote || asText(item.text, 240), parsed);
       return {
-        id: `e_${(sessionId || "x").slice(-6)}_${item.kind}_${seq}_${index}`,
+        id: `e_${(sessionId || "x").slice(-6)}_${item.kind}_${seq ?? "na"}_${index}`,
         kind: item.kind,
         text: asText(item.text, 200) || asText(item.quote, 200),
         quote: asText(item.quote, 80) || asText(item.text, 80),

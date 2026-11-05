@@ -51,11 +51,30 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      # Non-blocking: reports coverage for the Node 22 baseline without failing
+      # the build on a threshold that would freeze the suite's current shape.
+      # `node --test --experimental-test-coverage` is available since Node 22.
+      - name: Unit test coverage report (non-blocking)
+        if: matrix.node == '22.19'
+        continue-on-error: true
+        run: |
+          echo "## Unit test coverage (non-blocking)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          node --test --experimental-test-coverage "tests/**/*.test.mjs" 2>&1 | tee coverage.log
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -40 coverage.log >> "$GITHUB_STEP_SUMMARY"
+
       - name: Repository validation (manifest, files, syntax, market index format 1)
         run: npm run validate
 
       - name: Privacy scan
         run: npm run check:privacy
+
+      - name: Documentation links, screenshots and structure
+        run: npm run check:docs
+
+      - name: Version, changelog and compatibility consistency
+        run: npm run check:version
 
       - name: Package contents (npm pack --dry-run)
         run: |
@@ -78,11 +97,22 @@ jobs:
             "server/analyzer-rules.mjs",
             "server/analyzer-llm.mjs",
             "server/store.mjs",
+            "server/auth.mjs",
+            "server/http.mjs",
+            "server/titles.mjs",
           ];
           const missing = required.filter((entry) => !files.includes(entry));
           if (missing.length > 0) {
             console.error(`npm pack is missing required files: ${missing.join(", ")}`);
             process.exit(1);
           }
-          console.log(`npm pack contains ${files.length} files; all required entries present.`);
+          // The published tarball must stay a plugin package, not a repo dump:
+          // docs/, tests/, dev/, internal/, .github/ and scripts/ are not shipped.
+          const forbidden = ["dev/", "internal/", "tests/", "scripts/", "docs/", ".github/", "node_modules/"];
+          const leaked = files.filter((entry) => forbidden.some((prefix) => entry.startsWith(prefix)));
+          if (leaked.length > 0) {
+            console.error(`npm pack must not contain repository-only files: ${leaked.join(", ")}`);
+            process.exit(1);
+          }
+          console.log(`npm pack contains ${files.length} files; required entries present, no repo-only files.`);
           NODE

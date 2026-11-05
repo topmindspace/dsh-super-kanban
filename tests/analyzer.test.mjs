@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeAnalysis, titleSimilarity } from "../server/analyzer-rules.mjs";
+import { normalizeAnalysis, resolveAnalysisSeq, titleSimilarity } from "../server/analyzer-rules.mjs";
 
 /** Synthetic parsed session shape accepted by normalizeAnalysis. */
 function parsedSession(overrides = {}) {
@@ -12,6 +12,27 @@ function parsedSession(overrides = {}) {
       [12, 1700000000000],
       [13, 1700000060000],
     ]),
+    ...overrides,
+  };
+}
+
+/** Parsed-session shape with a real event timeline for seq recovery tests. */
+function timelineSession(overrides = {}) {
+  return {
+    id: "demo-session",
+    title: "Demo session title",
+    timeBySeq: new Map([
+      [12, 1700000000000],
+      [13, 1700000060000],
+    ]),
+    users: [{ seq: 12, time: 1700000000000, text: "please fix the login flow" }],
+    assistants: [{ seq: 13, time: 1700000060000, text: "fixed the login flow and added tests" }],
+    toolResults: [],
+    todoSnapshots: [],
+    deliverables: [],
+    errors: [],
+    signals: [],
+    systemNotices: [],
     ...overrides,
   };
 }
@@ -147,4 +168,95 @@ test("normalizeAnalysis drops empty and malformed entries", () => {
   assert.equal(analysis.keyFacts[0].kind, "status");
   assert.equal(analysis.evidence.length, 1);
   assert.equal(analysis.evidence[0].text, "quoted text");
+});
+
+test("resolveAnalysisSeq accepts only real timeline seqs", () => {
+  const parsed = timelineSession();
+  assert.equal(resolveAnalysisSeq(12, "", parsed), 12);
+  assert.equal(resolveAnalysisSeq("13", "", parsed), 13);
+  assert.equal(resolveAnalysisSeq(0, "", parsed), null, "0 is never a valid citation");
+  assert.equal(resolveAnalysisSeq(-3, "", parsed), null);
+  assert.equal(resolveAnalysisSeq(Number.NaN, "", parsed), null);
+  assert.equal(resolveAnalysisSeq(999, "totally unrelated quote", parsed), null);
+  // Without a timeline map a positive seq cannot be verified but is still accepted.
+  assert.equal(resolveAnalysisSeq(5, "", {}), 5);
+});
+
+test("resolveAnalysisSeq recovers a missing seq from exact/contained quotes", () => {
+  const parsed = timelineSession();
+  assert.equal(resolveAnalysisSeq(999, "please fix the login flow", parsed), 12, "exact quote match");
+  assert.equal(resolveAnalysisSeq(undefined, "added tests", parsed), 13, "quote contained in a message");
+  assert.equal(resolveAnalysisSeq(0, "the login flow", parsed), 12, "invalid seq recovered by quote");
+  assert.equal(resolveAnalysisSeq(999, "   ", parsed), null);
+});
+
+test("normalizeAnalysis: evidence keeps real seqs, drops fake #0 citations", () => {
+  const parsed = timelineSession();
+  const analysis = normalizeAnalysis(
+    {
+      title: "Board work",
+      evidence: [
+        { kind: "user", seq: 12, quote: "please fix the login flow" },
+        { kind: "assistant", seq: 0, quote: "please fix the login flow" },
+        { kind: "assistant", seq: 0, quote: "totally unrelated" },
+        { kind: "tool", seq: 999, quote: "fixed the login flow and added tests" },
+      ],
+    },
+    parsed,
+  );
+  assert.equal(analysis.evidence[0].seq, 12);
+  assert.equal(analysis.evidence[0].time, 1700000000000);
+  assert.equal(analysis.evidence[1].seq, 12, "seq 0 is recovered from the quote");
+  assert.equal(analysis.evidence[2].seq, null, "unresolvable seq must be null, never 0");
+  assert.equal(analysis.evidence[2].time, 0);
+  assert.equal(analysis.evidence[3].seq, 13, "out-of-map seq recovered from the quote");
+  assert.ok(analysis.evidence.every((item) => item.seq !== 0));
+  assert.ok(analysis.evidence.every((item) => /^e_/.test(item.id)));
+  assert.equal(analysis.evidence[2].id.includes("_na_"), true, "ids mark unresolved citations");
+});
+
+test("normalizeAnalysis: issues, keyFacts, subtasks and milestones share seq resolution", () => {
+  const parsed = timelineSession();
+  const analysis = normalizeAnalysis(
+    {
+      title: "Board work",
+      issues: [
+        { text: "please fix the login flow", seq: 0 },
+        { text: "unrelated problem", seq: 0 },
+      ],
+      keyFacts: [
+        { text: "added tests", seq: 999 },
+        { text: "no citation possible", seq: -1 },
+      ],
+      subtasks: [
+        { text: "please fix the login flow", seq: 0 },
+        { text: "no citation possible", seq: 0 },
+      ],
+      milestones: [{ text: "added tests", done: true, seq: 0 }],
+    },
+    parsed,
+  );
+  assert.deepEqual(
+    analysis.issues.map((issue) => issue.seq),
+    [12, null],
+  );
+  assert.deepEqual(
+    analysis.keyFacts.map((fact) => fact.seq),
+    [13, null],
+  );
+  assert.deepEqual(
+    analysis.subtasks.map((subtask) => subtask.seq),
+    [12, null],
+  );
+  assert.equal(analysis.milestones[0].seq, 13);
+
+  // Deterministic: running the same normalization twice yields identical output.
+  const again = normalizeAnalysis(
+    {
+      title: "Board work",
+      issues: [{ text: "please fix the login flow", seq: 0 }],
+    },
+    parsed,
+  );
+  assert.deepEqual(again.issues, normalizeAnalysis({ title: "Board work", issues: [{ text: "please fix the login flow", seq: 0 }] }, parsed).issues);
 });

@@ -4,8 +4,13 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.3.x | ✅ |
+| 0.4.x | ✅ (current release line) |
+| 0.3.x | ✅ (previous release line) |
 | < 0.3 | ❌ (not released publicly) |
+
+Security fixes land on the current release line. If you run an older line, the
+recommended action is to upgrade to the latest `0.4.x` release (see
+[INSTALL.md](./docs/INSTALL.md)).
 
 ## Reporting a vulnerability
 

@@ -51,19 +51,39 @@ export const REQUIRED_FILES = [
   "uninstall.sh",
   ".github/workflows/ci.yml",
   ".github/workflows/release.yml",
+  ".github/dependabot.yml",
   ".github/ISSUE_TEMPLATE/bug_report.yml",
   ".github/ISSUE_TEMPLATE/feature_request.yml",
   ".github/ISSUE_TEMPLATE/config.yml",
   ".github/PULL_REQUEST_TEMPLATE.md",
   "scripts/validate.mjs",
   "scripts/check-privacy.mjs",
+  "scripts/check-docs.mjs",
+  "scripts/check-version.mjs",
   "scripts/build-market-index.mjs",
   "scripts/release.mjs",
   "tests/store.test.mjs",
+  "tests/store-robustness.test.mjs",
   "tests/analyzer.test.mjs",
+  "tests/analyzer-llm.test.mjs",
+  "tests/sessions.test.mjs",
+  "tests/service.test.mjs",
+  "tests/http.test.mjs",
+  "tests/auth.test.mjs",
+  "tests/titles.test.mjs",
+  "tests/host-entry.test.mjs",
   "tests/package.test.mjs",
   "tests/market-index.test.mjs",
   "tests/check-privacy.test.mjs",
+  "docs/ARCHITECTURE.md",
+  "docs/CONTRACT.md",
+  "docs/DESIGN.md",
+  "docs/DEVELOPMENT.md",
+  "docs/INSTALL.md",
+  "docs/MARKET.md",
+  "docs/TROUBLESHOOTING.md",
+  "docs/index.html",
+  "docs/.nojekyll",
   "docs/icon.svg",
 ];
 
@@ -74,6 +94,9 @@ export const REQUIRED_SERVER_FILES = [
   "server/analyzer-rules.mjs",
   "server/analyzer-llm.mjs",
   "server/store.mjs",
+  "server/auth.mjs",
+  "server/http.mjs",
+  "server/titles.mjs",
 ];
 
 /* ------------------------------------------------------------------ */
@@ -483,6 +506,15 @@ function checkPackageManifest(root, pkg, problem, note, failures) {
   }
   if (typeof scripts["check:privacy"] !== "string" || !scripts["check:privacy"].includes("scripts/check-privacy.mjs")) {
     problem('package.json: scripts["check:privacy"] must run scripts/check-privacy.mjs');
+  }
+  if (typeof scripts["check:docs"] !== "string" || !scripts["check:docs"].includes("scripts/check-docs.mjs")) {
+    problem('package.json: scripts["check:docs"] must run scripts/check-docs.mjs');
+  }
+  if (typeof scripts["check:version"] !== "string" || !scripts["check:version"].includes("scripts/check-version.mjs")) {
+    problem('package.json: scripts["check:version"] must run scripts/check-version.mjs');
+  }
+  if (typeof scripts.check !== "string" || !scripts.check.includes("check:docs") || !scripts.check.includes("check:version")) {
+    problem('package.json: scripts.check must run the docs, version and existing checks');
   }
 
   if (failures.length === before) note("package.json manifest");

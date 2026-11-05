@@ -45,9 +45,12 @@
     "test": "node --test \"tests/**/*.test.mjs\"",
     "validate": "node scripts/validate.mjs",
     "check:privacy": "node scripts/check-privacy.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:version": "node scripts/check-version.mjs",
+    "check": "npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version",
     "market:index": "node scripts/build-market-index.mjs",
     "release": "node scripts/release.mjs",
-    "prepublishOnly": "npm test && npm run validate && npm run check:privacy"
+    "prepublishOnly": "npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version"
   },
   "publishConfig": {
     "access": "public"

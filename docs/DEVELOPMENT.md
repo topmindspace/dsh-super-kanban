@@ -5,7 +5,7 @@
 ## 1. 环境
 
 - **Node.js** `>= 22.19.0`（使用内置 `node:zlib` 的 zstd API）。
-- **DeepSeek Harness** 桌面版，或 `dsh` CLI（`dsh web`）。
+- **DeepSeek Harness** 桌面版，或 `dsh` CLI（`dsh web`）。桌面版安装不保证 CLI 在 `PATH` 中；macOS 的 CLI 位于应用包的 `Contents/Resources/app.asar/dsh/`，`dev/` 下的本地脚本演示了如何从应用包启动；没有 CLI 时请用桌面版/插件页操作。
 - **零依赖**：仓库不需要 `npm install`，没有打包步骤；`client.js` 是手写 bundle。
 
 ## 2. 目录速览
@@ -17,9 +17,22 @@
 | `client.js` | 浏览器半边（单文件，无 JSX、无构建） |
 | `cordis.patch.yml` | 把 host 插件插入 DSH profile |
 | `install.sh` / `uninstall.sh` | 本地链接安装 / 卸载 |
-| `scripts/` | validate、隐私扫描、市场索引、发布辅助 |
+| `scripts/` | validate、文档检查、版本一致性、隐私扫描、市场索引、发布辅助 |
 | `tests/` | `node --test` 套件 |
-| `docs/` | 公开文档、截图、市场索引 |
+| `docs/` | 公开文档、截图、GitHub Pages 落地页（`index.html`）与市场索引（`index.json`） |
+| `.github/` | CI / Release 工作流、Dependabot 配置、Issue/PR 模板 |
+| `CHANGELOG.md` | Keep a Changelog 格式的版本记录 |
+| `dev/` | 维护者本地工具：隔离实例、API/截图、design audit、demo、verify（**git 忽略，不随仓库分发**） |
+| `internal/docs-internal/` | 历史设计与 QA 归档（**git 忽略**；见该目录 `README.md`） |
+
+### 2.1 本地维护者目录（git 忽略）
+
+为了让公开仓库保持干净，`.gitignore` 忽略了两类只在维护者机器上存在的目录：
+
+- `dev/`：隔离实例脚本（`restart-test.sh`、`restart-ui.sh`）、`api.sh`、`shot.mjs`、`design-audit.js`、`demo/`、`probe/`、`verify/`。每个工具的用途、前置条件与当前状态记录在 `dev/README.md`。
+- `internal/docs-internal/`：v1–v3 开发期的设计/QA 历史记录，路径已按当前仓库布局更新，仅作追溯用途，其权威性让位于 `docs/`。
+
+这两类目录不会出现在 npm 包或新克隆的仓库里；修改它们不影响 CI。公开文档不应依赖它们（如需引用，用反引号路径而不是 Markdown 链接）。
 
 ## 3. 隔离开发实例
 
@@ -80,6 +93,10 @@ curl -s -b "<cookie>" http://127.0.0.1:56790/super-kanban/api/state | head -c 40
 3. **保持 digest 预算**：`buildDigest` 输出必须 ≤1.5KB；新增字段时在测试里断言 UTF-8 字节数。
 4. **保持合并幂等**：同一个会话多次扫描不应重复建卡；用户锁定字段不得被覆盖。
 5. **隔离单会话失败**：解析失败只跳过该会话并计数，不能让整次扫描失败。
+6. **文本上限只有一处**：截断值统一用 `server/store.mjs` 的 `TEXT_LIMITS`（客户端 `client.js` 有镜像常量）；新增/调整上限时同步改两处、补 `tests/store.test.mjs`，别在各调用点写魔法数字。
+7. **状态信任规则**：AI/规则 `done` 在存在未完成手动子任务或锁定子任务清单时会被降级为 `in_progress`（见 `service.mjs` 的 trust rule）；改这块要补 `tests/service.test.mjs`，并确保历史记录里能解释原因。
+8. **`seq` 语义**：引用序号用 `positiveSeqOrNull` 归一化——正整数或 `null`（永不为 0）；新增列表字段时同样处理，UI 只在有效时显示 `#N`。
+9. **每日用量按本地日**：`todayKey` 使用用户本地日历日；改预算/用量逻辑时不要退回 UTC 日。
 
 ### 存储与版本
 
@@ -93,13 +110,28 @@ curl -s -b "<cookie>" http://127.0.0.1:56790/super-kanban/api/state | head -c 40
 npm test              # node --test "tests/**/*.test.mjs"
 npm run validate      # 包清单 / Cordis patch / 文件清单 / 市场索引
 npm run check:privacy # 个人路径、凭证、真实会话 id 等敏感内容扫描
+npm run check:docs    # 文档链接 / 锚点 / 截图 / 中英 README 结构 / Pages 落地页
+npm run check:version # package.json、CHANGELOG、市场索引、SECURITY 与兼容范围一致性
+npm run check         # 以上全部检查（CI 的等价入口，提交 PR 前推荐）
 npm pack --dry-run    # 查看将发布的 tarball 内容
 ```
 
+CI（`.github/workflows/ci.yml`）在两个 Node 版本（22.19 / 24）上执行同样的检查：
+`node --check` 语法检查 → `npm test` → `npm run validate` → `npm run check:privacy`
+→ `npm run check:docs` → `npm run check:version` → `npm pack --dry-run` 内容断言。
+其中 Node 22.19 那条还会输出 **非阻塞** 的覆盖率报告
+（`node --test --experimental-test-coverage`），仅作参考，不设阈值、不因覆盖率下降失败。
+
+CI 之外，`.github/dependabot.yml` 每周检查 GitHub Actions 的版本更新；仓库没有 npm 依赖，
+因此不追踪 npm 生态。
+
 新增行为时：
 
-- 规则引擎变化 → 补 `tests/analyzer.test.mjs`；
-- 存储字段 / 迁移 → 补 `tests/store.test.mjs`；
+- 规则引擎变化 → 补 `tests/analyzer.test.mjs`；LLM 预算 / 降级 → 补 `tests/analyzer-llm.test.mjs`；
+- 会话发现 / 解析 / digest / 产物提取 → 补 `tests/sessions.test.mjs`；
+- 存储字段 / 迁移 / 损坏恢复 → 补 `tests/store.test.mjs` 或 `tests/store-robustness.test.mjs`；
+- 扫描 / 合并 / 命令编排 → 补 `tests/service.test.mjs`；
+- HTTP 设施 / 鉴权 → 补 `tests/http.test.mjs`、`tests/auth.test.mjs`、`tests/host-entry.test.mjs`；
 - 包结构 / files 列表 → 补 `tests/package.test.mjs`；
 - 市场索引 → 补 `tests/market-index.test.mjs`；
 - 隐私相关改动 → 补 `tests/check-privacy.test.mjs`。
@@ -108,6 +140,8 @@ npm pack --dry-run    # 查看将发布的 tarball 内容
 
 - 只改 `client.js`，不引入构建工具与第三方 UI 库；样式只用 DSH 设计 token（见 [DESIGN.md](DESIGN.md)）。
 - 打开浅色 / 深色两套主题、1680px 与 1280px 两档宽度、右侧栏 420/756 两档宽度自检。
+- wave-2 交互自检：统计行的扫描三态（运行中/完成/失败+重试）、完成卡无进度线、归档卡标记、抽屉 AI 研判块与「重新研判」、编辑草稿在后台更新后保留并提示、问题/下一步「展开全部」。
+- 维护者本地有一套零依赖的 CDP 辅助脚本（`dev/shot.mjs` 截图、`dev/design-audit.js` 注入审计、`dev/demo/` 合成演示数据），前置条件见 `dev/README.md`；它们被 git 忽略，不会出现在公开仓库中。
 - 截图可以用任意 CDP 工具（Playwright、Puppeteer、Chrome DevTools Protocol 脚本）驱动：
 
 ```js
@@ -131,7 +165,8 @@ await page.screenshot({ path: "board-light.png" });
   ```
 
 - **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.3.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.4.1` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
-- **文档同步**：涉及安装/升级/UI 入口的改动，需同步更新 [INSTALL.md](INSTALL.md)、[TROUBLESHOOTING.md](TROUBLESHOOTING.md)、[MARKET.md](MARKET.md) 以及中英文 README 的截图与描述；改完跑断链与 `npm run check:privacy` 检查。
+- **文档同步**：涉及安装/升级/UI 入口的改动，需同步更新 [INSTALL.md](INSTALL.md)、[TROUBLESHOOTING.md](TROUBLESHOOTING.md)、[MARKET.md](MARKET.md) 以及中英文 README 的截图与描述。
+- **文档检查（CI 强制）**：`npm run check:docs` 会校验公开文档的相对链接与锚点、README 中英结构（章节数 / 表格 / 代码块 / 截图集合）、截图引用、GitHub Pages 落地页与历史 `plugin/` 布局残留；`npm run check:version` 会校验 `package.json`、`CHANGELOG.md`、`docs/index.json`、`SECURITY.md` 与文档中兼容范围的一致性。改文档后必须跑这两项。
 - **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.4.1`）只用于演示精确安装，实际以 npm latest / 插件页为准。
 
 ## 8. 代码风格

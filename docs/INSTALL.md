@@ -17,6 +17,7 @@
 | Node.js | `>= 22.19.0`（DSH 已自带，无需单独安装） |
 | 账号 | 可选。不登录也能用本地规则分析；登录后可启用 AI 联网研判 |
 | 本机 DSH Home | 至少打开过一次 DSH（存在 `~/.dsh/profiles/desktop`） |
+| `bash` + `python3` | 仅源码脚本（方式 D2）与卸载脚本需要：`install.sh` / `uninstall.sh` 用 python3 读写 profile 清单；用插件页安装则不需要 |
 
 > Windows 用户如遇到 `~` 路径问题，请在 Git Bash 或 WSL 中执行命令；DSH 桌面版的插件页安装本身不需要命令行。
 
@@ -108,8 +109,13 @@ DSH 插件页安装 **npm/市场来源** 的包时，会把**精确版本**写�
 
 - 看板页头常驻：**搜索、扫描、设置齿轮、在右侧栏打开、新建**；
 - 页头「⋯」菜单**只有「导出 JSON」**；
-- 卡片有状态点、克制的优先级颜色、问题/产物/子任务计数与进度线；
-- 右侧栏形态页头同样常驻扫描、设置等图标按钮。
+- 统计行常驻状态计数 + 归档数 + 上一次扫描结论（`上次扫描 X 前 · 扫描完成：…`；失败带「重试」）；
+- 卡片有状态点、克制的优先级颜色、问题/产物/子任务计数与进度线；**完成卡不显示进度线**，
+  归档卡带「已归档」小标签；
+- 抽屉顶部有「AI 研判 / 规则推断」块（模型、置信度、最近研判时间、理由；来源会话在研判后又有新活动时标「可能已过期」），
+  抽屉「⋯」菜单里有「重新研判」；
+- AI 关闭时扫描按钮的悬停提示为「扫描（仅规则）」；
+- 右侧栏形态页头同样常驻扫描、设置等图标按钮，且任何宽度都保留工作区筛选。
 
 如果「⋯」里还能看到「设置」「在右侧栏打开」，或卡片没有状态点，说明加载的仍是 **0.3 的旧 bundle**，按第 3.5 节处理。
 
@@ -274,7 +280,7 @@ rm -rf ~/.dsh/storages/super-kanban
 | 看板状态（任务 / 设置 / 扫描状态） | `~/.dsh/storages/super-kanban/state.json` |
 | 会话分析缓存 | `~/.dsh/storages/super-kanban/sessions-cache.json` |
 | 损坏文件备份 | `~/.dsh/storages/super-kanban/backups/` |
-| 导出 | 看板页头「⋯」→ 导出 JSON（或设置弹窗里的「导出 JSON」）：`super-kanban-YYYYMMDD.json` |
+| 导出 | 看板页头「⋯」→ 导出 JSON（或设置弹窗里的「导出 JSON」）：`super-kanban-YYYY-MM-DD.json`（如 `super-kanban-2026-11-05.json`） |
 
 只读的数据源（插件不会修改）：`~/.dsh/storages/workspace.json`、`~/.dsh/sessions/**`、`~/.dsh/storages/session_projcache/**`。
 
