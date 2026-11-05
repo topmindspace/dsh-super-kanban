@@ -1,6 +1,7 @@
 # Super Kanban · 智能任务指挥台
 
 [![CI](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/dsh-super-kanban.svg)](https://www.npmjs.com/package/dsh-super-kanban)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 一个**生长在 DeepSeek Harness 界面里**的 AI 任务看板：它读取你各个工作区的真实 DSH 会话，自动研判任务的目标、进度、完成情况与问题，也可以完全手动管理。每张任务卡都能追溯到具体会话与具体一句话。
@@ -102,7 +103,7 @@ Super Kanban 把这些对话转成一张可持续维护的看板：
 
 DSH → 插件 → 添加插件 → 输入包名 `dsh-super-kanban`（可带版本，如 `dsh-super-kanban@0.3.0`）→ 安装 → 启用 → 刷新窗口。
 
-> npm 包已提交发布（v0.3.0）；npm 对首次发布会先进入 **staged release 待批准**状态，包所有者完成 2FA 批准后即可用 `npm` 方式安装。在此之前推荐方式 A（市场索引，Git 源）或方式 C/D。批准方式见 [docs/MARKET.md](docs/MARKET.md#6-发布流程维护者)。
+> npm 包已发布：`dsh-super-kanban@0.3.0`（https://www.npmjs.com/package/dsh-super-kanban）。若后续版本被 npm 置为 staged release 待批准，批准方式见 [docs/MARKET.md](docs/MARKET.md#6-发布流程维护者)。
 
 ### 方式 C：Git 仓库
 

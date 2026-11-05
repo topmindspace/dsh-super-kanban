@@ -20,7 +20,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 | 分发物 | 地址 / 名称 | 状态 |
 | --- | --- | --- |
 | 市场索引（Discover 用） | `https://topmindspace.github.io/dsh-super-kanban/index.json` | 仓库发布后自动可用（GitHub Pages，源目录 `docs/`） |
-| npm 包 | `dsh-super-kanban` | 由 GitHub Actions 在打 tag 时自动发布（需仓库 Secret `NPM_TOKEN`） |
+| npm 包 | `dsh-super-kanban`（已发布 v0.3.0） | 由 GitHub Actions 在打 tag 时自动发布（需仓库 Secret `NPM_TOKEN`）；首次发布可能进入 staged 待批准 |
 | Git 仓库 | `https://github.com/topmindspace/dsh-super-kanban` | 公开 |
 | 本地/手动安装 | 仓库内 `./install.sh` | 可用 |
 
@@ -113,7 +113,7 @@ npm publish --access public
 
 ### npm staged release 批准（首次发布/开启 staged publishing 时）
 
-GitHub Actions 的 `npm publish` 成功后，npm 可能先把该版本置为 **staged release**（registry 暂时显示 `0.0.0-stage` 占位、包不可安装），需要包所有者用 2FA 批准后才会上线。批准需要 npm CLI v11+ 与已登录的维护者账号：
+GitHub Actions 的 `npm publish` 成功后，npm 可能先把该版本置为 **staged release**（registry 暂时显示 `0.0.0-stage` 占位、包不可安装），需要包所有者用 2FA 批准后才会上线（通常几分钟内自动放行；若未放行按下面步骤手动批准；v0.3.0 已自动上线）。批准需要 npm CLI v11+ 与已登录的维护者账号：
 
 ```bash
 npx npm@11 login                       # 使用包所有者账号（需 2FA）
