@@ -19,8 +19,8 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 | 分发物 | 地址 / 名称 | 状态 |
 | --- | --- | --- |
-| 市场索引（Discover 用） | `https://topmindspace.github.io/dsh-super-kanban/index.json` | 仓库发布后自动可用（GitHub Pages，源目录 `docs/`） |
-| npm 包 | `dsh-super-kanban`（已发布 v0.3.0） | 由 GitHub Actions 在打 tag 时自动发布（需仓库 Secret `NPM_TOKEN`）；首次发布可能进入 staged 待批准 |
+| 市场索引（Discover 用） | `https://topmindspace.github.io/dsh-super-kanban/index.json` | 已上线（GitHub Pages，源目录 `docs/`；随 Release 自动更新版本） |
+| npm 包 | `dsh-super-kanban`（npm latest） | 由 GitHub Actions 在打 tag 时自动发布（需仓库 Secret `NPM_TOKEN`）；发布可能进入 staged 待批准 |
 | Git 仓库 | `https://github.com/topmindspace/dsh-super-kanban` | 公开 |
 | 本地/手动安装 | 仓库内 `./install.sh` | 可用 |
 

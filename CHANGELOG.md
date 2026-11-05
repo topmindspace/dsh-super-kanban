@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-05
+
+UI refinement release: put the frequently used toolbar actions back on the
+toolbar and bring back restrained emphasis and status marks without returning
+to the earlier visual clutter.
+
+### Added
+
+- **Toolbar actions are visible**: Settings and "open in right sidebar" are
+  now persistent icon buttons in the board header and the compact right-panel
+  header. The overflow menu keeps only **Export JSON**.
+- **Restrained emphasis and status marks**: cards show a small status dot and a
+  state-tinted progress line (backlog neutral, in progress brand, blocked
+  amber, done green), colored priority text (P0 error, P1 amber), issue count,
+  artifact count, subtask progress and a low-key AI/rules marker. Column
+  headers and the summary line carry matching status dots.
+- **Task drawer depth**: colored status/priority text, type icons for key
+  facts, severity-colored issues, and a brand-colored session link, while the
+  primary button and DSH typography stay neutral.
+- **English README** (`README.en.md`) alongside the Chinese README.
+
+### Changed
+
+- Color is now limited to dots, thin progress lines, small icons and short
+  labels; there are no colored blocks, gradients or glow effects. Light and
+  dark themes, the full board, the compact sidebar and narrow windows were all
+  checked against the DSH type scale and spacing.
+
 ## [0.3.0] - 2026-11-05
 
 First public release. Super Kanban turns the sessions of a DeepSeek Harness
@@ -55,5 +83,6 @@ workspace into a maintainable task board.
   with the local DSH account token; tokens are never logged or persisted by the
   plugin. See [SECURITY.md](./SECURITY.md).
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.4.0...HEAD
 [0.3.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.3.0
+[0.4.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.0

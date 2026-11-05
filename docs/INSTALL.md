@@ -16,6 +16,8 @@
 | 账号 | 可选。不登录也能用本地规则分析；登录后可启用 AI 联网研判 |
 | 本机 DSH Home | 至少打开过一次 DSH（存在 `~/.dsh/profiles/desktop`） |
 
+> 插件版本 **0.3.0 及以上**可用；本文档不绑定具体版本，升级方式见下文。
+
 > Windows 用户如遇到 `~` 路径问题，请在 Git Bash 或 WSL 中执行命令；DSH 桌面版本身的插件页安装不需要命令行。
 
 ## 1. 四种安装方式
@@ -39,7 +41,7 @@
 ### 方式 B：npm 包名
 
 1. DSH → 插件 → **添加插件**；
-2. 输入包名：`dsh-super-kanban`（可指定版本，如 `dsh-super-kanban@0.3.0`）；
+2. 输入包名：`dsh-super-kanban`（可指定版本，如 `dsh-super-kanban@<version>`）；
 3. 安装 → 启用 → 刷新窗口。
 
 适合网络可以访问 npm registry 的用户。插件无第三方运行时依赖。
