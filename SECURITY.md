@@ -5,12 +5,12 @@
 | Version | Supported |
 | --- | --- |
 | 0.5.x | ✅ (current release line) |
-| 0.4.x | ✅ (previous release line) |
+| 0.4.x | 🟡 (previous line — best-effort fixes; upgrade recommended) |
 | < 0.4 | ❌ (no longer supported) |
 
-Security fixes land on the current release line. If you run an older line, the
-recommended action is to upgrade to the latest `0.5.x` release (see
-[INSTALL.md](./docs/INSTALL.md)).
+Security fixes land on the current release line (`0.5.x`). The previous line
+(`0.4.x`) receives best-effort fixes only; upgrade to the latest `0.5.x`
+release (see [INSTALL.md](./docs/INSTALL.md)).
 
 ## Reporting a vulnerability
 

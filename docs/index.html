@@ -4,27 +4,36 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Super Kanban · DSH 智能任务看板</title>
-    <meta name="description" content="Super Kanban — 面向 DeepSeek Harness 的 AI 任务看板插件：从会话自动研判任务目标、进度、完成情况与问题。" />
+    <meta name="description" content="Super Kanban — 面向 DeepSeek Harness 的 AI 任务看板插件：从会话自动研判任务目标、进度、完成情况与问题，支持 AI 模型可选、一键继续任务、全页/右侧栏双形态。" />
+    <link rel="alternate" hreflang="en" href="https://github.com/topmindspace/dsh-super-kanban/blob/main/README.en.md" />
     <style>
       :root { color-scheme: light dark; --bg: #f9fafb; --fg: #151517; --muted: #61666b; --line: #e5e7eb; --card: #ffffff; --accent: #151517; }
       @media (prefers-color-scheme: dark) { :root { --bg: #151517; --fg: #f9fafb; --muted: #a1a6ad; --line: #2a2b2e; --card: #1c1d20; --accent: #f9fafb; } }
       * { box-sizing: border-box; }
       body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
-      main { max-width: 760px; margin: 0 auto; padding: 72px 24px 96px; }
-      header { margin-bottom: 48px; }
+      main { max-width: 780px; margin: 0 auto; padding: 64px 24px 88px; }
+      header { margin-bottom: 40px; }
       .kicker { font-size: 12px; letter-spacing: .12em; color: var(--muted); margin: 0 0 12px; }
       h1 { font-size: 32px; line-height: 1.2; letter-spacing: -.02em; margin: 0 0 12px; font-weight: 600; }
-      p.lede { font-size: 16px; color: var(--muted); margin: 0; max-width: 36em; }
-      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 28px 0 0; }
+      p.lede { font-size: 16px; color: var(--muted); margin: 0; max-width: 40em; }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 26px 0 0; }
       a.button { display: inline-block; padding: 9px 16px; border-radius: 10px; text-decoration: none; font-size: 14px; border: 1px solid var(--line); color: var(--fg); }
       a.primary { background: var(--accent); color: var(--bg); border-color: transparent; }
-      section { border-top: 1px solid var(--line); padding: 28px 0; }
+      section { border-top: 1px solid var(--line); padding: 26px 0; }
       h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
       ol, ul { margin: 0; padding-left: 20px; color: var(--fg); }
       li { margin: 6px 0; }
+      .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; padding: 0; list-style: none; }
+      .features li { margin: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+      .features strong { display: block; font-weight: 600; margin-bottom: 2px; }
+      .features span { color: var(--muted); font-size: 13px; }
       code { font: 12.5px/1.5 "SF Mono", Menlo, Consolas, monospace; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+      figure { margin: 0; }
+      img.shot { width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); display: block; }
+      figcaption { color: var(--muted); font-size: 12px; margin-top: 8px; }
       .muted { color: var(--muted); font-size: 13px; }
-      footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+      .links a { margin-right: 14px; }
+      footer { margin-top: 36px; color: var(--muted); font-size: 12px; }
     </style>
   </head>
   <body>
@@ -32,33 +41,100 @@
       <header>
         <p class="kicker">DEEPSEEK HARNESS · PLUGIN</p>
         <h1>Super Kanban · 智能任务看板</h1>
-        <p class="lede">读取你各工作区的 DSH 会话，自动研判任务目标、进度、完成情况与问题；关键事实优先、可追溯、能一键继续任务。全页主面板与右侧边栏双形态。</p>
+        <p class="lede">
+          把你本机 DSH 各工作区的真实会话，变成一张会自动更新的任务看板：自动判断任务目标、进度、卡点与产物，
+          关键事实优先，每张卡都能追溯回原始会话，并一键把任务继续回会话里。
+        </p>
+        <p class="muted" style="margin: 10px 0 0">
+          要求 DSH <code>&gt;= 0.2.1-rc.5 &lt; 0.3.0</code> · Node.js <code>&gt;= 22.19.0</code>（DSH 自带）· 零第三方依赖 · 无遥测
+        </p>
         <div class="actions">
           <a class="primary button" href="https://github.com/topmindspace/dsh-super-kanban">GitHub 仓库</a>
           <a class="button" href="https://github.com/topmindspace/dsh-super-kanban/blob/main/README.md">使用文档</a>
           <a class="button" href="https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md">安装指南</a>
+          <a class="button" href="https://github.com/topmindspace/dsh-super-kanban/releases">版本与更新</a>
         </div>
       </header>
 
       <section>
-        <h2>在 DSH 中安装</h2>
-        <ol>
-          <li>DSH → <strong>插件</strong> → <strong>发现（Discover）</strong>（实验性插件市场需先启用）</li>
-          <li>添加索引源：<code>https://topmindspace.github.io/dsh-super-kanban/index.json</code></li>
-          <li>选择 <strong>Super Kanban</strong> → 安装 → 启用 → <code>Cmd+R</code> 刷新</li>
-        </ol>
-        <p class="muted">也可以使用 npm 包名 <code>dsh-super-kanban</code>、Git 仓库地址或本地目录安装；详见安装指南。</p>
+        <h2>为什么值得用</h2>
+        <ul class="features">
+          <li><strong>不用再翻聊天记录</strong><span>自动从会话中提炼任务、状态、进度与下一步，增量更新不重复建卡。</span></li>
+          <li><strong>AI 模型可选</strong><span>默认跟随 DSH 默认模型，也可在 DSH 中接入第三方模型；不可用时自动降级本地规则。</span></li>
+          <li><strong>继续任务零 token</strong><span>本地模板拼出结构化提示词，确认后放回原会话或同工作区新会话，不会擅自发送。</span></li>
+          <li><strong>全页 / 侧栏双形态</strong><span>四列主看板用于总览规划，会话右侧栏用于边聊边看，宽度自适应。</span></li>
+          <li><strong>本地优先，无遥测</strong><span>看板数据只写本机 DSH 存储；AI 请求只把压缩摘要发给你在 DSH 配置的模型服务商。</span></li>
+          <li><strong>手动可控，全程可追溯</strong><span>可新建/编辑/拖拽/锁定字段，你改过的字段 AI 不再覆盖；关键事实、产物、证据一键跳回会话。</span></li>
+        </ul>
       </section>
 
       <section>
-        <h2>市场索引（供 Discover 添加）</h2>
+        <h2>安装（三种方式）</h2>
+        <ol>
+          <li><strong>插件市场（推荐）</strong>：DSH → 插件 → 发现（Discover）→ 添加索引源
+            <code>https://topmindspace.github.io/dsh-super-kanban/index.json</code> → 打开 <strong>Super Kanban</strong> 详情
+            → 在<strong>版本列表</strong>选择精确版本（如 <code>0.5.1</code>）→ 安装 → 启用 → <code>Cmd+R</code> 刷新。</li>
+          <li><strong>npm（可安装特定版本）</strong>：DSH → 插件 → 添加插件 → 输入
+            <code>dsh-super-kanban</code>（最新）或精确版本 <code>dsh-super-kanban@&lt;version&gt;</code>，例如
+            <code>dsh-super-kanban@0.5.1</code> → 安装 → 启用 → 刷新窗口。</li>
+          <li><strong>Git / 源码（可固定 tag）</strong>：克隆仓库 → <code>git checkout v&lt;version&gt;</code>（例如
+            <code>v0.5.1</code>）→ <code>./install.sh -y</code>（需 <code>bash</code> + <code>python3</code>）；不想用命令行可在 DSH 插件页添加仓库地址或选择本地目录。</li>
+        </ol>
+        <p class="muted">安装后可在 <strong>DSH 插件页</strong>查看版本，或按
+          <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#23-命令行查看实际安装版本">安装指南 2.3 节</a>
+          用命令查看实际运行版本；更新、固定版本、回滚、卸载见
+          <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md">安装指南</a>。</p>
+      </section>
+
+      <section>
+        <h2>第一次使用（约 1 分钟）</h2>
+        <ol>
+          <li>左侧栏点 <strong>任务看板</strong>（或会话右上角看板图标，用右侧栏形态打开）。</li>
+          <li>打开 <strong>设置</strong>：保持「AI 联网研判」开启，「AI 研判模型」默认跟随 DSH 即可。</li>
+          <li>点 <strong>扫描</strong>：按会话量需要几秒到几分钟，扫描结论会常驻在统计行。</li>
+          <li>点卡片查看详情；抽屉右上「⋯」可随时「重新研判」单张卡。</li>
+          <li>想接着干：点抽屉里的 <strong>「继续此任务」</strong>，确认提示词后放回会话自己发送。</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>界面预览</h2>
+        <figure>
+          <img class="shot" alt="Super Kanban 看板截图（虚构演示数据）" loading="lazy"
+            src="https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-light.png" />
+          <figcaption>看板：四列状态视图（截图来自完全虚构的演示数据，不含真实用户或工作区信息）。</figcaption>
+        </figure>
+        <figure style="margin-top: 14px">
+          <img class="shot" alt="Super Kanban 设置与 AI 模型选择（虚构演示数据）" loading="lazy"
+            src="https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/settings-dual.png" />
+          <figcaption>设置：AI 研判模型可选择「跟随 DSH 默认」或指定模型，预算默认自动。</figcaption>
+        </figure>
+      </section>
+
+      <section>
+        <h2>常见问题</h2>
+        <ul>
+          <li><strong>数据存在哪？卸载会丢吗？</strong>看板数据只写本机 <code>~/.dsh/storages/super-kanban/</code>；卸载插件不会删除数据。</li>
+          <li><strong>AI 不生效？</strong>确认看板设置里 AI 已开启，并在 DSH 设置 → 模型中配置好默认模型或第三方模型；旧 DSH 没有原生模型服务时自动使用本地规则引擎。</li>
+        </ul>
+      </section>
+
+      <section class="links">
+        <h2>市场索引与文档</h2>
         <p>
           <a href="./index.json">index.json</a> · format 1 ·
           <span id="index-version">版本列表以 index.json 为准</span> · MIT
         </p>
+        <p class="links">
+          <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/README.md">README</a>
+          <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md">安装指南</a>
+          <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md">排障手册</a>
+          <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md">安全与隐私</a>
+          <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/CHANGELOG.md">更新日志</a>
+        </p>
         <p class="muted">
           本页与 <code>index.json</code> 由仓库 <code>docs/</code> 目录发布到 GitHub Pages；
-          每次 Release 后由维护者重新生成索引，页面上的版本号直接读取索引文件。
+          页面版本号直接读取索引文件，不写死版本。
         </p>
       </section>
 

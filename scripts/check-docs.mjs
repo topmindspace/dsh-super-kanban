@@ -158,7 +158,10 @@ export function slugify(heading) {
     .trim()
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s_-]/gu, "")
-    .replace(/\s+/gu, "-");
+    // GitHub's slugger turns each space into one hyphen; a run of spaces
+    // therefore produces "--", not "-". Do not collapse whitespace here, or
+    // headings with " / " style separators get a false-positive anchor.
+    .replace(/\s/gu, "-");
   return text;
 }
 

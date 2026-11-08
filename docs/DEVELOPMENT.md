@@ -179,8 +179,9 @@ await page.screenshot({ path: "board-light.png" });
 
 ## 9. 发布流程
 
-`main` 分支已启用保护：PR 必须先通过 CI 状态检查（Node 22.19 / Node 24），禁止 force push 与删除分支；
-维护者发版时可按发布流程直接向 `main` 提交版本/索引 commit 并打 tag（tag 必须与 `package.json` 版本一致）。
+`main` 分支已启用保护：PR 必须先通过 CI 状态检查（Node 22.19 / Node 24）并获得 **1 个 approving review** 才能合并，
+且新 push 会作废旧审批；禁止 force push 与删除分支。维护者发版时可按发布流程直接向 `main` 提交版本/索引 commit 并打 tag
+（tag 必须与 `package.json` 版本一致）。发布后只保留最近 3 个 GitHub Release 页面（tag/commit 保留）。
 
 发布顺序：本地 `node scripts/release.mjs`（重生成索引 + 全量检查）→ 提交 `docs/index.json` → `git tag -a vX.Y.Z`
 → `git push origin main --tags` → release workflow 校验并 npm publish（provenance）+ 创建 GitHub Release +
@@ -190,7 +191,8 @@ await page.screenshot({ path: "board-light.png" });
 提交 PR 前至少运行：
 
 ```bash
-npm test && npm run validate && npm run check:privacy
+npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version
+# 或一次跑完：npm run check
 ```
 
 ## 10. 常见开发问题

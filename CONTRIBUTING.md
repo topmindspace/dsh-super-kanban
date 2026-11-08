@@ -67,7 +67,7 @@ so plugins you installed after Super Kanban keep their own configuration.
 Useful commands:
 
 ```bash
-npm test                      # node --test tests/
+npm test                      # node --test "tests/**/*.test.mjs"
 npm run validate              # metadata, syntax, files, cordis patch, market index
 npm run check:privacy         # scan repository text for personal data / credentials
 npm run check:docs            # doc links/anchors, screenshots, README.zh/en parity, Pages page

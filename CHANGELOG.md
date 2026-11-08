@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version pins and changelog tag links keep working. Older changelog entries
   (0.3.0/0.4.0) link to their tag trees instead of pruned release pages.
 
+- Documentation overhaul: a user-focused README (30-second overview, typical
+  scenarios, performance/limits, docs map), exact-version install examples for
+  the plugin market / npm / Git tag / local source, a richer GitHub Pages
+  landing page (features, three install paths, FAQ, two screenshots), and a
+  cross-document consistency pass (version policy, release links, source-install
+  behaviour, targeted uninstall scope).
+
 ## [0.5.1] - 2026-11-08
 
 Patch release focused on performance, editor consistency and maintenance after
@@ -51,10 +58,6 @@ the v0.5.0 release review.
 - Documentation: version examples updated to 0.5.1, the `main` branch protection
   and release flow documented, and the targeted uninstall behaviour described in
   INSTALL/CONTRIBUTING/DEVELOPMENT.
-
-> Repository maintenance: `main` is now a protected branch — force pushes and
-> deletion are blocked and pull requests require the CI checks (`Node 22.19`,
-> `Node 24`); maintainers can still push release commits and tags directly.
 
 ## [0.5.0] - 2026-11-08
 
@@ -340,11 +343,13 @@ workspace into a maintainable task board.
   its HTTP API to the authenticated owner only, and sends nothing to third
   parties. When the LLM engine is enabled it calls the DeepSeek inference API
   with the local DSH account token; tokens are never logged or persisted by the
-  plugin. See [SECURITY.md](./SECURITY.md).
+  plugin. See [SECURITY.md](./SECURITY.md). *(Historical v0.3.0 note; since
+  v0.5.0 model requests go through the DSH native model service — see the
+  current SECURITY.md.)*
 
 [Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.5.1...HEAD
-[0.5.1]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.5.1
+[0.5.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.1
 [0.3.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.3.0
 [0.4.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.4.0
-[0.4.1]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.1
-[0.5.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.5.0
+[0.4.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.4.1
+[0.5.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.0

@@ -1,6 +1,6 @@
 # Super Kanban · AI Task Command Center
 
-**Turns your DSH sessions into a task board that keeps itself up to date.** It reads the real sessions across your local workspaces and infers each task's goal, progress, completion and blockers — or you can manage everything by hand. Every card traces back to a specific session and a specific sentence.
+**Turns your DSH sessions into a task board that keeps itself up to date.** You keep several DSH sessions going at once — what got done, where it is stuck, whether anything shipped — and the board answers that without scrolling back through chats. Every card traces back to a specific session and a specific sentence.
 
 [![CI](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-super-kanban.svg)](https://www.npmjs.com/package/dsh-super-kanban)
@@ -12,48 +12,70 @@
 
 ![Task board (light)](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-light.png)
 
+## At a glance
+
+- **Who it is for**: people running several DSH sessions at once who want one glance at "what got done today / what is stuck".
+- **Who it is not for**: single-session work where DSH's own todo list is already enough.
+- **The difference**: tasks grow out of your sessions automatically instead of being maintained by hand; AI is only an enhancement, and the local rules engine still works when AI is off or unavailable.
+
 ## Quick start
 
-### Install (pick one)
+### Install (three common ways, local/source install also supported)
 
-1. **Plugin market (recommended)**: DSH → Plugins → Discover → add the index source `https://topmindspace.github.io/dsh-super-kanban/index.json` → install **Super Kanban** → enable and reload the window.
-2. **npm**: DSH → Plugins → Add plugin → enter `dsh-super-kanban` (use an exact version when upgrading) → install → enable and reload the window.
-3. **Git repository**: Plugins → Add plugin → paste `https://github.com/topmindspace/dsh-super-kanban` → install → enable and reload the window.
+All three common ways support **exact versions**; local directory / source install is covered in step 3.
 
-Local/source install, version verification, updates and rollback: [installation guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md).
+1. **Plugin market (recommended)**: DSH → Plugins → Discover → add the index source `https://topmindspace.github.io/dsh-super-kanban/index.json` → open **Super Kanban** → in the **version list** pick an exact version (for example `0.5.1`) → install → enable and reload the window.
+2. **npm (exact version)**: DSH → Plugins → Add plugin → enter `dsh-super-kanban@0.5.1` → install → reload the window. Command-line equivalent: `dsh plugin --profile desktop add dsh-super-kanban@0.5.1`.
+3. **Git / source (tag-pinned version)**: `git clone https://github.com/topmindspace/dsh-super-kanban.git` → `git checkout v0.5.1` → `./install.sh -y` → reload the window. `./install.sh` needs `bash` + `python3`; if you prefer no command line, pick the local directory in the DSH plugin page instead. Adding the repository directly in the plugin page pins the latest commit, so use this tag flow when you need a fixed version.
 
-### First run
+[Verify version](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#23-命令行查看实际安装版本) · [Upgrade](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级) · [Rollback](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#4-回滚到旧版本) · [Local directory install](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本) — full steps in the [installation guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md).
 
-1. Click **任务看板** (Task board) in the left sidebar (or the board icon in a conversation header for the right-sidebar layout).
+### First run (5 steps)
+
+1. Click **任务看板** (Task board) in the left sidebar (or the board icon in a conversation header for the right-sidebar layout). The UI is currently in Chinese.
 2. Open **Settings** from the board header: keep "AI 联网研判" (online AI) enabled, and leave "AI 研判模型" following the DSH default.
-3. Click **Scan**; the first scan takes seconds to minutes depending on session count, and the outcome stays in the stats line.
-4. Cards appear automatically — click one to open the drawer; the header "⋯" menu can re-analyze a single card at any time.
+3. Click **Scan**; the first scan takes seconds to minutes depending on session count, and the outcome stays in the stats line — you can cancel at any time.
+4. Click a card to open the drawer: status, progress, issues, key facts and evidence are all there; the "⋯" menu can re-analyze a single card.
 5. To continue the work: click **"继续此任务"** in the drawer — the prompt is placed in the original session input and never sent automatically, so review it and press send yourself.
 
 ## What it does
 
-- **Automatic cards that stay fresh**: derives title, goal, status, progress, issues and next steps from local DSH sessions, then keeps them updated on incremental scans without creating duplicates.
-- **AI analysis with a model you choose**: follows the DSH default model by default, or uses a third-party model configured in DSH; when AI is off or unavailable it falls back to local rules.
-- **Continue a task with zero tokens**: assembles a structured prompt locally and, after your confirmation, puts it into the original session or a new one in the same workspace — never sends it for you.
+- **A 30-second daily review**: four columns put sessions in the right state, so you can see at a glance what got done and what is stuck.
+- **No more scrolling chats**: titles, goals, progress, completion and issues update from the sessions automatically, without duplicate cards on rescans.
+- **Context where things got stuck**: issues, key facts, artifacts and the evidence timeline all link back to the source session.
+- **Continue a task without rewriting the prompt**: a local template builds a structured prompt and, after your confirmation, puts it into the original or a new session in the same workspace — zero tokens, never sent automatically.
+- **AI is optional, the model is yours**: follow the DSH default model or pick a third-party model configured in DSH; when AI is off or unavailable it falls back to local rules.
 - **Two layouts**: a full four-column board, or a compact board in the conversation's right sidebar that adapts to its width.
-- **Local-first**: board data is written only to `~/.dsh/storages/super-kanban/` on your machine, and the board itself has no telemetry.
-- **Zero third-party dependencies**: neither the plugin nor the validators ship runtime dependencies; no build step, no external resources.
 - **Manual control**: create / edit / drag / archive / delete / lock fields — AI never overwrites fields you changed.
-- **Fully traceable**: key facts, issues, artifacts and the evidence timeline all link back to the source session.
+- **Local-first**: board data is written only to `~/.dsh/storages/super-kanban/` on your machine, and the board itself has no telemetry.
+
+## Typical scenarios
+
+- **Every morning in 30 seconds**: open the board, scan the stats line and the four columns, and you know what shipped yesterday and what is blocked.
+- **Keep one card moving**: click "继续此任务" in the drawer and the prompt goes straight back to the original or a new session — no context rebuilding by hand.
+- **Maintain a large board manually**: create, drag and lock fields; a field you locked will not be overwritten by the next AI analysis.
 
 ## AI and models
 
 - **Follows the DSH default model by default** — you do not enter any key in the board.
-- **Using a third-party model**: add a model provider in **DSH Settings → Models** (OpenAI / Anthropic / OpenRouter and similar, or a custom compatible endpoint) and enter its API key; then pick it under board Settings → "AI 研判模型", or keep following the default.
+- **Using a third-party model**: add a model provider in **DSH Settings → Models** (OpenAI / Anthropic / OpenRouter and similar, or a custom compatible endpoint) and enter its API key; then pick it under board Settings → "AI 研判模型".
 - **Without a native model service** (old DSH or a minimal composition) the board switches to the local rules engine automatically and explains why in the scan outcome.
-- **Privacy**: AI analysis only sends a compressed session digest (≤1.5KB per session) to the model provider you configured in DSH — choosing a third-party provider sends it there; the board never reads or stores credentials and has no telemetry. See [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md).
+- **Privacy**: AI analysis only sends a compressed session digest (≤1.5KB per session) to the model provider you configured in DSH; the board has no telemetry and stores no credentials. See [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md).
 
 ## Settings and budget
 
 - **AI budget**: "Auto" by default = use up to the daily remainder per scan; or fix it at 20 / 40 / 80 / 150 calls.
 - **Daily limit**: 150 budget units by default, reset at local midnight (budget units are not a hard cost cap).
-- **Scanning**: the auto-scan interval is configurable; sessions a scan could not finish continue on the next scan, and the outcome says "remaining N sessions continue next scan" — nothing is lost.
+- **Scanning**: the auto-scan interval is configurable; sessions a scan could not finish continue on the next scan, and the outcome says "remaining N sessions continue next scan".
 - **Entry preferences**: "Display and entry" offers both / full page only / right sidebar only; changes take effect after reloading the window.
+
+## Performance and limits
+
+- **Incremental scanning**: only changed sessions are processed, so everyday overhead is small; a full parse happens only when you explicitly re-scan everything.
+- **Initial scan range**: the most recent 30 days by default; adjustable to 7 / 14 / 30 / 90 days in settings.
+- **AI budget and duration**: each scan has a budget-unit cap and the AI phase is limited to about 10 minutes; beyond that the outcome says "remaining N sessions continue next scan" — nothing is lost.
+- **Large boards**: on a big library the first scan may span several rounds; you can cancel at any time and completed work is kept.
+- **Data size**: board data lives in `~/.dsh/storages/super-kanban/` (tasks / settings / scan state + session cache) and there is no telemetry.
 
 ## Screenshots
 
@@ -79,7 +101,7 @@ More screenshots: [demo GIF](https://raw.githubusercontent.com/topmindspace/dsh-
 | Third-party dependencies | None (plugin and `scripts/` validators are dependency-free) |
 | AI models | Provided by DSH's native model service: follows the DSH default model, or a third-party provider |
 
-Security fixes land on the current minor line; cross-minor upgrades need an exact version, see [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级). If the entry disappears after a DSH major upgrade, reinstall the plugin first — board data is not lost.
+**Version policy**: the current `0.5.x` line gets proactive security fixes; the previous `0.4.x` line is best-effort (upgrading to `0.5.x` is recommended); GitHub Releases keeps only the latest three version pages, so install historical versions from the plugin-market version list or a Git tag with an exact version. See [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md) and [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级). Cross-minor upgrades need an exact version; if the entry disappears after a DSH major upgrade, reinstall the plugin first — board data is not lost.
 
 ## FAQ
 
@@ -87,10 +109,10 @@ Security fixes land on the current minor line; cross-minor upgrades need an exac
 A: Press `Cmd+R` to reload the window; if it is still missing, fully quit and reopen DSH. Still missing? Check the plugin page diagnostics, or see the [troubleshooting guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md#入口缺失).
 
 **Q: AI does not work / the board always shows "rules"?**
-A: Make sure "AI 联网研判" is enabled in settings and that a model is configured in DSH Settings → Models (sign in, or enter an API key); board Settings → "AI 研判模型" can also pin a specific model. Old DSH builds without the native model service always use the rules engine until DSH is upgraded.
+A: Make sure "AI 联网研判" is enabled in settings and that a model is configured in DSH Settings → Models; board Settings → "AI 研判模型" can also pin a specific model. Old DSH builds without the native model service always use the rules engine.
 
-**Q: How do I update?**
-A: Third-party plugins have no automatic upgrade: uninstall the old version → install the target version (exact version for cross-minor upgrades) → reload the window. See [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级).
+**Q: How do I update to a specific version?**
+A: Third-party plugins have no automatic upgrade: uninstall the old version → install the exact target version (for example `dsh-super-kanban@0.5.1`, or pick it in the market version list) → reload the window. See [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级).
 
 **Q: Where is the data? Is it lost after uninstalling?**
 A: `~/.dsh/storages/super-kanban/` (`state.json` / `sessions-cache.json` / `backups/`). Uninstalling the plugin does not delete it; to wipe it completely see the [troubleshooting guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md#卸载与数据保留).
@@ -98,10 +120,17 @@ A: `~/.dsh/storages/super-kanban/` (`state.json` / `sessions-cache.json` / `back
 **Q: How do I uninstall?**
 A: Remove it from the plugin page, or run `./uninstall.sh -y` in the source directory, then reload the window.
 
+## Documentation map
+
+- Install / upgrade / rollback / uninstall: [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)
+- Troubleshooting (entry / AI / scanning / budget): [TROUBLESHOOTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
+- Security and privacy boundaries: [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md)
+- Development and maintenance: [DEVELOPMENT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md), [MARKET.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/MARKET.md), [ARCHITECTURE.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md), [CONTRACT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md), [DESIGN.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DESIGN.md)
+
 ## Development and contributing
 
 - Zero third-party dependencies, no build: the host is Node ESM and the browser half is a single `client.js`; run `npm test` for tests and `npm run check` for every validator at once.
-- Repository layout, debugging and commands: [CONTRIBUTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) and [docs/DEVELOPMENT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md).
+- Repository layout and debugging: [CONTRIBUTING.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) and [docs/DEVELOPMENT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md).
 - Architecture and interfaces: [ARCHITECTURE.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md), [CONTRACT.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md); visual rules: [DESIGN.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DESIGN.md).
 - For security issues, please follow [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md) and report privately instead of opening a public issue.
 

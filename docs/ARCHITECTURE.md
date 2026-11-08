@@ -84,6 +84,7 @@ discover()                     workspace.json + sessions 目录 + projcache
    │
    ▼
 loadParsed()                   zstd 多帧解压 → JSONL → 事件模型
+   │                           （成功结果按签名 + meta 指纹进入有界 LRU，最多 6 条）
    │                           （用户请求 / AI 回复 / 工具调用 / todo /
    │                             交付物 / 错误 / 轮次结束原因 / 标题）
    ▼
@@ -101,6 +102,7 @@ LLM 门控（可选）                 meaningful-change 门控 + 单次/每日�
    │
    ▼
 store.saveState()              原子写（tmp + rename）；扫描进度经轮询可见（SSE 端点供第三方使用）
+   │                           （浏览器端用轻量 stateSignature 判断是否需要重渲染）
 ```
 
 关键行为：
@@ -108,6 +110,8 @@ store.saveState()              原子写（tmp + rename）；扫描进度经轮�
 - **会话锚点**：自动任务以 `primarySessionId` 为种子生成稳定 ID，重复扫描不会重复建卡。
 - **增量门控**：仅在「用户消息数增加、上一轮 turn 已结束、首次分析、手动重新研判」时调用模型；活跃 turn 内不重复分析；同一会话有最小间隔。
 - **模型解析**：每次扫描 / 单卡重判 / 润色前解析一次（`settings.aiProvider/aiModel` → DSH 默认模型 → 目录首模型兜底）。
+- **解析缓存**：`loadParsed` 的有界 LRU(6) 以「文件签名 + 文件 stat + 解析相关 meta 指纹」为键，抽屉轮询/重判/待办导入复用解析结果，文件或元数据变化时重新解析，失败不缓存。
+- **刷新成本**：浏览器每 4s（扫描中 1.2s）轮询 `/state`，但只在轻量 `stateSignature`（任务 id/updatedAt/status/archived + scan/settings/usage/stats/activity/workspaces）变化时才重渲染，避免大 evidence 数组的重复序列化。
   显式或默认 provider 不可用时不自动换模型，直接规则降级并在扫描结论说明；无 `ctx.llm` 的旧 DSH 同样规则降级。
   请求不传 `sessionId`、不传 tools / 图片。
 - **预算**：单次预算按 `aiBudgetMode` 解析（`auto` = min(待研判会话, 每日剩余)；`fixed` = min(单次上限 5–150, 每日剩余)）；
