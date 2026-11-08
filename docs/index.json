@@ -70,6 +70,18 @@
       },
       "versions": [
         {
+          "version": "0.5.1",
+          "publishTimestamp": 1794126475,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/topmindspace/dsh-super-kanban",
+            "commit": "3ffd8da3767f86a4a737c2a940eef879d460e1cf"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.5 <0.3.0"
+          }
+        },
+        {
           "version": "0.5.0",
           "publishTimestamp": 1794120087,
           "source": {
