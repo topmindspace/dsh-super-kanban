@@ -167,12 +167,19 @@ change is not obvious.
 
 ### `main` branch protection
 
-`main` is protected: force pushes and branch deletion are blocked, and a pull
-request must pass the CI status checks (the `Node 22.19` and `Node 24` matrix
-jobs) before it can merge. Maintainers may commit release changes and push
-version tags directly as part of the release process documented in
-[docs/MARKET.md](./docs/MARKET.md). Never force-push or delete `main`, and only
-tag a commit whose `package.json` version matches the tag.
+`main` is protected: force pushes and branch deletion are blocked; a pull
+request requires **one approving review** and the CI status checks
+(`Node 22.19` and `Node 24`) before it can merge, and new pushes dismiss stale
+approvals. With the current single-maintainer setup only the owner has write
+access, so external PRs can only be approved/merged by the maintainer.
+Maintainers may commit release changes and push version tags directly as part of
+the release process documented in [docs/MARKET.md](./docs/MARKET.md). Never
+force-push or delete `main`, and only tag a commit whose `package.json` version
+matches the tag.
+
+The release workflow keeps only the **three newest GitHub Releases**; older
+release pages are pruned (tags and commits are retained, so historical version
+pins in the market index and older changelog tag links still resolve).
 
 ## Reporting bugs
 

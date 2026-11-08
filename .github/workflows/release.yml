@@ -121,6 +121,21 @@ jobs:
             --generate-notes \
             --verify-tag
 
+      # Keep the public Releases page short: only the three newest release
+      # pages are kept. Tags and commits are NOT deleted, so historical version
+      # pins (plugin market index) and changelog tag links keep working.
+      - name: Prune old releases (keep the newest three)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' |
+          while read -r tag; do
+            if [ -z "$tag" ]; then continue; fi
+            echo "Deleting old release page $tag (tag and commit are kept)"
+            gh release delete "$tag" --yes || true
+          done
+
   market-index:
     name: Update market index on main
     needs: publish

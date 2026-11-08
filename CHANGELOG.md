@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Repository maintenance: `main` now requires a pull request with one
+  approving review in addition to the passing CI checks (maintainers can still
+  bypass for release commits); GitHub Releases are pruned to the newest three
+  after every release, while tags and commits are retained so historical
+  version pins and changelog tag links keep working. Older changelog entries
+  (0.3.0/0.4.0) link to their tag trees instead of pruned release pages.
+
 ## [0.5.1] - 2026-11-08
 
 Patch release focused on performance, editor consistency and maintenance after
@@ -335,7 +344,7 @@ workspace into a maintainable task board.
 
 [Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.5.1...HEAD
 [0.5.1]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.5.1
-[0.3.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.3.0
-[0.4.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.0
+[0.3.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.3.0
+[0.4.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.4.0
 [0.4.1]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.1
 [0.5.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.5.0

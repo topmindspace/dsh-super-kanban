@@ -138,8 +138,9 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 `main` 分支已启用 **branch protection**：
 
 - 禁止 force push，禁止删除 `main`；
-- PR 必须通过 CI 状态检查（`Node 22.19` 与 `Node 24` 两个矩阵 job）才能合并；
-- 管理员 / 维护者可按本流程直接向 `main` 提交发版 commit 并推送 tag（tag 必须与 `package.json` 版本一致）。
+- PR 必须通过 CI 状态检查（`Node 22.19` 与 `Node 24` 两个矩阵 job）并至少获得 **1 个 approving review** 才能合并（仅具备 write 权限的人可审批/合并；当前只有维护者）；
+- 管理员 / 维护者可按本流程直接向 `main` 提交发版 commit 并推送 tag（tag 必须与 `package.json` 版本一致）；
+- 发布后只保留最近 **3 个 GitHub Release 页面**（由 release workflow 自动清理，tag 与 commit 保留，历史版本 pin 与旧 CHANGELOG 链接仍可用）。
 
 发布分「本地准备」与「GitHub Actions 发布」两段：
 
@@ -149,8 +150,8 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 3. **提交索引**：若脚本提示索引有变化，`git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for vX.Y.Z"`。
 4. **打 tag 并推送**：`git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin main --tags`。
 5. **release workflow**：`.github/workflows/release.yml` 由 tag 触发，校验 tag 与 `package.json` / `CHANGELOG` 版本，
-   依次运行各单项检查，`npm publish`（带 provenance），创建 GitHub Release；发布成功后由 `market-index` job
-   重新生成索引并回写 `main`。
+   依次运行各单项检查，`npm publish`（带 provenance），创建 GitHub Release，并把概览页清理到最近 3 个 Release；
+   发布成功后由 `market-index` job 重新生成索引并回写 `main`。
 
 > 前置条件：仓库 Secret `NPM_TOKEN` 已配置（npm automation token，具备 `dsh-super-kanban` 发布权限）；
 > 缺失时 workflow 的 publish job 会显式失败，而不是静默跳过发布。
