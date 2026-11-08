@@ -438,6 +438,56 @@ test("task.update cannot pollute Object.prototype through the patch", async (t) 
   assert.equal(state.tasks[0].polluted, undefined);
 });
 
+test("task.update only detaches auto cards when a field really changes", async (t) => {
+  const { service } = await setup(t, { withSessions: true });
+  await command(service, "scan.start", { mode: "incremental" });
+  await waitForScan(service);
+  const state = (await request(service, { route: "/state" })).json;
+  const auto = state.tasks.find((task) => task.origin === "auto");
+  assert.ok(auto, "the scan must produce at least one auto card");
+
+  // No-op / invalid patches must not wash away the automatic-card identity.
+  const empty = await command(service, "task.update", { id: auto.id, patch: {} });
+  assert.equal(empty.json.data.origin, "auto");
+  const sameStatus = await command(service, "task.update", { id: auto.id, patch: { status: auto.status } });
+  assert.equal(sameStatus.json.data.origin, "auto");
+  const invalid = await command(service, "task.update", {
+    id: auto.id,
+    patch: { status: "weird", priority: "P9", progress: "abc" },
+  });
+  assert.equal(invalid.json.data.origin, "auto");
+
+  // A real edit detaches the card (so duplicate merging no longer rewrites it).
+  const edited = await command(service, "task.update", { id: auto.id, patch: { title: "用户改过的标题" } });
+  assert.equal(edited.json.data.origin, "auto+edited");
+  assert.equal(edited.json.data.title, "用户改过的标题");
+
+  // Manual cards keep their origin through edits.
+  const manual = (await command(service, "task.create", { title: "Manual card" })).json.data;
+  const manualEdit = await command(service, "task.update", { id: manual.id, patch: { title: "Manual edited" } });
+  assert.equal(manualEdit.json.data.origin, "manual");
+});
+
+test("task.move only detaches auto cards on a real column change", async (t) => {
+  const { service } = await setup(t, { withSessions: true });
+  await command(service, "scan.start", { mode: "incremental" });
+  await waitForScan(service);
+  const state = (await request(service, { route: "/state" })).json;
+  const auto = state.tasks.find((task) => task.origin === "auto");
+  assert.ok(auto, "the scan must produce at least one auto card");
+
+  // Reordering inside the same column is not a status change.
+  const sameColumn = await command(service, "task.move", { id: auto.id, status: auto.status, index: 0 });
+  assert.equal(sameColumn.json.data.status, auto.status);
+  assert.equal(sameColumn.json.data.origin, "auto");
+
+  // An actual column change marks the card as user-edited.
+  const target = auto.status === "done" ? "backlog" : "done";
+  const moved = await command(service, "task.move", { id: auto.id, status: target, index: 0 });
+  assert.equal(moved.json.data.status, target);
+  assert.equal(moved.json.data.origin, "auto+edited");
+});
+
 test("task.move / archive / delete keep the board consistent", async (t) => {
   const { service } = await setup(t);
   const first = (await command(service, "task.create", { title: "First" })).json.data;

@@ -2052,6 +2052,26 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return STATUSES.includes(value) ? value : fallback;
   }
 
+  /**
+   * Snapshot of the user-editable fields. An auto card only loses its `auto`
+   * identity (and with it duplicate-merge eligibility) when this snapshot really
+   * changes — an empty patch, repeated values or a no-op reorder must not count.
+   */
+  function editableSnapshot(task) {
+    return JSON.stringify([
+      task.title,
+      task.goal,
+      task.status,
+      task.progress,
+      task.priority,
+      task.tags,
+      task.nextSteps,
+      task.issues,
+      task.milestones,
+      task.lockedFields,
+    ]);
+  }
+
   function normalizedPriority(value, fallback) {
     return PRIORITIES.includes(value) ? value : fallback;
   }
@@ -2170,6 +2190,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     "task.update"(payload) {
       const task = requireTask(payload);
       const patch = payload.patch && typeof payload.patch === "object" ? payload.patch : {};
+      const beforeEdit = editableSnapshot(task);
       let otherChanged = false;
       for (const field of FIELD_NAMES) {
         // hasOwn: a patch with "__proto__"/"constructor" keys must not be read
@@ -2259,7 +2280,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         otherChanged = true;
       }
       if (otherChanged) pushHistory(task, { kind: "edit", by: "user", note: "用户编辑任务" });
-      if (task.origin === "auto") task.origin = "auto+edited";
+      // Only a real user change detaches an auto card from duplicate merging; a
+      // no-op or invalid patch must not wash away its auto identity.
+      if (task.origin === "auto" && editableSnapshot(task) !== beforeEdit) task.origin = "auto+edited";
       task.updatedAt = new Date().toISOString();
       truncateTask(task);
       persistState();
@@ -2276,6 +2299,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (nextStatus !== task.status) {
         pushHistory(task, { kind: "status", from: task.status, to: nextStatus, by: "user", note: "拖拽换列" });
         task.status = nextStatus;
+        // Same rule as task.update: only a real column change marks the card as
+        // user-edited (reordering inside a column does not).
+        if (task.origin === "auto") task.origin = "auto+edited";
       }
       const group = state.tasks
         .map((candidate, candidateIndex) => ({ candidate, candidateIndex }))

@@ -56,7 +56,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 ### 方式 B：npm 包名
 
-DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.5.0`，升级时推荐）→ 安装 → 启用 → 刷新。
+DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.5.1`，升级时推荐）→ 安装 → 启用 → 刷新。
 
 ### 方式 C：Git 仓库
 
@@ -81,7 +81,7 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 注意：
 
 - 插件页安装 npm/市场来源会用 `pnpm add --save-exact`，把**精确版本**写入 profile 依赖；所以升级需要重新安装目标版本，而不是只点一下刷新。
-- 若 profile 里被人为改成**范围依赖**：`^0.5.0` 可自然解析到 0.5.x 补丁版（0.5.1…），但 `^0.4.0` 永远不会解析到 0.5.x —— 跨 minor 升级必须安装**精确版本**（如 `dsh-super-kanban@0.5.0`）。
+- 若 profile 里被人为改成**范围依赖**：`^0.5.0` 可自然解析到 0.5.x 补丁版（0.5.1…），但 `^0.4.0` 永远不会解析到 0.5.x —— 跨 minor 升级必须安装**精确版本**（如 `dsh-super-kanban@0.5.1`）。
 - 市场索引由 Release workflow 在发布成功后自动重新生成并提交 `docs/index.json`（维护者也可手动 `npm run market:index`）；索引未刷新时，详情页看不到新版本。
 
 更完整的用户升级/验证/回滚步骤见 [INSTALL.md](INSTALL.md#3-更新插件升级)。
@@ -111,10 +111,10 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
       "repository": { "url": "https://github.com/topmindspace/dsh-super-kanban" },
       "metadata": { "category": "productivity", "labels": ["kanban"], "keywords": ["dsh", "kanban"] },
       // 详情页默认展示 versions 中的第一个（按版本号从新到旧排列）；
-      // 也可选填 "defaultVersion": "0.5.0" 指定默认版本。
+      // 也可选填 "defaultVersion": "0.5.1" 指定默认版本。
       "versions": [                              // 索引中的全部可用版本（新版本由维护者生成）
         {
-          "version": "0.5.0",
+          "version": "0.5.1",
           "publishTimestamp": 1794000000,          // Unix 秒
           "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0" },
           "source": { "type": "npm" }              // 或 { "type": "git", "url": "...", "commit": "<40位 SHA>" }
@@ -135,38 +135,62 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 
 ## 5. 发布流程（维护者）
 
+`main` 分支已启用 **branch protection**：
+
+- 禁止 force push，禁止删除 `main`；
+- PR 必须通过 CI 状态检查（`Node 22.19` 与 `Node 24` 两个矩阵 job）才能合并；
+- 管理员 / 维护者可按本流程直接向 `main` 提交发版 commit 并推送 tag（tag 必须与 `package.json` 版本一致）。
+
+发布分「本地准备」与「GitHub Actions 发布」两段：
+
+1. **版本变更**：`package.json` + `CHANGELOG.md` 同步，提交到 `main`，保持工作区干净。
+2. **本地发布辅助**：`node scripts/release.mjs`（或 `npm run release`）。脚本要求工作区干净，会重新生成
+   `docs/index.json`，依次运行 test / validate / check:privacy / check:docs / check:version，并打印下一步命令。
+3. **提交索引**：若脚本提示索引有变化，`git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for vX.Y.Z"`。
+4. **打 tag 并推送**：`git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin main --tags`。
+5. **release workflow**：`.github/workflows/release.yml` 由 tag 触发，校验 tag 与 `package.json` / `CHANGELOG` 版本，
+   依次运行各单项检查，`npm publish`（带 provenance），创建 GitHub Release；发布成功后由 `market-index` job
+   重新生成索引并回写 `main`。
+
+> 前置条件：仓库 Secret `NPM_TOKEN` 已配置（npm automation token，具备 `dsh-super-kanban` 发布权限）；
+> 缺失时 workflow 的 publish job 会显式失败，而不是静默跳过发布。
+
 ```bash
 # 0. 版本变更（package.json + CHANGELOG.md 必须同步）
-npm version 0.5.0 --no-git-tag-version   # 只改 package.json 的版本号（版本号以本次发布为准）
-#   - 在 CHANGELOG.md 顶部添加 "## [0.5.0] - YYYY-MM-DD" 与底部 tag 链接
+npm version 0.5.1 --no-git-tag-version   # 只改 package.json 的版本号（版本号以本次发布为准）
+#   - 在 CHANGELOG.md 顶部添加 "## [0.5.1] - YYYY-MM-DD" 与底部 tag 链接
 #   - 提交这一步，使工作区保持干净
-git add package.json CHANGELOG.md && git commit -m "chore: release v0.5.0"
+git add package.json CHANGELOG.md && git commit -m "chore: release v0.5.1"
 
-# 1. 更新市场索引并提交（可选：通常由 release workflow 在发布成功后自动重新生成并回写 main；
-#    若希望 tag 前的索引就指向 release commit，可在这里手动执行）
-npm run market:index
-git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for v0.5.0"
+# 1. 本地发布辅助：重新生成索引 + 全量检查（要求工作区干净）
+node scripts/release.mjs
 
-# 2. 全量自检（测试 + 校验 + 隐私 + 文档 + 版本一致性）
-npm run check
+# 2. 提交索引（若 release.mjs 提示有变化）
+git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for v0.5.1"
 
-# 3. 发布（二选一）
-#  A) 推荐：GitHub Actions 自动发布 npm
-#     - 先在 npmjs.com 创建 Automation token，存为仓库 Secret：NPM_TOKEN
-#     - push tag 触发 .github/workflows/release.yml
-#     - verify job 会依次执行各单项校验脚本（test / validate / check:privacy / check:docs / check:version），
-#       校验 tag 与 package.json / CHANGELOG 版本一致；索引的版本号由 check:version 校验，
-#       索引里的 commit pin 由发布后的 market-index job 自动修正
-git tag v0.5.0 && git push origin main --tags
-
-#  B) 本地发布
-npm login
-npm publish --access public
+# 3. 打 tag 并推送 → 触发 release workflow
+git tag -a v0.5.1 -m "v0.5.1"
+git push origin main --tags
 ```
 
-> 也可以直接运行 `npm run release`（`scripts/release.mjs`）：它要求工作区干净（版本 commit 已完成），
-> 自动重新生成市场索引并依次运行全部检查，然后打印需要执行的指数提交与 tag 命令。
-> `--dry-run` 只做检查与索引 schema 校验（不比对已提交索引的 commit pin），不写文件。
+> 脚本支持 `--dry-run`：只做检查与索引 schema 校验（不比对已提交索引的 commit pin），不写文件。
+> **不要** force push 或删除 `main`；tag 必须与 `package.json` 版本一致，否则 release workflow 会在 verify 阶段失败。
+> 本地直接 `npm publish` 仍可作为应急手段（需要 npm 登录），但推荐走 CI 以保留 provenance 与 GitHub Release。
+
+### 保护分支下的索引回写
+
+`market-index` job 需要在 `main` 上提交一次索引更新。若 branch protection 阻止 GitHub Actions bot 推送
+（例如要求所有提交走 PR，或禁止 bot 直推），该 job 会失败但被 `continue-on-error: true` 跳过，npm 发布与
+GitHub Release 不受影响。此时手动补索引：
+
+```bash
+npm run market:index
+git add docs/index.json docs/icon.svg
+git commit -m "chore: update plugin market index for v0.5.1"
+git push origin main
+```
+
+推送同样受保护规则约束：管理员可直接推送；普通贡献者需通过 PR（由维护者合并后索引才算刷新）。
 
 ### npm staged release 批准（首次发布/开启 staged publishing 时）
 

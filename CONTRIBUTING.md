@@ -32,7 +32,7 @@ and the pull-request flow.
 | `docs/` | Public docs, screenshots, the GitHub Pages landing page (`index.html`) and the plugin-market index (`index.json`). |
 | `scripts/` | Zero-dependency validators, docs/version checkers, market-index generator and release helper. |
 | `tests/` | `node --test` suites; no third-party runner. |
-| `install.sh` / `uninstall.sh` | Link/unlink the local checkout into a DSH profile. |
+| `install.sh` / `uninstall.sh` | Link a local checkout into a DSH profile / remove this plugin's dependency and bundle entries from it (the uninstaller edits the profile in place instead of restoring the pre-install file). |
 | `.github/` | CI, release workflow, Dependabot config and issue/PR templates. |
 | `CHANGELOG.md` | Keep a Changelog release notes; must match `package.json` on every release. |
 | `dev/` | Maintainer-local dev/screenshot/QA tooling — **git-ignored, not distributed**; see `dev/README.md`. |
@@ -58,6 +58,11 @@ Open `http://127.0.0.1:56790`, reload the window, and pick **任务看板** in t
 sidebar. Because `install.sh` links the working tree, host-side edits
 (`index.mjs`, `server/**`) take effect after a reload of the DSH profile; the
 browser bundle (`client.js`) is also loaded from the working tree.
+
+`./uninstall.sh -y` removes this plugin's dependency and bundle entries from the
+profile in place. It does **not** restore the whole pre-install profile from
+`super-kanban-profile-backup.json` (that file is a first-install snapshot only),
+so plugins you installed after Super Kanban keep their own configuration.
 
 Useful commands:
 
@@ -159,6 +164,15 @@ change is not obvious.
    review.
 5. By contributing you agree that your contribution is licensed under the
    repository's [MIT License](./LICENSE).
+
+### `main` branch protection
+
+`main` is protected: force pushes and branch deletion are blocked, and a pull
+request must pass the CI status checks (the `Node 22.19` and `Node 24` matrix
+jobs) before it can merge. Maintainers may commit release changes and push
+version tags directly as part of the release process documented in
+[docs/MARKET.md](./docs/MARKET.md). Never force-push or delete `main`, and only
+tag a commit whose `package.json` version matches the tag.
 
 ## Reporting bugs
 

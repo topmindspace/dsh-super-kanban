@@ -25,6 +25,13 @@ import crypto from "node:crypto";
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 export const SESSION_FILE_NAME = "session.v4.jsonl.zstd";
 const PROJCACHE_DIR = ["storages", "session_projcache", "sessions"];
+/**
+ * Bounded LRU capacity for parsed session logs. /session polling, task.analyze
+ * and importTodos re-read the same log within a short window; caching the parse
+ * avoids repeated read+zstd+JSONL+event work on long sessions. Kept small (6)
+ * because each parsed log retains its full event-derived structure in memory.
+ */
+const PARSED_CACHE_LIMIT = 6;
 /** Injected user-role events that are useful context but not human requests. */
 const ASYNC_SIGNAL_KINDS = new Set(["agent-message", "subagent-settled", "tool-jobs", "model-selection"]);
 
@@ -455,6 +462,12 @@ export function createSessionSource({ dshHome } = {}) {
   if (!dshHome) throw new Error("createSessionSource requires dshHome");
   const home = dshHome;
   const sessionsRoot = path.join(home, "sessions");
+  /**
+   * file path -> { sigKey, actualSig, parsed }. Map iteration order is the LRU
+   * order: reading an entry re-inserts it at the end, writing evicts the front.
+   * Entries are only stored for successfully parsed logs.
+   */
+  const parsedCache = new Map();
 
   function readWorkspaceRegistry() {
     const file = path.join(home, "storages", "workspace.json");
@@ -711,8 +724,71 @@ export function createSessionSource({ dshHome } = {}) {
     return { workspaces, sessions, diagnostics, childToParent };
   }
 
-  /** Read + decompress + parse one session file (synchronous, ~10-300ms). */
+  /** Current `${size}:${mtimeMs}` signature of a session file ("" when unreadable). */
+  function fileSigKey(file) {
+    try {
+      const stat = fs.statSync(file);
+      return `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Metadata the parser bakes into its result (titles/goals/lineage come from the
+   * projcache or workspace registry, which can change without a new session-file
+   * signature). The cache must compare these too, or it could serve a parse whose
+   * title/goal is stale relative to the caller's meta.
+   */
+  function metaFingerprint(meta) {
+    return JSON.stringify([
+      meta?.id,
+      meta?.title,
+      meta?.parentSession,
+      meta?.delegationDepth,
+      meta?.createdAt,
+      meta?.cwd,
+      meta?.dir,
+      meta?.goalText,
+      meta?.goalStatus,
+      meta?.turnOutline,
+    ]);
+  }
+
+  function rememberParsed(file, sigKey, actualSig, metaKey, parsed) {
+    parsedCache.delete(file);
+    parsedCache.set(file, { sigKey, actualSig, metaKey, parsed });
+    while (parsedCache.size > PARSED_CACHE_LIMIT) {
+      // Map preserves insertion order: evict the least recently used entry.
+      parsedCache.delete(parsedCache.keys().next().value);
+    }
+  }
+
+  /**
+   * Read + decompress + parse one session file (synchronous, ~10-300ms).
+   *
+   * A caller may hold a stale `meta` (e.g. `sessionsById` from before the last
+   * file write), so a cache hit requires BOTH the caller's `sigKey` and the
+   * file's current stat to match the cached entry; otherwise the file is parsed
+   * again. Failures are never cached, so a corrupt log can be retried after it
+   * is rewritten.
+   */
   function loadParsed(meta) {
+    const file = typeof meta?.file === "string" ? meta.file : "";
+    const sigKey = typeof meta?.sigKey === "string" ? meta.sigKey : "";
+    let actualSig = "";
+    let metaKey = "";
+    if (file && sigKey) {
+      actualSig = fileSigKey(file);
+      metaKey = metaFingerprint(meta);
+      const cached = parsedCache.get(file);
+      if (cached && actualSig && cached.sigKey === sigKey && cached.actualSig === actualSig && cached.metaKey === metaKey) {
+        // LRU touch: re-insert so the hottest session survives eviction.
+        parsedCache.delete(file);
+        parsedCache.set(file, cached);
+        return cached.parsed;
+      }
+    }
     const diagnostics = [];
     let text = "";
     try {
@@ -723,7 +799,9 @@ export function createSessionSource({ dshHome } = {}) {
     const { events, badLines } = parseJsonlEvents(text);
     if (badLines > 0) diagnostics.push({ kind: "jsonl", badLines });
     if (events.length === 0) throw new Error("empty-session-log");
-    return parseEvents(meta, events, diagnostics);
+    const parsed = parseEvents(meta, events, diagnostics);
+    if (file && sigKey && actualSig) rememberParsed(file, sigKey, actualSig, metaKey, parsed);
+    return parsed;
   }
 
   /**

@@ -1,6 +1,6 @@
 {
   "name": "dsh-super-kanban",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "AI task kanban for DeepSeek Harness: derives task goals, progress, completion and issues from DSH sessions, with key facts, subtasks, artifacts, session hand-off and a dual full-page/right-sidebar UI.",
   "type": "module",
   "main": "./index.mjs",

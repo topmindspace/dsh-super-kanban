@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-08
+
+Patch release focused on performance, editor consistency and maintenance after
+the v0.5.0 release review.
+
+### Changed
+
+- **Faster session parsing**: the host now keeps a bounded LRU (6 entries) of
+  parsed session logs, keyed by file signature plus a metadata fingerprint.
+  Repeated reads from the session drawer polling, “重新研判” and todo import
+  skip decompression/re-parsing, while changed files or metadata still force a
+  fresh parse. Failures are never cached.
+- **Lighter board polling**: the browser half now compares a compact state
+  signature (task id/updatedAt/status/archived plus scan/settings/usage/stats/
+  activity/workspaces) instead of stringifying the complete `/state` payload on
+  every 4s/1.2s poll; large boards no longer pay the evidence-array serialization
+  cost on each tick.
+- **Auto-card identity is kept on no-op edits**: `task.update` only turns an
+  `auto` card into `auto+edited` when a field or lock actually changed, and
+  `task.move` only does so on a real column change, so duplicate-card merging
+  and “untouched auto card” semantics stay consistent.
+- **Safer uninstall**: the uninstall helper now removes only the plugin’s
+  dependency and bundle entry from the DSH profile instead of restoring the
+  whole pre-install profile backup, preserving other plugins and profile edits
+  made after installation. `install.sh` still records a first-install backup,
+  now documented as a snapshot only (never auto-restored).
+- **Third-party privacy hint uses an official-route whitelist**
+  (`deepseek-account` / `deepseek-official`); custom providers named
+  `deepseek-*` now correctly show the “digest will be sent to this provider”
+  notice.
+- Narrow-sidebar status tabs now expose `aria-controls`/`tabpanel` wiring for
+  assistive technology.
+- Documentation: version examples updated to 0.5.1, the `main` branch protection
+  and release flow documented, and the targeted uninstall behaviour described in
+  INSTALL/CONTRIBUTING/DEVELOPMENT.
+
+> Repository maintenance: `main` is now a protected branch — force pushes and
+> deletion are blocked and pull requests require the CI checks (`Node 22.19`,
+> `Node 24`); maintainers can still push release commits and tags directly.
+
 ## [0.5.0] - 2026-11-08
 
 ### Added
@@ -293,7 +333,8 @@ workspace into a maintainable task board.
   with the local DSH account token; tokens are never logged or persisted by the
   plugin. See [SECURITY.md](./SECURITY.md).
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.5.1
 [0.3.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.3.0
 [0.4.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.0
 [0.4.1]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.1

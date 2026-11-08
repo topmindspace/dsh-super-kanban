@@ -510,6 +510,111 @@ test("loadParsed: corrupt or empty logs throw stable error codes", (t) => {
   assert.throws(() => source.loadParsed(garbage), /empty-session-log/);
 });
 
+test("loadParsed: repeated parses of an unchanged session reuse the cached object", (t) => {
+  const { home } = standardHome(t);
+  const source = createSessionSource({ dshHome: home });
+  const alpha = source.discover().sessions.find((session) => session.id === "sess-alpha");
+  const first = source.loadParsed(alpha);
+  const second = source.loadParsed(alpha);
+  assert.equal(second, first, "the bounded LRU returns the same parsed object");
+  // A cache hit must not change the derived data either.
+  assert.equal(second.eventCount, first.eventCount);
+  assert.deepEqual(
+    second.users.map((user) => user.text),
+    first.users.map((user) => user.text),
+  );
+});
+
+test("loadParsed: a changed signature bypasses the cache and reparses fresh content", (t) => {
+  const { home } = standardHome(t);
+  const source = createSessionSource({ dshHome: home });
+  const alpha = source.discover().sessions.find((session) => session.id === "sess-alpha");
+  const first = source.loadParsed(alpha);
+
+  // Append one DSH-style frame: the file signature changes.
+  fs.appendFileSync(
+    alpha.file,
+    zlib.zstdCompressSync(
+      Buffer.from(
+        lineOf(evt("user/message", 11, T0 + 10_000, { content: [{ type: "text", text: "追加的消息" }] })),
+      ),
+    ),
+  );
+  const refreshed = source.discover().sessions.find((session) => session.id === "sess-alpha");
+  assert.notEqual(refreshed.sigKey, alpha.sigKey, "the fixture must produce a new signature");
+  const second = source.loadParsed(refreshed);
+  assert.notEqual(second, first);
+  assert.equal(second.eventCount, first.eventCount + 1);
+  assert.ok(second.users.some((user) => user.text.includes("追加的消息")));
+
+  // Safety net: even a STALE meta (sigKey not re-discovered) must not pin the old
+  // parse — the cache also verifies the file's current stat.
+  const third = source.loadParsed(alpha);
+  assert.notEqual(third, first);
+  assert.ok(third.users.some((user) => user.text.includes("追加的消息")));
+});
+
+test("loadParsed: meta-derived fields invalidate the cache without a file change", (t) => {
+  const { home } = standardHome(t);
+  const source = createSessionSource({ dshHome: home });
+  const alpha = source.discover().sessions.find((session) => session.id === "sess-alpha");
+  const first = source.loadParsed(alpha);
+  // The projcache title can change independently of the session log; the cached
+  // parse must not keep serving the old title.
+  const renamed = source.loadParsed({ ...alpha, title: "Renamed session" });
+  assert.notEqual(renamed, first, "a meta-only change must not reuse the old parse");
+  // Same meta again is a hit (the cache still dedupes repeated parses).
+  assert.equal(source.loadParsed({ ...alpha, title: "Renamed session" }), renamed);
+});
+
+test("loadParsed: the parse cache is bounded and evicts the least recently used entry", (t) => {
+  const home = tempDir(t);
+  const ids = Array.from({ length: 7 }, (_value, index) => `sess-cache-${index + 1}`);
+  for (const [index, id] of ids.entries()) {
+    writeSessionAt(
+      home,
+      "escaped-cache",
+      id,
+      framesOf([
+        evt("session", 1, T0, { id, cwd: `/projects/cache-${index + 1}` }),
+        evt("user/message", 2, T0 + 1000, { content: [{ type: "text", text: `消息 ${index + 1}` }] }),
+        evt("turn/start", 3, T0 + 2000, { turn: 1 }),
+        evt("turn/end", 4, T0 + 3000, { turn: 1, reason: { kind: "completed" } }),
+      ]),
+    );
+  }
+  const source = createSessionSource({ dshHome: home });
+  const metas = new Map(source.discover().sessions.map((session) => [session.id, session]));
+  const parsedById = new Map();
+  for (const id of ids) parsedById.set(id, source.loadParsed(metas.get(id)));
+
+  // The newest entry (capacity 6) is still cached …
+  assert.equal(source.loadParsed(metas.get(ids[6])), parsedById.get(ids[6]));
+  // … while the oldest was evicted and parsed into a new object.
+  const reparsed = source.loadParsed(metas.get(ids[0]));
+  assert.notEqual(reparsed, parsedById.get(ids[0]));
+  assert.equal(reparsed.eventCount, parsedById.get(ids[0]).eventCount);
+});
+
+test("loadParsed: failures are never cached", (t) => {
+  const home = tempDir(t);
+  const { file } = writeSessionAt(home, "escaped-bad", "sess-bad", Buffer.from("not a zstd frame"));
+  const source = createSessionSource({ dshHome: home });
+  const meta = source.discover().sessions.find((session) => session.id === "sess-bad");
+  assert.throws(() => source.loadParsed(meta), /decompress-failed/);
+  // Rewrite the log: the failed parse must not have been remembered.
+  fs.writeFileSync(
+    file,
+    framesOf([
+      evt("session", 1, T0, { id: "sess-bad" }),
+      evt("user/message", 2, T0 + 1, { content: [{ type: "text", text: "修好了" }] }),
+    ]),
+  );
+  const parsed = source.loadParsed(meta);
+  assert.equal(parsed.id, "sess-bad");
+  assert.equal(parsed.users[0].text, "修好了");
+});
+
 test("loadParsed: hostile timestamps do not abort the whole parse", (t) => {
   const home = tempDir(t);
   const events = [

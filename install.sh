@@ -7,6 +7,11 @@
 #
 # The plugin stays in this repository and is linked into the profile, so future
 # edits are picked up on the next profile recomposition (or app restart).
+#
+# super-kanban-profile-backup.json is written once, only on the first install:
+# it is a pre-install snapshot for manual recovery. The uninstaller does NOT
+# auto-restore it (a full-file restore would overwrite profile/plugin changes
+# made after the install); it removes only this plugin's manifest entries.
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,11 +55,13 @@ pkg_path, backup_path, plugin_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(pkg_path, encoding="utf-8") as fh:
     data = json.load(fh)
 
+# First install only: keep a pre-install snapshot for manual recovery. It is not
+# overwritten on re-install and never auto-restored by uninstall.sh.
 if not os.path.exists(backup_path):
     with open(backup_path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
-    print(f"  backup  : {backup_path}")
+    print(f"  backup  : {backup_path} (first-install snapshot; not auto-restored)")
 
 data.setdefault("dependencies", {})["dsh-super-kanban"] = f"link:{plugin_dir}"
 profile = data.setdefault("dsh", {}).setdefault("profile", {})

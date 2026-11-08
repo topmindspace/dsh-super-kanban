@@ -410,10 +410,14 @@ window.__ModuleLoader__.load({
       return options;
     }
 
-    /** 是否第三方 provider：只按 id 前缀判断 DSH 内置 DeepSeek 官方通道（账号 / API Key）。 */
+    // DSH 官方 route 白名单（route id，见 @deepseek-ai/dsh-llm-deepseek-account / -api-key 两条通道）。
+    // 不按 `deepseek` 前缀判断：用户自定义 provider 可能叫 `deepseek-custom`，按前缀会误判为官方、漏掉第三方隐私提示。
+    const OFFICIAL_PROVIDERS = Object.freeze(["deepseek-account", "deepseek-official"]);
+
+    /** 是否第三方 provider：只把官方 route 白名单视为官方，其余（含 deepseek-* 自定义命名）一律第三方。 */
     function isThirdPartyProvider(provider) {
       const id = textOf(provider).toLowerCase();
-      return Boolean(id) && !id.startsWith("deepseek");
+      return Boolean(id) && !OFFICIAL_PROVIDERS.includes(id);
     }
 
     /** provider 显示名：优先用本次会话已加载的模型目录，缺失回落 id（抽屉不额外发请求）。 */
@@ -1681,13 +1685,29 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
     }
 
     /**
-     * /state 每次响应都会生成新的 generatedAt，不能直接拿它判断「没变化」。
-     * 这里用去掉 generatedAt 后的内容指纹比较，未变化时保留旧对象引用，避免整页重渲染。
+     * /state 内容指纹：同一份数据返回同一签名；变化时 useBoardData 才替换 data 触发重渲染。
+     * v0.5.1 轻量化（审计 S5）：不再 stringify 完整 payload —— tasks[].evidence / keyFacts / sessions
+     * 等大字段每轮可达数十 KB，4s（扫描中 1.2s）轮询会持续占用主线程。签名覆盖所有会驱动 UI 的字段：
+     *  - tasks：顺序 + id / updatedAt / status / archived。按 Host 契约，任何任务字段更新（title、goal、
+     *    priority、progress、ai、subtasks…）都会同时刷新 updatedAt，新增/删除任务会改变列表；
+     *  - scan：整体 stringify（全部为标量，很小；state/message/aiCalls/aiBudget/aiPending/error… 都用于页头与播报）；
+     *  - settings / usage / stats / activity / workspaces：对象较小，整体 stringify（含嵌套字段）。
+     * 不覆盖：tasks 的大数组「内容」（evidence 等）——按契约不会脱离 updatedAt 单独变化；
+     * generatedAt 每轮都变，和旧实现一样不参与比较。
      */
     function stateSignature(payload) {
       if (!payload || typeof payload !== "object") return "";
       try {
-        return JSON.stringify({ ...payload, generatedAt: "" });
+        const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+        return JSON.stringify({
+          tasks: tasks.map((task) => (task ? [task.id, task.updatedAt, task.status, task.archived === true] : null)),
+          scan: payload.scan || null,
+          settings: payload.settings || null,
+          usage: payload.usage || null,
+          stats: payload.stats || null,
+          activity: payload.activity || null,
+          workspaces: payload.workspaces || null,
+        });
       } catch {
         return "";
       }
@@ -1904,6 +1924,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
     /** 窄屏（右侧栏 <620px）：文字状态 tab + 单列卡片。 */
     function NarrowBoard({ status, setStatus, byStatus, onOpen, onAdd, draggingId, onDragStart, onDragEnd }) {
       const list = byStatus[status] || [];
+      // v0.5.1 无障碍（审计 S7）：tab ↔ tabpanel 关联；方向键导航留待 v0.5.2。
+      const panelId = "sk-narrow-panel";
+      const tabId = (item) => `sk-narrow-tab-${item}`;
       return h(
         React.Fragment,
         null,
@@ -1915,9 +1938,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               "button",
               {
                 key: item,
+                id: tabId(item),
                 type: "button",
                 role: "tab",
                 "aria-selected": status === item,
+                "aria-controls": panelId,
                 className: cx("sk-status-tab", status === item && "is-on"),
                 onClick: () => setStatus(item),
               },
@@ -1928,7 +1953,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         ),
         h(
           "div",
-          { className: "sk-narrow-list" },
+          { id: panelId, className: "sk-narrow-list", role: "tabpanel", "aria-labelledby": tabId(status) },
           list.length
             ? list.map((task) =>
                 h(TaskCard, {
