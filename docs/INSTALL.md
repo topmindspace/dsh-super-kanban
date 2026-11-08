@@ -23,7 +23,7 @@
 
 ## 1. 安装（四种方式）
 
-> 每种方式都支持**安装特定版本**；下例用当前版本 `0.5.1`，换成你的目标版本号即可。
+> 每种方式都支持**安装特定版本**；下例用当前版本 `0.5.2`，换成你的目标版本号即可。
 > 安装后可用 [2.3 节](#23-命令行查看实际安装版本)的命令验证实际版本。
 
 ### 方式 A：插件市场索引（推荐）
@@ -38,7 +38,7 @@
    ```
 
 3. 打开 **Super Kanban** 的详情页：这里会列出该插件在索引中的**全部可用版本**（按新→旧排列）；
-4. **安装特定版本**：在版本列表里选择精确版本（如 `0.5.1`）→ **安装** → **启用**；选定哪个就安装哪个，第三方插件不会自动升级；
+4. **安装特定版本**：在版本列表里选择精确版本（如 `0.5.2`）→ **安装** → **启用**；选定哪个就安装哪个，第三方插件不会自动升级；
 5. 回到主窗口按 `Cmd+R` 刷新。左侧栏出现「任务看板」即安装成功。
 
 > 市场索引来自第三方（本仓库 `docs/`）。DSH 会在安装前提示信任风险，请确认来源为本仓库后再继续。
@@ -49,7 +49,7 @@
 1. DSH → 插件 → **添加插件**；
 2. 输入包名：
    - 不带版本：`dsh-super-kanban`（安装 npm latest）；
-   - 带版本：`dsh-super-kanban@0.5.1`（**推荐写精确版本**，见第 3 节）；
+   - 带版本：`dsh-super-kanban@0.5.2`（**推荐写精确版本**，见第 3 节）；
 3. 安装 → 启用 → 刷新窗口。
 
 适合能访问 npm registry 的用户。插件无第三方运行时依赖。
@@ -57,7 +57,7 @@
 **安装特定版本**（命令行等价写法，先完全退出 DSH）：
 
 ```bash
-dsh plugin --profile desktop add dsh-super-kanban@0.5.1
+dsh plugin --profile desktop add dsh-super-kanban@0.5.2
 ```
 
 ### 方式 C：Git 仓库
@@ -74,7 +74,7 @@ dsh plugin --profile desktop add dsh-super-kanban@0.5.1
 > ```bash
 > git clone https://github.com/topmindspace/dsh-super-kanban.git
 > cd dsh-super-kanban
-> git checkout v0.5.1        # 换成目标 Release 的 tag
+> git checkout v0.5.2        # 换成目标 Release 的 tag
 > ./install.sh -y
 > ```
 
@@ -84,14 +84,14 @@ dsh plugin --profile desktop add dsh-super-kanban@0.5.1
 
 **D1. 插件页选择本地目录**：DSH → 插件 → 添加插件 → 选择本仓库根目录 → 安装 → 启用 → 刷新。
 
-**安装特定版本**：先在克隆目录 `git checkout v0.5.1`（换成目标 tag），再在插件页选择该目录安装。
+**安装特定版本**：先在克隆目录 `git checkout v0.5.2`（换成目标 tag），再在插件页选择该目录安装。
 
 **D2. 命令行安装**（把工作区链接进 DSH profile）：
 
 ```bash
 git clone https://github.com/topmindspace/dsh-super-kanban.git
 cd dsh-super-kanban
-git checkout v0.5.1        # 安装特定版本：固定到目标 Release；跟随 main 则省略此行
+git checkout v0.5.2        # 安装特定版本：固定到目标 Release；跟随 main 则省略此行
 ./install.sh -y            # 交互式运行可去掉 -y
 ```
 
@@ -118,7 +118,7 @@ DSH 插件页安装 **npm/市场来源** 的包时，会把**精确版本**写�
 ```jsonc
 // ~/.dsh/profiles/desktop/package.json
 "dependencies": {
-  "dsh-super-kanban": "0.5.1",                    // 插件页/npm 安装：精确版本
+  "dsh-super-kanban": "0.5.2",                    // 插件页/npm 安装：精确版本
   // 或
   "dsh-super-kanban": "link:/path/to/checkout"    // 源码/本地目录安装
 }
@@ -169,18 +169,18 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 | 输出 | 含义 |
 | --- | --- |
-| `0.5.1` | 精确版本（插件页/npm 安装的典型结果） |
-| `^0.5.0` | 范围依赖，可解析到 0.5.x 的补丁版本（0.5.1…），**不会**到 0.6.x |
+| `0.5.2` | 精确版本（插件页/npm 安装的典型结果） |
+| `^0.5.0` | 范围依赖，可解析到 0.5.x 的补丁版本（0.5.1、0.5.2…），**不会**到 0.6.x |
 | `^0.4.0` | 范围依赖，只会解析 0.4.x，**永远不会**到 0.5.x（跨 minor 升级必须精确版本） |
 | `^0.3.0` | 更旧的范围依赖，只会解析 0.3.x，永远不会到 0.4.x / 0.5.x |
 | `link:/path/to/checkout` | 源码安装，版本跟随该目录，无需按版本升级 |
 
 ### 2.4 npm 安装路径与范围依赖（`^0.5.x` / 精确版本）
 
-- 插件页从 npm / 市场安装时使用 `pnpm add --save-exact`，profile 里记录的是**精确版本**（如 `0.5.1`）。
-- 如果依赖被写成 **`^0.5.0`**：重新执行安装或 `pnpm install` 时，npm 会把 **0.5.x 的补丁版本**（0.5.1…）视为可解析，因此 0.5.x 内可以正常更新。
+- 插件页从 npm / 市场安装时使用 `pnpm add --save-exact`，profile 里记录的是**精确版本**（如 `0.5.2`）。
+- 如果依赖被写成 **`^0.5.0`**：重新执行安装或 `pnpm install` 时，npm 会把 **0.5.x 的补丁版本**（0.5.2…）视为可解析，因此 0.5.x 内可以正常更新。
 - 如果依赖仍是 **`^0.4.0`**：语义化版本只允许 `<0.5.0`，**0.5.x 不会被解析**。无论插件页怎么“更新”、怎么刷新，磁盘上仍然是 0.4.x。
-- **跨 minor**（0.4 → 0.5）必须显式安装**精确版本**（如 `dsh-super-kanban@0.5.1`）或手动把依赖范围改到新的 minor，再重新安装。
+- **跨 minor**（0.4 → 0.5）必须显式安装**精确版本**（如 `dsh-super-kanban@0.5.2`）或手动把依赖范围改到新的 minor，再重新安装。
 
 ## 3. 更新插件（升级）
 
@@ -205,18 +205,18 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 3. **完全退出 DSH**（不是只关窗口）。插件文件被占用时安装可能失败或残留旧文件。
 4. 按安装来源升级：
 
-   **A. 市场（发现）**：插件 → 已安装 → Super Kanban → **卸载** → 插件 → 发现 → 打开 Super Kanban 详情 → 在版本列表里**选择目标版本**（如 `0.5.1`）→ **安装** → **启用**。
+   **A. 市场（发现）**：插件 → 已安装 → Super Kanban → **卸载** → 插件 → 发现 → 打开 Super Kanban 详情 → 在版本列表里**选择目标版本**（如 `0.5.2`）→ **安装** → **启用**。
 
-   **B. npm**：插件 → 已安装 → Super Kanban → **卸载** → 添加插件 → 输入**精确版本** `dsh-super-kanban@0.5.1` → 安装 → 启用。
+   **B. npm**：插件 → 已安装 → Super Kanban → **卸载** → 添加插件 → 输入**精确版本** `dsh-super-kanban@0.5.2` → 安装 → 启用。
 
-   **C. Git**：插件 → 已安装 → 卸载 → 添加插件 → 重新粘贴仓库地址（DSH 会 pin 到当前 commit）→ 安装 → 启用。要**指定版本**，先按方式 C 的 tag 流程 `git checkout v0.5.1`，再用方式 D 的本地目录安装。
+   **C. Git**：插件 → 已安装 → 卸载 → 添加插件 → 重新粘贴仓库地址（DSH 会 pin 到当前 commit）→ 安装 → 启用。要**指定版本**，先按方式 C 的 tag 流程 `git checkout v0.5.2`，再用方式 D 的本地目录安装。
 
    **D. 源码 / 本地目录**：
 
    ```bash
    cd /path/to/dsh-super-kanban
    git fetch --tags
-   git checkout v0.5.1     # 用目标 Release 的 tag；跟随 main 则用 git pull
+   git checkout v0.5.2     # 用目标 Release 的 tag；跟随 main 则用 git pull
    ./install.sh -y         # 重新链接（首次安装已 link 的可省略，但仍建议刷新 profile）
    ```
 
@@ -229,20 +229,20 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 ```
 ^0.3.0  →  >=0.3.0 <0.4.0   只收 0.3.x，永远到不了 0.4.0
 ^0.4.0  →  >=0.4.0 <0.5.0   只收 0.4.x，永远到不了 0.5.0
-^0.5.0  →  >=0.5.0 <0.6.0   收 0.5.x（0.5.1…），到不了 0.6.0
-0.5.1   →  精确版本          只装 0.5.1
+^0.5.0  →  >=0.5.0 <0.6.0   收 0.5.x（0.5.1、0.5.2…），到不了 0.6.0
+0.5.2   →  精确版本          只装 0.5.2
 ```
 
 因此：
 
-- **0.4.x → 0.5.x**：必须安装精确版本（`dsh-super-kanban@0.5.1`）或按来源重装；只点“更新”不会跨 minor。
-- **0.5.0 → 0.5.1**：如果依赖是精确版本 `0.5.0`，同样要卸载后安装 `0.5.1`；如果依赖被写成 `^0.5.0`，重新安装/`pnpm install` 即可拿到 0.5.x 补丁。
+- **0.4.x → 0.5.x**：必须安装精确版本（`dsh-super-kanban@0.5.2`）或按来源重装；只点“更新”不会跨 minor。
+- **补丁版本之间（如 0.5.1 → 0.5.2）**：如果依赖是精确版本 `0.5.1`，需卸载后安装 `0.5.2`；如果依赖被写成 `^0.5.0`，重新安装/`pnpm install` 即可拿到 0.5.x 补丁。
 - 排查“更新后界面仍旧”时，先按 2.3 节确认 **node_modules 里的实际版本** 与 **profile 里的依赖规格**，不要只看插件页提示。
 
 **正反例**：
 
-- ✅ `dsh-super-kanban@0.5.1`：明确安装 0.5.1（当前版本）；
-- ❌ `dsh-super-kanban@^0.4.0`：语义化版本最多解析到 0.4.x，**永远装不上 0.5.1**，跨 minor 必须写精确版本。
+- ✅ `dsh-super-kanban@0.5.2`：明确安装 0.5.2（当前版本）；
+- ❌ `dsh-super-kanban@^0.4.0`：语义化版本最多解析到 0.4.x，**永远装不上 0.5.2**，跨 minor 必须写精确版本。
 
 ### 3.4 高级：命令行升级（可选）
 
@@ -250,14 +250,14 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 ```bash
 # 安装/升级到精确版本（dsh plugin 会把参数转发给 profile 里的 pnpm）
-dsh plugin --profile desktop add dsh-super-kanban@0.5.1
+dsh plugin --profile desktop add dsh-super-kanban@0.5.2
 
 # 卸载
 dsh plugin --profile desktop remove dsh-super-kanban
 ```
 
 - `dsh plugin …` 需要终端里能使用 `dsh` CLI；若没有，请优先使用插件页。
-- 想临时让 `^0.5.x` 自动收补丁：把 profile `package.json` 里的依赖改成 `"^0.5.1"`，再执行一次 `dsh plugin --profile desktop install`（或插件页重新安装一次），之后 0.5.x 补丁版可被解析。**跨 minor 仍需精确版本。**
+- 想临时让 `^0.5.x` 自动收补丁：把 profile `package.json` 里的依赖改成 `"^0.5.2"`，再执行一次 `dsh plugin --profile desktop install`（或插件页重新安装一次），之后 0.5.x 补丁版可被解析。**跨 minor 仍需精确版本。**
 
 ### 3.5 更新后界面仍旧？（4 步快速排查）
 
@@ -280,7 +280,7 @@ dsh plugin --profile desktop remove dsh-super-kanban
 
 2. 完全退出 DSH；
 3. 卸载当前版本（插件页或 `dsh plugin --profile desktop remove dsh-super-kanban`）；
-4. 安装目标旧版本的**精确版本**（例如从当前 `0.5.1` 回滚到上一个 0.4.x 版本）：
+4. 安装目标旧版本的**精确版本**（例如从当前 `0.5.2` 回滚到上一个 0.4.x 版本）：
    - 插件页：市场详情页的版本列表里选择旧版本（如 `0.4.1`）安装；或添加插件时输入 `dsh-super-kanban@0.4.1`；
    - 源码：`git checkout v0.4.1 && ./install.sh -y`。
 5. 启用 → 刷新窗口 → 按第 2 节验证。
@@ -355,8 +355,8 @@ dsh plugin --profile web add dsh-super-kanban@^0.4.0
 node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh-dev/profiles/web/package.json', 'utf8')).dependencies['dsh-super-kanban']"
 node -p "require(require('os').homedir() + '/.dsh-dev/profiles/web/node_modules/dsh-super-kanban/package.json').version"
 
-# 3) 换成精确版本重装，确认界面换成 v0.5.1
-dsh plugin --profile web add dsh-super-kanban@0.5.1
+# 3) 换成精确版本重装，确认界面换成 v0.5.2
+dsh plugin --profile web add dsh-super-kanban@0.5.2
 ```
 
 > 桌面版 profile（`desktop`）由桌面 App 持有：命令行操作前**完全退出 DSH**，否则会提示 profile 被占用或安装失败。

@@ -7,21 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-08
+
+Documentation-only patch release: no runtime code changes. It publishes the
+rewritten user documentation to the npm package page and keeps the repository
+docs/market landing page in sync.
+
 ### Changed
 
+- **User-first README** (Chinese and English): a 30-second overview, typical
+  usage scenarios, result-first feature highlights, performance and limits, a
+  user-readable version policy, a documentation map, and copy-paste
+  **exact-version install examples** for the plugin market version list, npm
+  (`dsh-super-kanban@0.5.2`), a Git tag (`git checkout v0.5.2`) and local
+  source installs (with the `bash`/`python3` prerequisite called out).
+- **Install guide**: every install path now has an exact-version example,
+  positive/negative SemVer examples for the cross-minor trap, a corrected
+  source-change behaviour note (client refresh vs host profile reload), and a
+  stable heading anchor for the local-directory section.
+- **Market landing page**: feature cards, all three install paths (including
+  exact-version selection), first-run steps, two screenshots, compatibility
+  line, FAQ and the data/privacy note now live on GitHub Pages as well.
+- **Cross-document consistency**: release links point at tag trees (they
+  survive Release pruning), the changelog maintenance notes were deduplicated,
+  SECURITY's supported-version policy was aligned with the README, the MARKET
+  release flow was clarified, ARCHITECTURE documents the parsed-session LRU and
+  the lightweight polling signature, and CONTRIBUTING's test command was fixed.
 - Repository maintenance: `main` now requires a pull request with one
   approving review in addition to the passing CI checks (maintainers can still
   bypass for release commits); GitHub Releases are pruned to the newest three
   after every release, while tags and commits are retained so historical
   version pins and changelog tag links keep working. Older changelog entries
   (0.3.0/0.4.0) link to their tag trees instead of pruned release pages.
-
-- Documentation overhaul: a user-focused README (30-second overview, typical
-  scenarios, performance/limits, docs map), exact-version install examples for
-  the plugin market / npm / Git tag / local source, a richer GitHub Pages
-  landing page (features, three install paths, FAQ, two screenshots), and a
-  cross-document consistency pass (version policy, release links, source-install
-  behaviour, targeted uninstall scope).
+- `check-docs` now follows GitHub's real heading-slug rules (each space becomes
+  one hyphen), so multi-space anchors are validated instead of silently
+  passing.
 
 ## [0.5.1] - 2026-11-08
 
@@ -347,7 +367,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.2
 [0.5.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.1
 [0.3.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.3.0
 [0.4.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.4.0

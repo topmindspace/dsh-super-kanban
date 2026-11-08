@@ -56,7 +56,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 ### 方式 B：npm 包名
 
-DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.5.1`，升级时推荐）→ 安装 → 启用 → 刷新。
+DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.5.2`，升级时推荐）→ 安装 → 启用 → 刷新。
 
 ### 方式 C：Git 仓库
 
@@ -81,7 +81,7 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 注意：
 
 - 插件页安装 npm/市场来源会用 `pnpm add --save-exact`，把**精确版本**写入 profile 依赖；所以升级需要重新安装目标版本，而不是只点一下刷新。
-- 若 profile 里被人为改成**范围依赖**：`^0.5.0` 可自然解析到 0.5.x 补丁版（0.5.1…），但 `^0.4.0` 永远不会解析到 0.5.x —— 跨 minor 升级必须安装**精确版本**（如 `dsh-super-kanban@0.5.1`）。
+- 若 profile 里被人为改成**范围依赖**：`^0.5.0` 可自然解析到 0.5.x 补丁版（0.5.1、0.5.2…），但 `^0.4.0` 永远不会解析到 0.5.x —— 跨 minor 升级必须安装**精确版本**（如 `dsh-super-kanban@0.5.2`）。
 - 市场索引由 Release workflow 在发布成功后自动重新生成并提交 `docs/index.json`（维护者也可手动 `npm run market:index`）；索引未刷新时，详情页看不到新版本。
 
 更完整的用户升级/验证/回滚步骤见 [INSTALL.md](INSTALL.md#3-更新插件升级)。
@@ -111,10 +111,10 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
       "repository": { "url": "https://github.com/topmindspace/dsh-super-kanban" },
       "metadata": { "category": "productivity", "labels": ["kanban"], "keywords": ["dsh", "kanban"] },
       // 详情页默认展示 versions 中的第一个（按版本号从新到旧排列）；
-      // 也可选填 "defaultVersion": "0.5.1" 指定默认版本。
+      // 也可选填 "defaultVersion": "0.5.2" 指定默认版本。
       "versions": [                              // 索引中的全部可用版本（新版本由维护者生成）
         {
-          "version": "0.5.1",
+          "version": "0.5.2",
           "publishTimestamp": 1794000000,          // Unix 秒
           "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0" },
           "source": { "type": "npm" }              // 或 { "type": "git", "url": "...", "commit": "<40位 SHA>" }
@@ -158,19 +158,19 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 
 ```bash
 # 0. 版本变更（package.json + CHANGELOG.md 必须同步）
-npm version 0.5.1 --no-git-tag-version   # 只改 package.json 的版本号（版本号以本次发布为准）
-#   - 在 CHANGELOG.md 顶部添加 "## [0.5.1] - YYYY-MM-DD" 与底部 tag 链接
+npm version 0.5.2 --no-git-tag-version   # 只改 package.json 的版本号（版本号以本次发布为准）
+#   - 在 CHANGELOG.md 顶部添加 "## [0.5.2] - YYYY-MM-DD" 与底部 tag 链接
 #   - 提交这一步，使工作区保持干净
-git add package.json CHANGELOG.md && git commit -m "chore: release v0.5.1"
+git add package.json CHANGELOG.md && git commit -m "chore: release v0.5.2"
 
 # 1. 本地发布辅助：重新生成索引 + 全量检查（要求工作区干净）
 node scripts/release.mjs
 
 # 2. 提交索引（若 release.mjs 提示有变化）
-git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for v0.5.1"
+git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for v0.5.2"
 
 # 3. 打 tag 并推送 → 触发 release workflow
-git tag -a v0.5.1 -m "v0.5.1"
+git tag -a v0.5.2 -m "v0.5.2"
 git push origin main --tags
 ```
 
@@ -187,7 +187,7 @@ GitHub Release 不受影响。此时手动补索引：
 ```bash
 npm run market:index
 git add docs/index.json docs/icon.svg
-git commit -m "chore: update plugin market index for v0.5.1"
+git commit -m "chore: update plugin market index for v0.5.2"
 git push origin main
 ```
 
