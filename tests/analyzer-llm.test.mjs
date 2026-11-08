@@ -149,6 +149,24 @@ test("analyze streams through ctx.llm, maps usage and never sends sessionId", as
   assert.match(options.messages[0].content[0].text, /会话内容/);
 });
 
+test("analyze derives totalTokens from cache-aware usage when total is absent", async () => {
+  const host = fakeHost({
+    scripts: [
+      okChunks(OK_TASK, { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 500, cacheWriteTokens: 50 }),
+      // An explicit total always wins over the derivation.
+      okChunks(OK_TASK, { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 500, totalTokens: 999 }),
+    ],
+  });
+  const analyzer = analyzerFor(host);
+  analyzer.resetBudget(5);
+  const derived = await analyzer.analyze({ ...ROUTE, digest: "x", existingTasks: [] });
+  assert.equal(derived.ok, true);
+  assert.deepEqual(derived.usage, { promptTokens: 1000, completionTokens: 100, totalTokens: 1650 });
+  const explicit = await analyzer.analyze({ ...ROUTE, digest: "y", existingTasks: [] });
+  assert.equal(explicit.ok, true);
+  assert.equal(explicit.usage.totalTokens, 999);
+});
+
 test("analyze refuses to run without the native llm service", async () => {
   const analyzer = createLlmAnalyzer({ ctx: { logger: { info() {}, warn() {} } } });
   assert.equal(analyzer.hasService(), false);

@@ -33,7 +33,7 @@ body:
     id: plugin-version
     attributes:
       label: Super Kanban version
-      placeholder: e.g. 0.4.1 (see package.json or the plugin market entry)
+      placeholder: e.g. 0.5.0 (see package.json or the plugin market entry)
     validations:
       required: true
 

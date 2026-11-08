@@ -73,6 +73,8 @@ const STATUS_LABELS = { backlog: "待办", in_progress: "进行中", blocked: "�
 const PRIORITIES = ["P0", "P1", "P2", "P3"];
 const SSE_HEARTBEAT_MS = 15_000;
 const SSE_MAX_CLIENTS = 32;
+/** Drop an SSE client whose unread socket buffer exceeds this (backpressure). */
+const SSE_MAX_BUFFER_BYTES = 1024 * 1024;
 
 /* ------------------------------------------------------------------ */
 /* Service                                                             */
@@ -108,6 +110,15 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   let scanPromise = null;
   let scanCancel = false;
   let scanAbort = null;
+  /**
+   * Single in-process AI mutex. `task.analyze` / `task.polishPrompt` and scans
+   * share ONE analyzer instance (budget, transport, retries), so overlapping them
+   * would let the two flows reset each other's budget and corrupt usage/session
+   * accounting. Explicit AI commands own this flag; scans are refused while it is
+   * set (and auto scans silently retry on their next tick).
+   */
+  let aiBusy = false;
+  let lastAiBusySkipLoggedAt = 0;
   let startupTimer = null;
   let autoTimer = null;
   let saveTimer = null;
@@ -342,6 +353,23 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return String(a.meta.id).localeCompare(String(b.meta.id));
   }
 
+  /**
+   * Claim the shared AI mutex for one explicit command.
+   * Throws before any budget/usage bookkeeping starts; the caller must release
+   * it in a `finally` so every return/throw path frees it. `stopped` maps to 503
+   * through the shared http.classifyError.
+   */
+  function acquireAiTask() {
+    if (stopped) throw Object.assign(new Error("服务已停止"), { code: "stopped" });
+    if (scanPromise) throw conflict("扫描进行中，请稍后再试");
+    if (aiBusy) throw conflict("其他 AI 任务进行中，请稍后再试");
+    aiBusy = true;
+  }
+
+  function releaseAiTask() {
+    aiBusy = false;
+  }
+
   /** Compose the human-readable scan conclusion (the host owns scan.message). */
   function buildScanMessage({
     lowValueSkipped = 0,
@@ -476,7 +504,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     logWarn(`[super-kanban] store: ${diagnostic.kind}: ${diagnostic.message}`);
   }
   logInfo(
-    `[super-kanban] host ready · home=${dshHome} · tasks=${state.tasks.length} · sessions cached=${Object.keys(cache.sessions).length}`,
+    `[super-kanban] host ready · tasks=${state.tasks.length} · sessions cached=${Object.keys(cache.sessions).length}`,
   );
 
   /* ------------------------------ broadcast ------------------------ */
@@ -491,8 +519,19 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         removeSseClient(client);
         continue;
       }
+      // Backpressure: a tab that stopped reading but kept the socket open would
+      // make Node buffer event payloads without bound. Drop it when >1MB is
+      // already queued (a write that reports back-pressure on an unread socket
+      // is also dropped); EventSource reconnects automatically.
+      if ((Number(client.res.writableLength) || 0) > SSE_MAX_BUFFER_BYTES) {
+        removeSseClient(client);
+        continue;
+      }
       try {
-        client.res.write(payload);
+        const accepted = client.res.write(payload);
+        if (accepted === false || (Number(client.res.writableLength) || 0) > SSE_MAX_BUFFER_BYTES) {
+          removeSseClient(client);
+        }
       } catch {
         removeSseClient(client);
       }
@@ -1109,7 +1148,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     });
     if (state.deletedLog.length > 50) state.deletedLog = state.deletedLog.slice(-50);
     truncateTask(target);
-    logInfo(`[super-kanban] merged duplicate task「${clipText(source.title, 30)}」into「${clipText(target.title, 30)}」`);
+    // Privacy: ids only — task titles come from user sessions and do not belong in logs.
+    logInfo(`[super-kanban] merged duplicate task ${source.id} into ${target.id}`);
   }
 
   function sessionEntryFromMeta(meta, evidenceCount = 0) {
@@ -1268,6 +1308,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   function startScan(mode = "incremental") {
     if (stopped) return { ok: false, error: "stopped", message: "服务已停止" };
+    // The analyzer instance (budget/transport) is shared with explicit AI
+    // commands, so a scan must never overlap task.analyze/task.polishPrompt.
+    if (aiBusy) return { ok: false, error: "busy", message: "AI 任务进行中，请稍后再试" };
     if (scanPromise) return { ok: false, error: "busy", message: "扫描正在进行中" };
     const scanMode = mode === "full" ? "full" : "incremental";
     scanCancel = false;
@@ -2330,36 +2373,39 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
     async "task.analyze"(payload) {
       const task = requireTask(payload);
-      if (scanPromise) throw conflict("扫描进行中，请稍后再试");
       refreshSessionIndex();
-      const sessionIds = [...new Set([task.primarySessionId, ...(task.sessions || []).map((session) => session.id)].filter(Boolean))];
-      if (sessionIds.length === 0) throw badRequest("task-has-no-session");
-      // Same route resolver as the scan: an explicit selection or the live DSH
-      // default; an unavailable route falls back to the rules engine.
-      const route = await resolveAiRoute();
-      const dailyRemaining = dailyAiRemaining();
-      const budgetExhausted = state.settings.aiEnabled && dailyRemaining <= 0;
-      const aiEnabled = state.settings.aiEnabled && route.ok && dailyRemaining > 0;
-      const perTaskBudget = Math.min(perScanAiLimit(), dailyRemaining);
-      analyzer.resetBudget(aiEnabled ? Math.min(perTaskBudget, sessionIds.length) : 0);
-      let aiCalls = 0;
-      let tokens = 0;
-      let engine = "rules";
-      let model = "";
-      let provider = null;
-      let parsedAny = 0;
-      let budgetHit = false;
-      for (const sessionId of sessionIds.slice(0, MAX_SESSIONS_PER_TASK)) {
-        const meta = metaForSessionId(sessionId);
-        if (!meta || !meta.file) continue;
+      // Re-judge exactly one source session: the primary one (older/relinked cards
+      // may only carry sessions[]). Re-judging every linked session used to
+      // overwrite the same card once per session and spend one budget unit each.
+      const targetSessionId = task.primarySessionId || task.sessions?.[0]?.id || "";
+      if (!targetSessionId) throw badRequest("task-has-no-session");
+      const meta = metaForSessionId(targetSessionId);
+      if (!meta || !meta.file) throw badRequest("task-has-no-session");
+      // Serialize with scans and other explicit AI commands (shared analyzer).
+      acquireAiTask();
+      try {
+        // Same route resolver as the scan: an explicit selection or the live DSH
+        // default; an unavailable route falls back to the rules engine.
+        const route = await resolveAiRoute();
+        const dailyRemaining = dailyAiRemaining();
+        const budgetExhausted = state.settings.aiEnabled && dailyRemaining <= 0;
+        const aiEnabled = state.settings.aiEnabled && route.ok && dailyRemaining > 0;
+        // One click = at most one budget unit.
+        analyzer.resetBudget(aiEnabled ? 1 : 0);
+        let aiCalls = 0;
+        let tokens = 0;
+        let engine = "rules";
+        let model = "";
+        let provider = null;
+        let budgetHit = false;
         let parsed;
         try {
           parsed = source.loadParsed(meta);
         } catch (error) {
-          logWarn(`[super-kanban] analyze session ${sessionId} failed: ${String(error?.message || error)}`);
-          continue;
+          // Re-judging a broken log is a client-visible failure, not a silent
+          // rules fallback (the session must be re-read before it can be judged).
+          throw badRequest(`session-parse-failed: ${String(error?.message || error)}`);
         }
-        parsedAny += 1;
         parsed.evidence = source.collectEvidence(parsed);
         const rules = analyzeSessionRules(parsed, {
           workspaceTitle: meta.workspaceTitle,
@@ -2371,7 +2417,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         let jobEngine = "rules";
         let jobModel = "";
         let jobProvider = null;
-        if (aiEnabled && !budgetHit && aiCalls < perTaskBudget) {
+        if (aiEnabled) {
           const digest = source.buildDigest(parsed, {
             workspaceTitle: meta.workspaceTitle,
             existingTasks: promptCandidateTasks(meta),
@@ -2406,7 +2452,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
               model = jobModel;
               provider = jobProvider;
             }
-            applyAiMeta(sessionId, meta, { digestBytes: Buffer.byteLength(digest, "utf8") });
+            applyAiMeta(targetSessionId, meta, { digestBytes: Buffer.byteLength(digest, "utf8") });
           } else if (result.code === "budget") {
             budgetHit = true;
             logWarn("[super-kanban] task.analyze budget exhausted; rules fallback");
@@ -2426,20 +2472,23 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
             context,
           });
         }
+        task.origin = task.origin === "auto" ? "auto+edited" : task.origin;
+        task.updatedAt = new Date().toISOString();
+        truncateTask(task);
+        if (aiCalls > 0) recordUsage({ calls: aiCalls, tokens });
+        persistState();
+        emitChanged("task", 1);
+        let message;
+        if (engine === "llm") message = "AI 研判完成";
+        else if (aiCalls > 0) message = `AI 判断该会话无需建卡（已消耗 ${aiCalls} 次）`;
+        else if (budgetHit || budgetExhausted) message = "今日 AI 预算已用完，已用规则引擎重判";
+        else if (state.settings.aiEnabled && !route.ok) message = `${route.message}，已用规则引擎重判`;
+        else message = "AI 不可用或未启用，已用规则引擎重判";
+        return { task, engine, aiCalls, tokens, sessions: 1, message, model, provider };
+      } finally {
+        // Every return/throw path must free the shared AI mutex.
+        releaseAiTask();
       }
-      task.origin = task.origin === "auto" ? "auto+edited" : task.origin;
-      task.updatedAt = new Date().toISOString();
-      truncateTask(task);
-      if (aiCalls > 0) recordUsage({ calls: aiCalls, tokens });
-      persistState();
-      emitChanged("task", 1);
-      let message;
-      if (engine === "llm") message = "AI 研判完成";
-      else if (aiCalls > 0) message = `AI 判断该会话无需建卡（已消耗 ${aiCalls} 次）`;
-      else if (budgetHit || budgetExhausted) message = "今日 AI 预算已用完，已用规则引擎重判";
-      else if (state.settings.aiEnabled && !route.ok) message = `${route.message}，已用规则引擎重判`;
-      else message = "AI 不可用或未启用，已用规则引擎重判";
-      return { task, engine, aiCalls, tokens, sessions: parsedAny, message, model, provider };
     },
 
     /* ----------------------- v2 linkage ops ------------------------ */
@@ -2590,18 +2639,22 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const original = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
       if (!original) throw badRequest("prompt-required");
       if (original.length > 3000) throw badRequest("prompt-too-long");
-      if (scanPromise) throw conflict("扫描进行中，请稍后再试");
-      const route = await resolveAiRoute();
-      const dailyRemaining = dailyAiRemaining();
-      if (!state.settings.aiEnabled || !route.ok || dailyRemaining <= 0) {
-        return { prompt: original, polished: false };
+      acquireAiTask();
+      try {
+        const route = await resolveAiRoute();
+        const dailyRemaining = dailyAiRemaining();
+        if (!state.settings.aiEnabled || !route.ok || dailyRemaining <= 0) {
+          return { prompt: original, polished: false };
+        }
+        analyzer.resetBudget(Math.min(perScanAiLimit(), dailyRemaining, 1));
+        const result = await analyzer.polish({ provider: route.provider, model: route.model, prompt: original });
+        if (!result.ok) return { prompt: original, polished: false };
+        recordUsage({ calls: 1, tokens: result.usage?.totalTokens || 0 });
+        persistState();
+        return { prompt: result.prompt || original, polished: Boolean(result.prompt) };
+      } finally {
+        releaseAiTask();
       }
-      analyzer.resetBudget(Math.min(perScanAiLimit(), dailyRemaining, 1));
-      const result = await analyzer.polish({ provider: route.provider, model: route.model, prompt: original });
-      if (!result.ok) return { prompt: original, polished: false };
-      recordUsage({ calls: 1, tokens: result.usage?.totalTokens || 0 });
-      persistState();
-      return { prompt: result.prompt || original, polished: Boolean(result.prompt) };
     },
 
     "session.ignore"(payload) {
@@ -2626,12 +2679,17 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     "settings.update"(payload) {
       const patch = payload.patch && typeof payload.patch === "object" ? payload.patch : payload;
       const normalized = normalizeSettingsPatch(patch);
-      // Old clients (pre-0.5) only send `maxAiCallsPerScan`: that is a deliberate
-      // fixed-budget choice, so keep their numeric setting effective by inferring
-      // `fixed` for this update only (loading old state still defaults to auto).
-      if (normalized.maxAiCallsPerScan !== undefined && !Object.hasOwn(patch, "aiBudgetMode")) {
-        normalized.aiBudgetMode = "fixed";
-      }
+      // Old clients (pre-0.5) save the whole settings form without `aiBudgetMode`
+      // (and without the new model-route fields), so a maxAiCallsPerScan value
+      // alone does NOT prove the user touched the budget. Only a patch whose keys
+      // are all budget fields proves that; then infer `fixed` for this update so
+      // the legacy numeric control keeps working. Any other legacy save (e.g.
+      // just autoScan) must leave the current mode untouched.
+      const patchKeys = Object.keys(patch);
+      const legacyBudgetOnly =
+        normalized.maxAiCallsPerScan !== undefined &&
+        patchKeys.every((key) => key === "maxAiCallsPerScan" || key === "dailyAiCallLimit");
+      if (legacyBudgetOnly) normalized.aiBudgetMode = "fixed";
       const previous = state.settings;
       // normalizeSettingsPatch only returns contract settings keys, so a hostile
       // patch can never add __proto__/lastScanAt/unknown properties here.
@@ -2670,14 +2728,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     },
   };
 
-  function classifyError(error) {
-    const code = error?.code || "internal";
-    if (code === "invalid-input") return 400;
-    if (code === "not-found") return 404;
-    if (code === "busy") return 409;
-    return 500;
-  }
-
   /* ------------------------------ routes --------------------------- */
 
   function handleSse(req, res) {
@@ -2696,7 +2746,12 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const client = { res, heartbeat: null };
     client.heartbeat = setInterval(() => {
       try {
-        res.write(": ping\n\n");
+        // Same backpressure rule as broadcast(): never queue heartbeats for a tab
+        // that stopped reading.
+        const accepted = res.write(": ping\n\n");
+        if (accepted === false || (Number(res.writableLength) || 0) > SSE_MAX_BUFFER_BYTES) {
+          removeSseClient(client);
+        }
       } catch {
         removeSseClient(client);
       }
@@ -2929,6 +2984,15 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   function maybeAutoScan() {
     if (stopped || scanPromise) return;
+    if (aiBusy) {
+      // Never queue a scan behind an explicit AI command: retry on a later tick
+      // and log at most once a minute so a long re-judge cannot spam the host log.
+      if (Date.now() - lastAiBusySkipLoggedAt > 60_000) {
+        lastAiBusySkipLoggedAt = Date.now();
+        logInfo("[super-kanban] auto scan skipped: an explicit AI task is running");
+      }
+      return;
+    }
     if (!state.settings.autoScan) return;
     const last = Date.parse(state.settings.lastScanAt || "") || 0;
     const interval = (state.settings.scanIntervalSeconds || 120) * 1000;
@@ -2941,7 +3005,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     // First scan should happen within ~8s of plugin boot.
     startupTimer = setTimeout(() => {
       startupTimer = null;
-      if (stopped || scanPromise) return;
+      if (stopped || scanPromise || aiBusy) return;
       if (state.settings.autoScan) startScan("incremental");
     }, 3000);
     if (typeof startupTimer.unref === "function") startupTimer.unref();

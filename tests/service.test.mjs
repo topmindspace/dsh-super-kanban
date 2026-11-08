@@ -1011,6 +1011,49 @@ test("GET /events streams scan/changed and cleans up on close or error", async (
   assert.equal(b.res.body.length, bLength);
 });
 
+test("GET /events drops a slow/backed-up client instead of buffering without bound", async (t) => {
+  const { service } = await setup(t);
+  const openSse = () => {
+    const req = mockReq();
+    const res = mockRes();
+    const pending = service.handle(req, res, { route: "/events", url: new URL("http://plugin.local/events"), method: "GET" });
+    return { req, res, pending };
+  };
+
+  const slow = openSse();
+  await slow.pending;
+  const healthy = openSse();
+  await healthy.pending;
+  const slowLength = slow.res.body.length;
+
+  // Simulate a tab that stopped reading: its unread socket buffer is already over
+  // the 1MB cap when the next event is broadcast.
+  slow.res.writableLength = 2 * 1024 * 1024;
+  await command(service, "task.create", { title: "Broadcast with a slow client" });
+  assert.equal(slow.res.writableEnded, true, "the backed-up stream must be disconnected");
+  assert.equal(slow.res.body.length, slowLength, "no further payload is queued for it");
+  assert.match(healthy.res.body, /"reason":"task"/, "healthy streams keep receiving events");
+
+  // A stream whose write starts reporting back-pressure is dropped as well.
+  const backedUp = openSse();
+  await backedUp.pending;
+  backedUp.res.write = () => false;
+  await command(service, "task.create", { title: "Broadcast with back-pressure" });
+  assert.equal(backedUp.res.writableEnded, true, "a write returning false must disconnect the stream");
+
+  // A write that throws (socket reset) is dropped too.
+  const broken = openSse();
+  await broken.pending;
+  broken.res.write = () => {
+    throw new Error("EPIPE");
+  };
+  await command(service, "task.create", { title: "Broadcast with a broken write" });
+  assert.equal(broken.res.writableEnded, true);
+
+  slow.req.emit("close"); // idempotent: the slow client was already removed
+  healthy.req.emit("close");
+});
+
 test("GET /events sends heartbeats and stops them after disconnect", async (t) => {
   const { service } = await setup(t);
   t.mock.timers.enable({ apis: ["setInterval"] });

@@ -72,9 +72,10 @@ npm run market:index          # regenerate docs/index.json (git source, current 
 npm pack --dry-run            # inspect the published tarball contents
 ```
 
-To exercise the AI engine you need a DSH account credential already present in
-the isolated home; otherwise the plugin simply falls back to the rules engine.
-No network access is required for the test suite.
+To exercise the AI engine, configure a model in the isolated DSH (follow the DSH
+default model, or pick a third-party provider with its API key in the board
+settings); otherwise the plugin simply falls back to the rules engine. No network
+access is required for the test suite.
 
 ## Code conventions
 

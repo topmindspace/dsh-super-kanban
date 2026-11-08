@@ -15,7 +15,7 @@
 | `index.mjs` | Host 入口（路由、鉴权、服务生命周期） |
 | `server/` | Host 实现：扫描 / 规则 / LLM / 存储 / HTTP 服务 |
 | `client.js` | 浏览器半边（单文件，无 JSX、无构建） |
-| `cordis.patch.yml` | 把 host 插件插入 DSH profile |
+| `cordis.patch.yml` | 把 host 插件插入 DSH profile（无 `config:` 块，设置存看板 `state.json`） |
 | `install.sh` / `uninstall.sh` | 本地链接安装 / 卸载 |
 | `scripts/` | validate、文档检查、版本一致性、隐私扫描、市场索引、发布辅助 |
 | `tests/` | `node --test` 套件 |
@@ -48,7 +48,7 @@ dsh web --port 56790                 # 或按 DSH CLI 的方式启动 web 实例
 
 - host 半（`index.mjs` / `server/**`）改动：重启该 DSH 实例（或触发 profile 重新加载）后生效。
 - 浏览器半（`client.js`）改动：刷新窗口即可；如果使用 DSH 的开发模式（HMR），模块会自动重载。
-- 想验证 AI 引擎，需要在隔离 home 里放一份可用的账号凭证（DSH 登录后自动写入）；没有凭证时插件会回退规则引擎，这本身也是需要验证的路径。
+- 想验证 AI 引擎，先在隔离 DSH 里配置好模型（跟随 DSH 默认模型，或在看板 设置 →「AI 研判模型」选择第三方 provider 并填 API Key）；没有可用模型时插件会回退规则引擎，这本身也是需要验证的路径。
 
 ## 4. 调试
 
@@ -89,7 +89,7 @@ curl -s -b "<cookie>" http://127.0.0.1:56790/super-kanban/api/state | head -c 40
 开发建议：
 
 1. **先用规则引擎验证**：规则路径不消耗额度，是最容易复现的入口；改 `analyzer-rules.mjs` 后用测试夹具跑。
-2. **再验证 LLM 路径**：构造固定的会话解析结果（`parsed`）与 digest，单独调用分析器，不依赖真实网络；失败路径（超时 / 非法 JSON / 预算耗尽）要有降级。
+2. **再验证 LLM 路径**：给 `createLlmAnalyzer({ ctx })` 注入 fake `ctx.llm`（参考 `tests/analyzer-llm.test.mjs`），构造固定的会话解析结果（`parsed`）与 digest，不依赖真实网络；失败路径（超时 / 非法 JSON / 预算耗尽）要有降级。
 3. **保持 digest 预算**：`buildDigest` 输出必须 ≤1.5KB；新增字段时在测试里断言 UTF-8 字节数。
 4. **保持合并幂等**：同一个会话多次扫描不应重复建卡；用户锁定字段不得被覆盖。
 5. **隔离单会话失败**：解析失败只跳过该会话并计数，不能让整次扫描失败。
@@ -127,7 +127,7 @@ CI 之外，`.github/dependabot.yml` 每周检查 GitHub Actions 的版本更新
 
 新增行为时：
 
-- 规则引擎变化 → 补 `tests/analyzer.test.mjs`；LLM 预算 / 降级 → 补 `tests/analyzer-llm.test.mjs`；
+- 规则引擎变化 → 补 `tests/analyzer.test.mjs`；模型解析 / 流解析 / 预算 → 补 `tests/analyzer-llm.test.mjs`、`tests/ai-models.test.mjs`、`tests/ai-budget.test.mjs`；
 - 会话发现 / 解析 / digest / 产物提取 → 补 `tests/sessions.test.mjs`；
 - 存储字段 / 迁移 / 损坏恢复 → 补 `tests/store.test.mjs` 或 `tests/store-robustness.test.mjs`；
 - 扫描 / 合并 / 命令编排 → 补 `tests/service.test.mjs`；
@@ -155,19 +155,19 @@ await page.screenshot({ path: "board-light.png" });
 - 制作公开截图时**不要**使用真实会话 / 工作区 / 账号数据；建议构造一套完全虚构的 DSH home（自建 `workspace.json`、会话日志与看板状态），确认左下角不出现真实账号信息后再截图。
 - 深色模式可通过页面注入 `prefers-color-scheme: dark`（CDP `Emulation.setEmulatedMedia`）或切换系统主题验证。
 
-## 7.1 版本、升级与文档一致性
+### 7.1 版本、升级与文档一致性
 
-- **页面 chrome 约定（v0.4）**：页头设置/扫描/在右侧栏打开等高频动作常驻图标按钮，「⋯」只放「导出 JSON」；改 UI 时保持这个信息架构，避免文档与截图再次不一致。
+- **页面 chrome 约定（v0.5）**：页头设置/扫描/在右侧栏打开等高频动作常驻图标按钮，「⋯」只放「导出 JSON」；改 UI 时保持这个信息架构，避免文档与截图再次不一致。
 - **验证运行时版本**：以 profile 的 `node_modules` 为准，而不是仓库 `package.json`：
 
   ```bash
   node -p "require(require('os').homedir() + '/.dsh/profiles/desktop/node_modules/dsh-super-kanban/package.json').version"
   ```
 
-- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.3.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.4.1` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
+- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.4.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.5.0` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
 - **文档同步**：涉及安装/升级/UI 入口的改动，需同步更新 [INSTALL.md](INSTALL.md)、[TROUBLESHOOTING.md](TROUBLESHOOTING.md)、[MARKET.md](MARKET.md) 以及中英文 README 的截图与描述。
 - **文档检查（CI 强制）**：`npm run check:docs` 会校验公开文档的相对链接与锚点、README 中英结构（章节数 / 表格 / 代码块 / 截图集合）、截图引用、GitHub Pages 落地页与历史 `plugin/` 布局残留；`npm run check:version` 会校验 `package.json`、`CHANGELOG.md`、`docs/index.json`、`SECURITY.md` 与文档中兼容范围的一致性。改文档后必须跑这两项。
-- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.4.1`）只用于演示精确安装，实际以 npm latest / 插件页为准。
+- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.5.0`）只用于演示精确安装，实际以 npm latest / 插件页为准。
 
 ## 8. 代码风格
 
@@ -192,6 +192,6 @@ npm test && npm run validate && npm run check:privacy
 | 改了 host 代码没生效 | 重启隔离 DSH 实例；确认 profile 的 bundles 中包含本插件 |
 | 改了 `client.js` 没生效 | 强制刷新窗口（必要时清缓存）；确认插件 bundle 从工作区加载 |
 | 扫描总是 0 个会话 | 检查 `$DSH_HOME/storages/workspace.json` 与会话目录是否匹配；看扫描消息 |
-| AI 不调用 | 确认设置里 AI 开启、当前 home 有凭证、预算未用完、门控条件满足 |
+| AI 不调用 | 确认设置里 AI 开启、隔离 DSH 已配置模型（默认或第三方 provider + API Key）、预算未用完、门控条件满足 |
 | 截图出现真实信息 | 立即改用虚构演示数据，并在 PR 前跑一遍 `npm run check:privacy` |
 | DSH 升级后接口报错 | 对照 DSH 插件机制变化，先确认 `cordis.patch.yml` 与 client 注入列表 |

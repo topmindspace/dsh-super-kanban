@@ -301,7 +301,7 @@ rm -rf ~/.dsh/storages/super-kanban
 | AI 一直不生效 / 模型不可用 | 设置里确认 AI 开启与「AI 研判模型」（跟随 DSH 默认或已配置的 provider）；见 [TROUBLESHOOTING](TROUBLESHOOTING.md#ai-不生效或一直等待) |
 | 升级 DSH 后插件失效 | DSH 大版本可能变更插件接口；先重装与当前 DSH 兼容的版本，数据不会丢 |
 
-更多安全与隐私说明见 README 的「AI 与隐私」一节；安全问题请按 [SECURITY.md](../SECURITY.md) 私下报告。
+更多安全与隐私说明见 README 的「AI 与模型」一节与 [SECURITY.md](../SECURITY.md)；安全问题请按 SECURITY.md 私下报告。
 
 ## 8. 开发者：隔离环境安装与升级验证
 
@@ -313,13 +313,13 @@ dsh web --port 56790          # 首次运行会创建隔离 profile
 ./install.sh -y               # 当前 check-out 会被链接进该 profile
 ```
 
-打开 `http://127.0.0.1:56790`，刷新窗口后从左侧栏打开「任务看板」。源码改动（host 半与 `client.js`）在刷新后生效。详见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+打开 `http://127.0.0.1:56790`，刷新窗口后从左侧栏打开「任务看板」。`client.js` 改动刷新窗口即生效；host 半（`index.mjs` / `server/**`）改动需重载 profile（或重启该 DSH 实例）后生效。详见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 **复现/验证升级行为**（开发文档常用）：
 
 ```bash
 # 1) 在隔离 profile 里安装一个旧范围，观察它不会跨 minor
-dsh plugin --profile web add dsh-super-kanban@^0.3.0
+dsh plugin --profile web add dsh-super-kanban@^0.4.0
 
 # 2) 查看 profile 记录的依赖规格与 node_modules 实际版本（替换 profile 名/home）
 node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh-dev/profiles/web/package.json', 'utf8')).dependencies['dsh-super-kanban']"

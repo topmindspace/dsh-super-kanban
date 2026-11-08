@@ -32,3 +32,8 @@ lib/
 
 # package tarballs
 *.tgz
+
+# tooling output that could contain local paths or tokens
+coverage/
+.npmrc
+*.tsbuildinfo

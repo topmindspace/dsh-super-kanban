@@ -85,9 +85,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for rules results (the rules engine no longer copies the deprecated
   `settings.model`). Existing tasks are not rewritten and keep rendering with
   the model they show today.
-- **Old clients stay compatible**: a `settings.update` that only sends
-  `maxAiCallsPerScan` without `aiBudgetMode` is treated as `"fixed"` for that
-  update, while loading an old `state.json` still defaults to `"auto"`.
+- **Old clients stay compatible**: a `settings.update` whose patch contains
+  only the budget keys (`maxAiCallsPerScan`/`dailyAiCallLimit`, no
+  `aiBudgetMode`) is treated as `"fixed"` for that update; a legacy page saving
+  its full settings form no longer silently switches an auto budget to fixed.
+  Loading an old `state.json` still defaults to `"auto"`.
 - `settings.model` is deprecated and no longer used for analysis; it is kept
   only for old-state / old-client compatibility and will be removed in v0.6.
 - README (zh/en), SECURITY, CONTRACT, ARCHITECTURE, DESIGN, INSTALL, MARKET and
@@ -151,6 +153,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/release.mjs` regenerates the market index before running checks.
 - The new-task dialog no longer claims sessions can be linked from the drawer
   (relinking is a documented roadmap item).
+- **AI commands and scans are now mutually exclusive**: `task.analyze` and
+  `task.polishPrompt` share one in-process mutex with scans, so a long
+  re-analysis can no longer race an automatic scan, overwrite the shared
+  analyzer budget or skew daily usage; concurrent explicit commands return 409
+  with a specific message, and auto scans simply defer to the next tick.
+- **“重新研判” re-judges exactly one session**: it now targets the card's
+  `primarySessionId` (falling back to the first linked session), consuming at
+  most one budget unit; previously a multi-session/relinked card ran up to 12
+  analyses and kept only the last result. A broken source log now returns
+  `400 session-parse-failed` instead of silently producing a rules result.
+- SSE clients that stop reading are dropped on backpressure (1MB buffer or a
+  failed write) instead of growing the host buffer without bound.
+- The legacy-client budget inference is now limited to budget-only patches
+  (see “Changed”); unrelated saves from an old page keep the current mode.
+- Token accounting falls back to input+output+cache tokens when a provider
+  omits `totalTokens`.
+- Host logs no longer print the DSH home path or task titles; merge/build logs
+  use ids and the ready line only reports counts.
+- The bundle patch no longer carries an unused `config:` block (settings live in
+  the board state), and the validator now requires `server/native-llm.mjs` in
+  the shipped server files; CI's `npm pack` assertions also cover it.
+- README.md/README.en.md were rewritten to a ~110-line user-first quick start
+  (install → first steps → features → model/privacy → FAQ), and public docs
+  were corrected after a pre-release accuracy/privacy review (third-party data
+  recipients, polling vs SSE, `/session` status enum, workspace source enum,
+  release flow, settings order and version examples).
 
 ### Security
 

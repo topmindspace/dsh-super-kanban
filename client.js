@@ -145,6 +145,13 @@ window.__ModuleLoader__.load({
       return new Date(Number(ms)).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
     }
 
+    /** 时间字段兼容 ISO 字符串 / epoch ms（Host 的 task.history[].at 是 ISO）；非法值交给 relTime 显示「—」。 */
+    function relTimeValue(value) {
+      if (typeof value === "number") return relTime(value);
+      const parsed = Date.parse(value);
+      return relTime(Number.isFinite(parsed) ? parsed : 0);
+    }
+
     function shortTime(ms) {
       if (!ms) return "";
       const date = new Date(Number(ms));
@@ -391,6 +398,18 @@ window.__ModuleLoader__.load({
       return options;
     }
 
+    /** 每日上限兜底：Host 允许 10–500 任意值，当前值不在标准档位时补一项，避免被静默显示成 50。 */
+    function withDailyAiCallOptions(value) {
+      const number = Number(value);
+      const extra = Number.isFinite(number) && number >= 10 && number <= 500 ? Math.round(number) : null;
+      const options = DAILY_AI_CALL_OPTIONS.slice();
+      if (extra !== null && !options.includes(extra)) {
+        options.push(extra);
+        options.sort((left, right) => left - right);
+      }
+      return options;
+    }
+
     /** 是否第三方 provider：只按 id 前缀判断 DSH 内置 DeepSeek 官方通道（账号 / API Key）。 */
     function isThirdPartyProvider(provider) {
       const id = textOf(provider).toLowerCase();
@@ -547,8 +566,11 @@ window.__ModuleLoader__.load({
           }));
         } finally {
           clearTimeout(timer);
-          busyRef.current = false;
-          abortRef.current = null;
+          // I6：只让「最新请求」清理共享 refs，旧请求（卸载/StrictMode/并发）不得覆盖新请求状态。
+          if (requestRef.current === requestId) {
+            busyRef.current = false;
+            abortRef.current = null;
+          }
         }
       }, []);
 
@@ -568,7 +590,11 @@ window.__ModuleLoader__.load({
       return { status: state.status, data: state.data, error: state.error, announce: state.announce, refresh };
     }
 
-    /** 模型说明行文案：状态机各态的可见文案 + 是否用琥珀强调 + 可选操作。 */
+    /**
+     * 模型说明行文案：状态机各态的可见文案 + 是否用琥珀强调 + 可选操作。
+     * 优先级（I4）：已保存模型找不到（目录不可用/为空/未包含）> 目录自身状态/引导 > 跟随默认说明。
+     * 保存过的模型即使当前目录不可见，下一次研判仍会尝试，失败才降级规则——这条要先让用户看到。
+     */
     function catalogNote(catalog, current) {
       const data = catalog.data;
       const models = (data && data.models) || [];
@@ -577,21 +603,41 @@ window.__ModuleLoader__.load({
       const failText = failures.length
         ? ` ${failures.length} 个提供方读取失败，仅显示可用模型（${failures[0].name || failures[0].provider}${failures[0].message ? "：" + failures[0].message : ""}）。`
         : "";
+      const savedFound = current
+        ? models.some((item) => item.provider === current.provider && item.id === current.model)
+        : false;
+      const catalogUsable = catalog.status === "ready" || catalog.status === "refreshing";
+      const savedOffline = Boolean(current) && catalog.status !== "loading" && (!catalogUsable || !savedFound);
+
+      // I4：已保存模型不在当前目录（目录不可用 / 为空 / 未包含）时优先说明「仍会尝试、失败降级」。
+      if (savedOffline) {
+        const detail =
+          catalog.status === "unavailable"
+            ? "当前无法读取模型目录"
+            : catalog.status === "error"
+              ? `读取模型目录失败（${catalog.error || "未知错误"}）`
+              : "当前目录中没有该模型";
+        return {
+          text: `已保存：${modelLabel(current.provider, current.model)}；${detail}。下一次研判仍会尝试该模型，失败则降级为规则推断。${
+            catalog.status === "unavailable" ? "" : "可在「DSH 设置 → 模型」中检查后点右侧刷新，或改为跟随默认。"
+          }${failText}`,
+          warn: true,
+          followDefault: true,
+          retry: catalog.status === "error",
+        };
+      }
       if (catalog.status === "loading") return { text: "正在读取模型目录…", warn: false };
       if (catalog.status === "unavailable") {
-        return current
-          ? { text: `已保存：${modelLabel(current.provider, current.model)}；当前无法读取模型目录。`, warn: true, followDefault: true }
-          : {
-              text: "当前 DSH 不支持原生模型，扫描将退回本地规则推断。可在「DSH 设置 → 模型」中配置模型提供方或自定义模型 API，或升级 DSH 后重试。",
-              warn: false,
-            };
+        return {
+          text: "当前 DSH 不支持原生模型，扫描将退回本地规则推断。可在「DSH 设置 → 模型」中配置模型提供方或自定义模型 API，或升级 DSH 后重试。",
+          warn: false,
+        };
       }
       if (catalog.status === "error") {
         return {
           text: `读取模型目录失败：${catalog.error || "未知错误"}`,
           warn: true,
           retry: true,
-          followDefault: Boolean(current),
         };
       }
       if (catalog.status === "empty") {
@@ -614,14 +660,7 @@ window.__ModuleLoader__.load({
             };
       }
       if (current) {
-        const found = models.some((item) => item.provider === current.provider && item.id === current.model);
-        if (!found) {
-          return {
-            text: `已保存的模型不在当前目录中，扫描时会降级为规则推断。请在「DSH 设置 → 模型」中启用后点刷新，或改为跟随默认。${failText}`,
-            warn: true,
-            followDefault: true,
-          };
-        }
+        // 到这里 current 一定已在目录中（离线分支已提前返回）。
         return { text: `使用 ${modelLabel(current.provider, current.model)}。${failText}`, warn: failures.length > 0 };
       }
       if (!defaultRef) {
@@ -904,10 +943,15 @@ window.__ModuleLoader__.load({
 /* ---------- modals ---------- */
 .sk-modal-mask{position:fixed;inset:0;background:var(--sk-mask);z-index:70;display:grid;place-items:center;padding:24px;
   animation:skFade .18s var(--sk-ease);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
-.sk-modal{width:min(540px,92vw);max-height:84vh;overflow-y:auto;border-radius:16px;border:1px solid var(--sk-line-strong);
+.sk-modal{width:min(540px,92vw);max-height:84vh;overflow:hidden;border-radius:16px;border:1px solid var(--sk-line-strong);
   background:var(--sk-surface);box-shadow:0 24px 72px rgba(0,0,0,.26);padding:22px;display:flex;flex-direction:column;gap:14px;
   animation:skPop .2s cubic-bezier(.2,.8,.3,1)}
 @keyframes skPop{from{transform:scale(.98) translateY(6px);opacity:0}to{transform:none;opacity:1}}
+/* I1：标题 + 可滚动 body + 吸底 footer，保证「保存设置」首屏可见（1680/1280/420 都不必先滚动） */
+.sk-modal-body{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:14px;
+  scrollbar-width:thin;overscroll-behavior:contain;padding-right:2px}
+.sk-modal-foot{display:flex;justify-content:flex-end;gap:8px;flex:none;padding-top:10px;
+  border-top:0.5px solid var(--sk-line-soft);background:var(--sk-surface)}
 .sk-modal h3{margin:0;font-size:15px;font-weight:650;display:flex;align-items:center;gap:8px;letter-spacing:-.01em}
 .sk-modal h3 svg{color:var(--sk-ink-3)}
 .sk-modal .sub{margin:0;font-size:11px;color:var(--sk-ink-3);line-height:1.55}
@@ -923,7 +967,6 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-switch-thumb,#fff);transition:transform .18s var(--sk-ease);box-shadow:0 1px 3px rgba(0,0,0,.22)}
 .sk-switch.on i{transform:translateX(16px)}
 .sk-ws-pick{display:flex;flex-wrap:wrap;gap:6px;max-height:132px;overflow-y:auto;padding:1px}
-.sk-modal-foot{display:flex;justify-content:flex-end;gap:8px;padding-top:4px}
 /* ---------- toast / empty / loading / error ---------- */
 .sk-toasts{position:fixed;right:22px;bottom:20px;z-index:90;display:flex;flex-direction:column;gap:7px;align-items:flex-end;pointer-events:none;max-width:min(420px,calc(100vw - 40px))}
 .sk-toast{pointer-events:auto;display:flex;align-items:center;gap:7px;border-radius:10px;padding:9px 13px;font-size:11.5px;line-height:1.45;
@@ -964,6 +1007,7 @@ window.__ModuleLoader__.load({
 .sk-page.is-side .sk-mask{position:absolute;z-index:60}
 .sk-page.is-side .sk-modal-mask{position:absolute;z-index:70;padding:10px}
 .sk-page.is-side .sk-modal{width:100%;max-height:calc(100% - 4px);border-radius:12px;padding:16px;gap:11px}
+.sk-page.is-side .sk-modal-body{gap:11px}
 .sk-page.is-side .sk-toasts{position:absolute;left:10px;right:10px;bottom:10px;transform:none;align-items:flex-end;max-width:none;z-index:90}
 .sk-page.is-side .sk-toast{font-size:11px;padding:8px 11px}
 /* narrow：状态分段 + 单列 */
@@ -1254,10 +1298,11 @@ window.__ModuleLoader__.load({
 .sk-hist div{display:flex;gap:8px;align-items:baseline}
 /* modals v3 */
 .sk-modal-mask{background:color-mix(in srgb,var(--dsw-alias-bg-mask-3,#0000007a) 26%,transparent);backdrop-filter:none;-webkit-backdrop-filter:none}
-.sk-modal{width:min(520px,92vw);border-radius:16px;border:0.5px solid var(--sk-line-strong);box-shadow:var(--dsw-elevation-panel);padding:20px;gap:14px}
+.sk-modal{width:min(520px,92vw);border-radius:16px;border:0.5px solid var(--sk-line-strong);box-shadow:var(--dsw-elevation-panel);padding:20px;gap:14px;
+  display:flex;flex-direction:column;overflow:hidden}
 .sk-modal h3{font-size:15px;font-weight:600}
 .sk-modal .sub{font-size:12px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
-.sk-modal-foot{padding-top:8px}
+.sk-modal-foot{padding-top:8px;border-top:0.5px solid var(--sk-line-soft);background:var(--sk-surface)}
 .sk-settings-row{border-top:0.5px solid var(--sk-line-soft);padding-top:12px}
 .sk-settings-row .label b{font-size:13px;font-weight:500}
 .sk-settings-row .label span{font-size:12px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
@@ -1475,6 +1520,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-catalog-note{margin:0;font-size:11px;line-height:1.5;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);overflow-wrap:anywhere}
 .sk-catalog-note.is-warn{color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 80%,var(--sk-ink))}
 .sk-catalog-note .sk-text{font-size:11px;margin-left:2px}
+.sk-catalog-note .sk-catalog-sep{color:color-mix(in srgb,var(--sk-ink) 30%,transparent)}
 /* 用量行：安静文字 + 琥珀警告，不做色块 / 进度条 */
 .sk-usage-rest{font-variant-numeric:tabular-nums;white-space:nowrap}
 .sk-usage-note{margin:0;font-size:11px;line-height:1.5;color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
@@ -2106,36 +2152,40 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             "aria-labelledby": "sk-continue-title",
           },
           h("h3", { id: "sk-continue-title" }, h(Icon, { name: "play", size: 15 }), "继续此任务"),
-          h("p", { className: "sub" }, "提示词只放入输入框、不会自动发送；确认无误后再发送给 DSH。"),
           h(
             "div",
-            { className: "sk-continue-target", role: "group", "aria-label": "提示词放入位置" },
+            { className: "sk-modal-body" },
+            h("p", { className: "sub" }, "提示词只放入输入框、不会自动发送；确认无误后再发送给 DSH。"),
             h(
-              "button",
-              { type: "button", "aria-pressed": target === "session", className: target === "session" ? "is-on" : "", onClick: () => setTarget("session") },
-              "原会话继续",
-              h("small", null, session.title || "来源会话"),
+              "div",
+              { className: "sk-continue-target", role: "group", "aria-label": "提示词放入位置" },
+              h(
+                "button",
+                { type: "button", "aria-pressed": target === "session", className: target === "session" ? "is-on" : "", onClick: () => setTarget("session") },
+                "原会话继续",
+                h("small", null, session.title || "来源会话"),
+              ),
+              h(
+                "button",
+                { type: "button", "aria-pressed": target === "newSession", className: target === "newSession" ? "is-on" : "", onClick: () => setTarget("newSession") },
+                "同工作区新会话",
+                h("small", null, task.workspaceTitle || "未关联工作区"),
+              ),
             ),
-            h(
-              "button",
-              { type: "button", "aria-pressed": target === "newSession", className: target === "newSession" ? "is-on" : "", onClick: () => setTarget("newSession") },
-              "同工作区新会话",
-              h("small", null, task.workspaceTitle || "未关联工作区"),
-            ),
+            loading
+              ? h("div", { className: "sk-note-tiny", role: "status", "aria-live": "polite" }, "正在生成提示词…")
+              : h("textarea", {
+                  className: "sk-continue-textarea",
+                  "aria-label": "继续任务的提示词",
+                  value: prompt,
+                  spellCheck: false,
+                  onChange: (event) => {
+                    dirtyRef.current = true;
+                    setPrompt(event.target.value);
+                  },
+                }),
+            note ? h("div", { className: "sk-note-tiny", role: "status", "aria-live": "polite" }, note) : null,
           ),
-          loading
-            ? h("div", { className: "sk-note-tiny", role: "status", "aria-live": "polite" }, "正在生成提示词…")
-            : h("textarea", {
-                className: "sk-continue-textarea",
-                "aria-label": "继续任务的提示词",
-                value: prompt,
-                spellCheck: false,
-                onChange: (event) => {
-                  dirtyRef.current = true;
-                  setPrompt(event.target.value);
-                },
-              }),
-          note ? h("div", { className: "sk-note-tiny", role: "status", "aria-live": "polite" }, note) : null,
           h(
             "div",
             { className: "sk-modal-foot" },
@@ -2247,11 +2297,17 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         setReasonOverflow(node.scrollHeight > node.clientHeight + 1);
       }, [aiInfo && aiInfo.reason, reasonExpanded]);
 
+      // S10：菜单关闭 / 点别处时复位「确认删除」，避免下次打开菜单直接显示「确认删除任务」。
+      const closeMore = () => {
+        setMoreOpen(false);
+        setConfirmDelete(false);
+      };
+
       // Esc 分层：先收起抽屉内浮层 / 退出编辑，最后才关闭抽屉；「继续此任务」弹窗自己处理 Esc。
       const handleEscape = () => {
         if (continueOpen) return;
         if (moreOpen) {
-          setMoreOpen(false);
+          closeMore();
           return;
         }
         if (moreOpenFooter) {
@@ -2425,6 +2481,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           onClose();
           await onChanged();
         } catch (cause) {
+          setConfirmDelete(false);
           pushToast("删除失败：" + cause.message, "error");
         }
       };
@@ -2457,7 +2514,8 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         { label: locked.length ? "解锁字段" : "锁定字段", icon: locked.length ? "unlock" : "lock", onClick: toggleLock },
         "divider",
         { label: task.archived ? "恢复任务" : "归档任务", icon: "archive", onClick: () => run(task.archived ? "恢复" : "归档", () => command("task.archive", { id: task.id, archived: !task.archived }), task.archived ? "已恢复" : "已归档") },
-        { label: confirmDelete ? "确认删除任务" : "删除任务", icon: "trash", danger: true, onClick: removeTask },
+        // S10：删除二次确认在菜单内原位完成（keepOpen），菜单一关闭就复位，避免下次打开直接显示「确认删除任务」。
+        { label: confirmDelete ? "确认删除任务" : "删除任务", icon: "trash", danger: true, keepOpen: true, onClick: removeTask },
       ];
       const footerMenuItems = [
         { label: "新会话继续", icon: "spark", onClick: () => { setContinueTarget("newSession"); setContinueOpen(true); } },
@@ -2514,10 +2572,18 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             h("div", { className: "sk-drawer-head-text" }, h("div", { className: "sk-drawer-kicker" }, "任务"), h("h2", { className: "sk-drawer-title-v3", id: "sk-drawer-title" }, task.title)),
             h(
               DropMenu,
-              { open: moreOpen, onClose: () => setMoreOpen(false), items: drawerMenuItems },
+              { open: moreOpen, onClose: closeMore, items: drawerMenuItems },
               h(
                 "button",
-                { type: "button", className: "sk-iconbtn-v3", title: "更多", "aria-label": "更多任务操作", "aria-haspopup": "menu", "aria-expanded": moreOpen, onClick: () => setMoreOpen((value) => !value) },
+                {
+                  type: "button",
+                  className: "sk-iconbtn-v3",
+                  title: "更多",
+                  "aria-label": "更多任务操作",
+                  "aria-haspopup": "menu",
+                  "aria-expanded": moreOpen,
+                  onClick: () => (moreOpen ? closeMore() : setMoreOpen(true)),
+                },
                 h(Icon, { name: "more", size: 16 }),
               ),
             ),
@@ -2858,7 +2924,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   { className: "sk-fold" },
                   h("button", { type: "button", className: "sk-fold-head", onClick: () => setHistoryOpen((value) => !value) }, h(Icon, { name: historyOpen ? "chevronDown" : "chevron", size: 12 }), "历史", h("span", { className: "sk-fold-count" }, `${history.length} 条`)),
                   historyOpen
-                    ? h("div", { className: "sk-hist" }, history.map((entry, index) => h("div", { key: index }, h("span", null, relTime(entry.at)), h("span", null, entry.by === "ai" ? "AI" : "手动", " · ", entry.note || entry.kind || ""))))
+                    ? h("div", { className: "sk-hist" }, history.map((entry, index) => h("div", { key: index }, h("span", null, relTimeValue(entry.at)), h("span", null, entry.by === "ai" ? "AI" : "手动", " · ", entry.note || entry.kind || ""))))
                     : null,
                 )
               : null,
@@ -2952,63 +3018,67 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             "aria-labelledby": "sk-newtask-title",
           },
           h("h3", { id: "sk-newtask-title" }, h(Icon, { name: "plus", size: 15 }), "新建任务"),
-          h("p", { className: "sub" }, "手动任务不会被自动扫描修改，可稍后从来源会话补充上下文。"),
           h(
             "div",
-            { className: "sk-field" },
-            h("label", { htmlFor: "sk-newtask-title-input" }, "标题"),
-            h("input", { ref: inputRef, id: "sk-newtask-title-input", className: "sk-input", value: title, maxLength: TEXT_LIMITS.title, placeholder: "要做什么？", onChange: (event) => setTitle(event.target.value), onKeyDown: (event) => event.key === "Enter" && create() }),
-          ),
-          h(
-            "div",
-            { className: "sk-field" },
-            h("label", { htmlFor: "sk-newtask-goal-input" }, "目标 / 说明（可选）"),
-            h("textarea", { id: "sk-newtask-goal-input", className: "sk-textarea", value: goal, maxLength: TEXT_LIMITS.goal, rows: 2, placeholder: "一句话说明完成标准", onChange: (event) => setGoal(event.target.value) }),
-          ),
-          h(
-            "div",
-            { className: "sk-field" },
-            h("span", { className: "sk-field-label", id: "sk-newtask-status-label" }, "状态"),
-            h(
-              "div",
-              { className: "sk-seg", role: "group", "aria-labelledby": "sk-newtask-status-label" },
-              STATUS_ORDER.map((item) =>
-                h(
-                  "button",
-                  { key: item, type: "button", "aria-pressed": status === item, className: status === item ? "on" : "", style: { "--tone": STATUS_META[item].tone }, onClick: () => setStatus(item) },
-                  STATUS_META[item].label,
-                ),
-              ),
-            ),
-          ),
-          h(
-            "div",
-            { className: "sk-row2" },
+            { className: "sk-modal-body" },
+            h("p", { className: "sub" }, "手动任务不会被自动扫描修改，可稍后从来源会话补充上下文。"),
             h(
               "div",
               { className: "sk-field" },
-              h("span", { className: "sk-field-label", id: "sk-newtask-priority-label" }, "优先级"),
+              h("label", { htmlFor: "sk-newtask-title-input" }, "标题"),
+              h("input", { ref: inputRef, id: "sk-newtask-title-input", className: "sk-input", value: title, maxLength: TEXT_LIMITS.title, placeholder: "要做什么？", onChange: (event) => setTitle(event.target.value), onKeyDown: (event) => event.key === "Enter" && create() }),
+            ),
+            h(
+              "div",
+              { className: "sk-field" },
+              h("label", { htmlFor: "sk-newtask-goal-input" }, "目标 / 说明（可选）"),
+              h("textarea", { id: "sk-newtask-goal-input", className: "sk-textarea", value: goal, maxLength: TEXT_LIMITS.goal, rows: 2, placeholder: "一句话说明完成标准", onChange: (event) => setGoal(event.target.value) }),
+            ),
+            h(
+              "div",
+              { className: "sk-field" },
+              h("span", { className: "sk-field-label", id: "sk-newtask-status-label" }, "状态"),
               h(
                 "div",
-                { className: "sk-seg", role: "group", "aria-labelledby": "sk-newtask-priority-label" },
-                PRIORITY_ORDER.map((item) =>
+                { className: "sk-seg", role: "group", "aria-labelledby": "sk-newtask-status-label" },
+                STATUS_ORDER.map((item) =>
                   h(
                     "button",
-                    { key: item, type: "button", "aria-pressed": priority === item, className: priority === item ? "on" : "", style: { "--tone": PRIORITY_META[item].tone }, onClick: () => setPriority(item) },
-                    item,
+                    { key: item, type: "button", "aria-pressed": status === item, className: status === item ? "on" : "", style: { "--tone": STATUS_META[item].tone }, onClick: () => setStatus(item) },
+                    STATUS_META[item].label,
                   ),
                 ),
               ),
             ),
             h(
               "div",
-              { className: "sk-field" },
-              h("label", { htmlFor: "sk-newtask-workspace" }, "工作区（可选）"),
+              { className: "sk-row2" },
               h(
-                "select",
-                { id: "sk-newtask-workspace", className: "sk-select", style: { width: "100%", padding: "7px 10px" }, value: workspaceId, onChange: (event) => setWorkspaceId(event.target.value) },
-                h("option", { value: "" }, "不指定"),
-                (workspaces || []).map((workspace) => h("option", { key: workspace.id, value: workspace.id }, workspace.title)),
+                "div",
+                { className: "sk-field" },
+                h("span", { className: "sk-field-label", id: "sk-newtask-priority-label" }, "优先级"),
+                h(
+                  "div",
+                  { className: "sk-seg", role: "group", "aria-labelledby": "sk-newtask-priority-label" },
+                  PRIORITY_ORDER.map((item) =>
+                    h(
+                      "button",
+                      { key: item, type: "button", "aria-pressed": priority === item, className: priority === item ? "on" : "", style: { "--tone": PRIORITY_META[item].tone }, onClick: () => setPriority(item) },
+                      item,
+                    ),
+                  ),
+                ),
+              ),
+              h(
+                "div",
+                { className: "sk-field" },
+                h("label", { htmlFor: "sk-newtask-workspace" }, "工作区（可选）"),
+                h(
+                  "select",
+                  { id: "sk-newtask-workspace", className: "sk-select", style: { width: "100%", padding: "7px 10px" }, value: workspaceId, onChange: (event) => setWorkspaceId(event.target.value) },
+                  h("option", { value: "" }, "不指定"),
+                  (workspaces || []).map((workspace) => h("option", { key: workspace.id, value: workspace.id }, workspace.title)),
+                ),
               ),
             ),
           ),
@@ -3125,10 +3195,23 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           "p",
           { id: "sk-ai-model-desc", className: cx("sk-catalog-note", note.warn && "is-warn") },
           note.text,
+          // S2：文本按钮之间加可见分隔符，避免读屏/复制时连成「…改为跟随默认重试」。
           note.followDefault
-            ? h("button", { type: "button", className: "sk-text", onClick: () => set({ aiProvider: "", aiModel: "" }) }, "改为跟随默认")
+            ? h(
+                React.Fragment,
+                null,
+                h("span", { className: "sk-catalog-sep", "aria-hidden": "true" }, " · "),
+                h("button", { type: "button", className: "sk-text", onClick: () => set({ aiProvider: "", aiModel: "" }) }, "改为跟随默认"),
+              )
             : null,
-          note.retry ? h("button", { type: "button", className: "sk-text", onClick: catalog.refresh }, "重试") : null,
+          note.retry
+            ? h(
+                React.Fragment,
+                null,
+                h("span", { className: "sk-catalog-sep", "aria-hidden": "true" }, " · "),
+                h("button", { type: "button", className: "sk-text", onClick: catalog.refresh }, "重试"),
+              )
+            : null,
         ),
         h("p", { id: "sk-ai-model-guide", className: cx("sk-catalog-note", thirdParty && "is-warn") }, guideText),
         h(
@@ -3168,7 +3251,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const set = (patch) => setDraft((value) => ({ ...value, ...patch }));
       const dailyLimit = Number(draft.dailyAiCallLimit) || 150;
       const dailyRemaining = usage ? Math.max(0, dailyLimit - usage.calls) : 0;
-      const fixedLimit = Number(draft.maxAiCallsPerScan) || AI_MAX_CALLS_DEFAULT;
+      // S1：禁止 || 回退（0 / 空串会被误判）；Host 钳制 5–150，非法值才用默认。
+      const fixedLimitValue = Number(draft.maxAiCallsPerScan);
+      const fixedLimit = Number.isFinite(fixedLimitValue) ? fixedLimitValue : AI_MAX_CALLS_DEFAULT;
       const entryMode = entryDraft;
       const chooseEntry = (mode) => setEntryDraft(mode);
       const toggleWorkspace = (id) => {
@@ -3216,176 +3301,187 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h("h3", { id: "sk-settings-title" }, h(Icon, { name: "settings", size: 15 }), "看板设置"),
           h(
             "div",
-            { className: "sk-settings-row" },
-            h("div", { className: "label" }, h("b", null, "AI 联网研判"), h("span", null, "使用 DSH 配置的模型（含第三方）分析会话摘要；关闭后仅用本地规则推断")),
-            h("button", { type: "button", className: cx("sk-switch", draft.aiEnabled && "on"), onClick: () => set({ aiEnabled: !draft.aiEnabled }), "aria-label": "AI 联网研判", role: "switch", "aria-checked": draft.aiEnabled }, h("i")),
-          ),
-          h(AiModelBlock, { draft, set, catalog }),
-          h(
-            "div",
-            { className: "sk-settings-row" },
-            h("div", { className: "label" }, h("b", null, "自动扫描"), h("span", null, "按间隔增量扫描有变化的会话")),
-            h("button", { type: "button", className: cx("sk-switch", draft.autoScan && "on"), onClick: () => set({ autoScan: !draft.autoScan }), "aria-label": "自动扫描", role: "switch", "aria-checked": draft.autoScan }, h("i")),
-          ),
-          h(
-            "div",
-            { className: "sk-settings-row" },
-            h("div", { className: "label" }, h("b", null, "扫描间隔"), h("span", null, "没有新对话时开销极小")),
-            h(
-              "select",
-              { className: "sk-select", "aria-label": "扫描间隔", value: draft.scanIntervalSeconds, onChange: (event) => set({ scanIntervalSeconds: Number(event.target.value) }) },
-              [60, 120, 300, 600].map((seconds) => h("option", { key: seconds, value: seconds }, seconds < 60 ? `${seconds} 秒` : `${seconds / 60} 分钟`)),
-            ),
-          ),
-          h(
-            "div",
-            { className: "sk-settings-row" },
-            h("div", { className: "label" }, h("b", null, "初始扫描范围"), h("span", null, "首次纳入最近多少天的会话")),
-            h(
-              "select",
-              { className: "sk-select", "aria-label": "初始扫描范围", value: draft.initialDays, onChange: (event) => set({ initialDays: Number(event.target.value) }) },
-              [7, 14, 30, 90].map((days) => h("option", { key: days, value: days }, `最近 ${days} 天`)),
-            ),
-          ),
-          h(
-            "div",
-            { className: "sk-settings-row" },
+            { className: "sk-modal-body" },
             h(
               "div",
-              { className: "label" },
-              h("b", null, "AI 预算 · 单次扫描上限"),
+              { className: "sk-settings-row" },
+              h("div", { className: "label" }, h("b", null, "AI 联网研判"), h("span", null, "使用 DSH 配置的模型（含第三方）分析会话摘要；关闭后仅用本地规则推断")),
+              h("button", { type: "button", className: cx("sk-switch", draft.aiEnabled && "on"), onClick: () => set({ aiEnabled: !draft.aiEnabled }), "aria-label": "AI 联网研判", role: "switch", "aria-checked": draft.aiEnabled }, h("i")),
+            ),
+            h(AiModelBlock, { draft, set, catalog }),
+            h(
+              "div",
+              { className: "sk-settings-row" },
+              h("div", { className: "label" }, h("b", null, "自动扫描"), h("span", null, "按间隔增量扫描有变化的会话")),
+              h("button", { type: "button", className: cx("sk-switch", draft.autoScan && "on"), onClick: () => set({ autoScan: !draft.autoScan }), "aria-label": "自动扫描", role: "switch", "aria-checked": draft.autoScan }, h("i")),
+            ),
+            h(
+              "div",
+              { className: "sk-settings-row" },
+              h("div", { className: "label" }, h("b", null, "扫描间隔"), h("span", null, "没有新对话时开销极小")),
               h(
-                "span",
-                null,
-                isAutoBudgetMode(draft.aiBudgetMode)
-                  ? "自动使用当日剩余额度，单次最多约 10 分钟；超出后剩余会话下次扫描继续"
-                  : "超出后本次其余会话用规则卡，下次扫描继续研判",
+                "select",
+                { className: "sk-select", "aria-label": "扫描间隔", value: draft.scanIntervalSeconds, onChange: (event) => set({ scanIntervalSeconds: Number(event.target.value) }) },
+                [60, 120, 300, 600].map((seconds) => h("option", { key: seconds, value: seconds }, seconds < 60 ? `${seconds} 秒` : `${seconds / 60} 分钟`)),
               ),
             ),
             h(
-              "select",
-              {
-                className: "sk-select",
-                "aria-label": "单次扫描 AI 调用上限",
-                // 单个下拉、内部两个字段：auto 只改 aiBudgetMode（保留数字），固定档同时写数字。
-                value: isAutoBudgetMode(draft.aiBudgetMode) ? "auto" : String(draft.maxAiCallsPerScan),
-                onChange: (event) => {
-                  if (event.target.value === "auto") set({ aiBudgetMode: "auto" });
-                  else set({ aiBudgetMode: "fixed", maxAiCallsPerScan: Number(event.target.value) });
-                },
-              },
-              h("option", { key: "auto", value: "auto" }, "自动（推荐）"),
-              withAiCallOptions(draft.maxAiCallsPerScan).map((value) => h("option", { key: String(value), value: String(value) }, `固定 ${value} 次`)),
+              "div",
+              { className: "sk-settings-row" },
+              h("div", { className: "label" }, h("b", null, "初始扫描范围"), h("span", null, "首次纳入最近多少天的会话")),
+              h(
+                "select",
+                { className: "sk-select", "aria-label": "初始扫描范围", value: draft.initialDays, onChange: (event) => set({ initialDays: Number(event.target.value) }) },
+                [7, 14, 30, 90].map((days) => h("option", { key: days, value: days }, `最近 ${days} 天`)),
+              ),
             ),
-          ),
-          h(
-            "div",
-            { className: "sk-settings-row" },
-            h("div", { className: "label" }, h("b", null, "AI 预算 · 每日上限"), h("span", null, "每日 AI 研判上限，用完后当日仅规则推断；按本机日历日 0 点重置")),
             h(
-              "select",
-              { className: "sk-select", "aria-label": "每日 AI 调用上限", value: draft.dailyAiCallLimit, onChange: (event) => set({ dailyAiCallLimit: Number(event.target.value) }) },
-              DAILY_AI_CALL_OPTIONS.map((value) => h("option", { key: value, value }, `${value} 次`)),
-            ),
-          ),
-          usage
-            ? h(
+              "div",
+              { className: "sk-settings-row" },
+              h(
                 "div",
-                { className: "sk-usage" },
+                { className: "label" },
+                h("b", null, "AI 预算 · 单次扫描上限"),
                 h(
-                  "div",
-                  { className: "sk-usage-row" },
-                  h("span", null, "今日 AI 调用 ", h("b", null, usage.calls), " / ", h("b", null, dailyLimit), " 次"),
-                  h("span", { className: "sk-usage-rest" }, "剩余 ", h("b", null, dailyRemaining), " 次"),
-                  h("span", null, "tokens ", h("b", null, fmtTokens(usage.tokens))),
+                  "span",
+                  null,
+                  isAutoBudgetMode(draft.aiBudgetMode)
+                    ? "自动使用当日剩余额度，单次最多约 10 分钟；超出后剩余会话下次扫描继续"
+                    : "超出后本次其余会话用规则卡，下次扫描继续研判",
                 ),
-                h(
-                  "div",
-                  { className: "sk-usage-row" },
-                  h("span", null, "上次扫描：", h("b", null, usage.lastScan.calls), " 次调用 · ", h("b", null, fmtTokens(usage.lastScan.tokens)), " tokens · ", h("b", null, fmtDuration(usage.lastScan.durationMs))),
-                ),
-                // 用量不足 / 耗尽只用安静的琥珀文字，不做彩色盒子或进度条。
-                dailyRemaining === 0
-                  ? h("div", { className: "sk-usage-warn" }, "已达今日 AI 上限，剩余会话明日继续；可调高每日上限或等待 0 点重置。")
-                  : isAutoBudgetMode(draft.aiBudgetMode)
-                    ? h("div", { className: "sk-usage-note" }, `单次上限：自动（本次最多 ${dailyRemaining} 次，AI 阶段最多 10 分钟）`)
-                    : dailyRemaining < fixedLimit
-                      ? h("div", { className: "sk-usage-warn" }, `今日剩余仅 ${dailyRemaining} 次，本次最多 ${dailyRemaining} 次`)
-                      : null,
-                h(
-                  "p",
-                  { className: "sk-usage-note" },
-                  `每日上限按本机日历日 0 点重置（今日 ${usage.date || "今天"}）。首次全量扫描会话较多时可能需要几分钟；可随时取消，已完成部分会保留。`,
-                ),
-              )
-            : h("div", { className: "sk-usage" }, h("div", { className: "sk-usage-row" }, "今日用量：Host v2 就绪后显示")),
-          h(
-            "div",
-            { className: "sk-field" },
-            h("span", { className: "sk-field-label", id: "sk-settings-entry-label" }, "显示与入口"),
+              ),
+              h(
+                "select",
+                {
+                  className: "sk-select",
+                  "aria-label": "单次扫描 AI 调用上限",
+                  // 单个下拉、内部两个字段：auto 只改 aiBudgetMode（保留数字），固定档同时写数字。
+                  value: isAutoBudgetMode(draft.aiBudgetMode) ? "auto" : String(draft.maxAiCallsPerScan),
+                  onChange: (event) => {
+                    if (event.target.value === "auto") set({ aiBudgetMode: "auto" });
+                    else set({ aiBudgetMode: "fixed", maxAiCallsPerScan: Number(event.target.value) });
+                  },
+                },
+                h("option", { key: "auto", value: "auto" }, "自动（推荐）"),
+                withAiCallOptions(draft.maxAiCallsPerScan).map((value) => h("option", { key: String(value), value: String(value) }, `固定 ${value} 次`)),
+              ),
+            ),
             h(
               "div",
-              { className: "sk-entry-options", role: "group", "aria-labelledby": "sk-settings-entry-label" },
-              [
-                { id: "both", label: "两者", desc: "左侧栏全页 + 会话右侧栏" },
-                { id: "page", label: "仅全局面板", desc: "只注册左侧栏「任务看板」" },
-                { id: "side", label: "仅会话右侧栏", desc: "只注册会话头部入口" },
-              ].map((option) =>
-                h(
-                  "button",
-                  {
-                    key: option.id,
-                    type: "button",
-                    "aria-pressed": entryMode === option.id,
-                    className: cx("sk-entry-option", entryMode === option.id && "is-on"),
-                    onClick: () => chooseEntry(option.id),
-                  },
-                  option.label,
-                  h("small", null, option.desc),
+              { className: "sk-settings-row" },
+              h("div", { className: "label" }, h("b", null, "AI 预算 · 每日上限"), h("span", null, "每日 AI 研判上限，用完后当日仅规则推断；按本机日历日 0 点重置")),
+              h(
+                "select",
+                { className: "sk-select", "aria-label": "每日 AI 调用上限", value: draft.dailyAiCallLimit, onChange: (event) => set({ dailyAiCallLimit: Number(event.target.value) }) },
+                // I3：当前值不在标准档位时补「N 次（当前值）」，避免自定义 10–500 被静默显示成 50。
+                withDailyAiCallOptions(draft.dailyAiCallLimit).map((value) =>
+                  h(
+                    "option",
+                    { key: value, value },
+                    DAILY_AI_CALL_OPTIONS.includes(value) ? `${value} 次` : `${value} 次（当前值）`,
+                  ),
                 ),
               ),
             ),
-            h("p", { className: "sub", style: { margin: 0 } }, "修改后需刷新窗口（Cmd+R）生效；当前已注册的入口在本页保持不变。"),
-          ),
-          h(
-            "div",
-            { className: "sk-field" },
-            h("span", { className: "sk-field-label", id: "sk-settings-exclude-label" }, "排除工作区"),
+            usage
+              ? h(
+                  "div",
+                  { className: "sk-usage" },
+                  h(
+                    "div",
+                    { className: "sk-usage-row" },
+                    h("span", null, "今日 AI 调用 ", h("b", null, usage.calls), " / ", h("b", null, dailyLimit), " 次"),
+                    h("span", { className: "sk-usage-rest" }, "剩余 ", h("b", null, dailyRemaining), " 次"),
+                    h("span", null, "tokens ", h("b", null, fmtTokens(usage.tokens))),
+                  ),
+                  h(
+                    "div",
+                    { className: "sk-usage-row" },
+                    h("span", null, "上次扫描：", h("b", null, usage.lastScan.calls), " 次调用 · ", h("b", null, fmtTokens(usage.lastScan.tokens)), " tokens · ", h("b", null, fmtDuration(usage.lastScan.durationMs))),
+                  ),
+                  // 用量不足 / 耗尽只用安静的琥珀文字，不做彩色盒子或进度条。
+                  dailyRemaining === 0
+                    ? h("div", { className: "sk-usage-warn" }, "已达今日 AI 上限，剩余会话明日继续；可调高每日上限或等待 0 点重置。")
+                    : isAutoBudgetMode(draft.aiBudgetMode)
+                      ? h("div", { className: "sk-usage-note" }, `单次上限：自动（本次最多 ${dailyRemaining} 次，AI 阶段最多 10 分钟）`)
+                      : dailyRemaining < fixedLimit
+                        ? h("div", { className: "sk-usage-warn" }, `今日剩余仅 ${dailyRemaining} 次，本次最多 ${dailyRemaining} 次`)
+                        : null,
+                  h(
+                    "p",
+                    { className: "sk-usage-note" },
+                    `每日上限按本机日历日 0 点重置（今日 ${usage.date || "今天"}）。首次全量扫描会话较多时可能需要几分钟；可随时取消，已完成部分会保留。`,
+                  ),
+                )
+              : h("div", { className: "sk-usage" }, h("div", { className: "sk-usage-row" }, "今日用量：Host v2 就绪后显示")),
             h(
               "div",
-              { className: "sk-ws-pick", role: "group", "aria-labelledby": "sk-settings-exclude-label" },
-              (workspaces || []).map((workspace) =>
-                h(
-                  "button",
-                  {
-                    key: workspace.id,
-                    type: "button",
-                    "aria-pressed": draft.excludeWorkspaces.includes(workspace.id),
-                    className: cx("sk-chip", draft.excludeWorkspaces.includes(workspace.id) && "on"),
-                    onClick: () => toggleWorkspace(workspace.id),
-                    title: workspace.path,
-                  },
-                  draft.excludeWorkspaces.includes(workspace.id) ? "已排除 · " : "",
-                  workspace.title,
+              { className: "sk-field" },
+              h("span", { className: "sk-field-label", id: "sk-settings-entry-label" }, "显示与入口"),
+              h(
+                "div",
+                { className: "sk-entry-options", role: "group", "aria-labelledby": "sk-settings-entry-label" },
+                [
+                  { id: "both", label: "两者", desc: "左侧栏全页 + 会话右侧栏" },
+                  { id: "page", label: "仅全局面板", desc: "只注册左侧栏「任务看板」" },
+                  { id: "side", label: "仅会话右侧栏", desc: "只注册会话头部入口" },
+                ].map((option) =>
+                  h(
+                    "button",
+                    {
+                      key: option.id,
+                      type: "button",
+                      "aria-pressed": entryMode === option.id,
+                      className: cx("sk-entry-option", entryMode === option.id && "is-on"),
+                      onClick: () => chooseEntry(option.id),
+                    },
+                    option.label,
+                    h("small", null, option.desc),
+                  ),
+                ),
+              ),
+              h("p", { className: "sub", style: { margin: 0 } }, "修改后需刷新窗口（Cmd+R）生效；当前已注册的入口在本页保持不变。"),
+            ),
+            h(
+              "div",
+              { className: "sk-field" },
+              h("span", { className: "sk-field-label", id: "sk-settings-exclude-label" }, "排除工作区"),
+              h(
+                "div",
+                { className: "sk-ws-pick", role: "group", "aria-labelledby": "sk-settings-exclude-label" },
+                (workspaces || []).map((workspace) =>
+                  h(
+                    "button",
+                    {
+                      key: workspace.id,
+                      type: "button",
+                      "aria-pressed": draft.excludeWorkspaces.includes(workspace.id),
+                      className: cx("sk-chip", draft.excludeWorkspaces.includes(workspace.id) && "on"),
+                      onClick: () => toggleWorkspace(workspace.id),
+                      title: workspace.path,
+                    },
+                    draft.excludeWorkspaces.includes(workspace.id) ? "已排除 · " : "",
+                    workspace.title,
+                  ),
                 ),
               ),
             ),
-          ),
-          h(
-            "div",
-            { className: "sk-inline-actions", style: { borderTop: "0.5px solid var(--dsw-alias-border-l1)", paddingTop: 11 } },
             h(
-              "button",
-              { type: "button", className: "sk-btn", title: "将按当前 AI 预算研判全部会话", onClick: () => onScan("full") },
-              h(Icon, { name: "refresh", size: 12 }),
-              "立即全量重扫",
+              "div",
+              { className: "sk-inline-actions", style: { borderTop: "0.5px solid var(--dsw-alias-border-l1)", paddingTop: 11 } },
+              h(
+                "button",
+                { type: "button", className: "sk-btn", title: "将按当前 AI 预算研判全部会话", onClick: () => onScan("full") },
+                h(Icon, { name: "refresh", size: 12 }),
+                "立即全量重扫",
+              ),
+              h("button", { type: "button", className: "sk-btn", onClick: exportJson }, h(Icon, { name: "file", size: 12 }), "导出 JSON"),
             ),
-            h("button", { type: "button", className: "sk-btn", onClick: exportJson }, h(Icon, { name: "file", size: 12 }), "导出 JSON"),
-          ),
-          h(
-            "p",
-            { className: "sub" },
-            "数据只存在本机 ~/.dsh/storages/super-kanban/；模型与凭证由 DSH 管理。AI 研判只发送压缩后的会话摘要（不发送文件内容与凭证）；若选择第三方模型，摘要会发送给你配置的模型服务商。",
+            h(
+              "p",
+              { className: "sub" },
+              "数据只存在本机 ~/.dsh/storages/super-kanban/；模型与凭证由 DSH 管理。AI 研判只发送压缩后的会话摘要（不发送文件内容与凭证）；若选择第三方模型，摘要会发送给你配置的模型服务商。",
+            ),
           ),
           h(
             "div",
@@ -3458,7 +3554,8 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                         role: "menuitem",
                         className: cx("sk-menu-item", item.danger && "is-danger", item.active && "is-active"),
                         onClick: () => {
-                          onClose();
+                          // keepOpen：二次确认类操作原地更新菜单，不关闭浮层。
+                          if (!item.keepOpen) onClose();
                           if (item.onClick) item.onClick();
                         },
                       },
@@ -3575,6 +3672,25 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const activeFilterCount = (filters.priority ? 1 : 0) + (filters.source ? 1 : 0) + (filters.tag ? 1 : 0) + (filters.showArchived ? 1 : 0);
       const clearFilters = () => setFilters({ workspace: "", priority: "", source: "", tag: "", query: "", showArchived: false });
       const tags = React.useMemo(() => allTags(tasks.filter((task) => !task.archived)), [tasks]);
+      // I5：筛选下拉的「有效值」范围（与渲染的选项一致）：工作区按「未排除」、标签按当前任务集合。
+      const workspaceFilterIds = React.useMemo(
+        () => new Set(workspaces.filter((workspace) => workspace.included !== false).map((workspace) => workspace.id)),
+        [workspaces],
+      );
+      // I5：持久化的筛选值可能因工作区被排除 / 工作区或标签消失而失效；数据到达后自愈回退，
+      // 避免出现「下拉显示全部工作区、看板却 0 条」且用户无法直接点回全量的状态。
+      React.useEffect(() => {
+        // 列表为空时无法判断「值不存在」还是「尚未加载」，只在拿到非空集合后校验，避免误清用户筛选。
+        if (!data) return;
+        const workspaceKnown = workspaces.length > 0;
+        const tagsKnown = tasks.length > 0;
+        setFilters((current) => {
+          const workspaceGone = Boolean(current.workspace) && workspaceKnown && !workspaceFilterIds.has(current.workspace);
+          const tagGone = Boolean(current.tag) && tagsKnown && !tags.includes(current.tag);
+          if (!workspaceGone && !tagGone) return current;
+          return { ...current, workspace: workspaceGone ? "" : current.workspace, tag: tagGone ? "" : current.tag };
+        });
+      }, [data, workspaceFilterIds, tags, workspaces.length, tasks.length]);
 
       const visible = React.useMemo(() => {
         const query = filters.query.trim().toLowerCase();
@@ -3616,6 +3732,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       }, [visible]);
 
       const drawerTask = drawerId ? tasks.find((task) => task.id === drawerId) : null;
+      // S9：任务被删除后 drawerId 残留在 state 里；清理掉，避免后续意外重开或状态陈旧。
+      React.useEffect(() => {
+        if (drawerId && !drawerTask) setDrawerId(null);
+      }, [drawerId, drawerTask]);
 
       const scanRunning = scan.state === "running";
       // 运行中 AI 进度：Host 已把 aiBudgetMode 解析成 scan.aiBudget；旧 Host 无该字段时只显示已用次数。
@@ -4019,7 +4139,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                           "select",
                           { className: "sk-select", "aria-label": "按标签筛选", style: { width: "100%" }, value: filters.tag, onChange: (event) => setFilters((value) => ({ ...value, tag: event.target.value })) },
                           h("option", { value: "" }, "全部标签"),
-                          tags.slice(0, 24).map((tag) => h("option", { key: tag, value: tag }, tag)),
+                          // I5：已保存标签若是有效值但不在前 24 个里，也要出现在选项里，避免「显示全部却已过滤」。
+                          (filters.tag && tags.includes(filters.tag) && !tags.slice(0, 24).includes(filters.tag)
+                            ? [filters.tag, ...tags.slice(0, 24)]
+                            : tags.slice(0, 24)
+                          ).map((tag) => h("option", { key: tag, value: tag }, tag)),
                         ),
                       )
                     : null,
@@ -4116,6 +4240,48 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           toasts.map((toast) => h("div", { key: toast.id, className: cx("sk-toast", toast.tone === "error" && "error") }, toast.text)),
         ),
       );
+    }
+
+    /* ============================= error boundary ========================= */
+
+    /**
+     * 极简错误边界：插件面板任一 render 抛错时只坏这一块，不白屏整个 DSH。
+     * fallback 复用页面 token / 空态样式；「重新加载」走整页刷新（无额外依赖）。
+     */
+    class BoardErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { error: null };
+      }
+
+      static getDerivedStateFromError(error) {
+        return { error };
+      }
+
+      render() {
+        if (!this.state.error) return this.props.children;
+        const message = String((this.state.error && this.state.error.message) || this.state.error || "未知错误");
+        return h(
+          "div",
+          { className: "sk-page", role: "alert", "data-super-kanban": "error" },
+          h(
+            "div",
+            { className: "sk-empty-v3", style: { marginTop: "18vh" } },
+            h("p", { className: "sk-error-title" }, h(Icon, { name: "alert", size: 14 }), "看板加载出错"),
+            h("p", { className: "sk-error-detail" }, message),
+            h(
+              "div",
+              { className: "sk-inline-actions" },
+              h(
+                "button",
+                { type: "button", className: "sk-btn", onClick: () => window.location.reload() },
+                h(Icon, { name: "refresh", size: 12 }),
+                "重新加载",
+              ),
+            ),
+          ),
+        );
+      }
     }
 
     /* ================================ apply =============================== */
@@ -4291,8 +4457,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       });
       const prefs = readPrefs();
 
-      const PageKanbanBody = (slotProps) => h(BoardPage, { ...(slotProps || {}), ...baseProps, surface: "page" });
-      const SideKanbanBody = (slotProps) => h(BoardPage, { ...(slotProps || {}), ...baseProps, surface: "side" });
+      // S3：任何 render 异常都被错误边界接住，只坏插件面板。
+      const PageKanbanBody = (slotProps) =>
+        h(BoardErrorBoundary, null, h(BoardPage, { ...(slotProps || {}), ...baseProps, surface: "page" }));
+      const SideKanbanBody = (slotProps) =>
+        h(BoardErrorBoundary, null, h(BoardPage, { ...(slotProps || {}), ...baseProps, surface: "side" }));
 
       function KanbanSidebarIcon({ size }) {
         return h(Icon, { name: "board", size: size || 18 });

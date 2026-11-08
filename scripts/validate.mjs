@@ -93,6 +93,7 @@ export const REQUIRED_SERVER_FILES = [
   "server/sessions.mjs",
   "server/analyzer-rules.mjs",
   "server/analyzer-llm.mjs",
+  "server/native-llm.mjs",
   "server/store.mjs",
   "server/auth.mjs",
   "server/http.mjs",
@@ -555,7 +556,18 @@ function checkCordisPatch(root, pkg, problem, note, failures) {
   if (!/^\s+name:\s*["']?dsh-super-kanban["']?\s*$/mu.test(source)) {
     problem(`${patchPath}: must reference bundle name "dsh-super-kanban"`);
   }
-  if (!/^\s+config:\s*$/mu.test(source)) problem(`${patchPath}: missing "config:" block for the plugin host`);
+  // `config:` is optional by design: the plugin reads its settings from the board
+  // state, not from Cordis config, so a patch-level config would be dead config.
+  // When present it must still be a YAML mapping (not a scalar/list) so a future
+  // deliberate config block cannot silently degrade.
+  const configMatch = /^\s*config:\s*$/mu.exec(source);
+  if (configMatch) {
+    const configLine = source.slice(0, configMatch.index).split("\n").length;
+    const nextLine = source.split("\n").slice(configLine).find((line) => line.trim() !== "");
+    if (nextLine === undefined || !/^\s+\S/.test(nextLine) || /^\s+-\s/.test(nextLine)) {
+      problem(`${patchPath}: "config:" must be a YAML mapping when present`);
+    }
+  }
   if (failures.length === before) note(`cordis patch structure (${patchPath})`);
 }
 

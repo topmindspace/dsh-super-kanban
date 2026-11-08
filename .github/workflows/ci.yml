@@ -96,6 +96,7 @@ jobs:
             "server/sessions.mjs",
             "server/analyzer-rules.mjs",
             "server/analyzer-llm.mjs",
+            "server/native-llm.mjs",
             "server/store.mjs",
             "server/auth.mjs",
             "server/http.mjs",

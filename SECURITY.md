@@ -41,6 +41,8 @@ does not collect telemetry.
   `$DSH_HOME/storages/super-kanban/` using atomic file writes.
 - DSH session logs are read **read-only** from `$DSH_HOME/sessions/` and the
   project cache under `$DSH_HOME/storages/`.
+- Local host logs may contain session ids and error messages for
+  troubleshooting, but never credentials, session digests or board task titles.
 - Session and board data never leave the machine, except for the compact
   session digest sent through the DSH-configured model provider when the
   optional LLM analyzer is enabled (see below).

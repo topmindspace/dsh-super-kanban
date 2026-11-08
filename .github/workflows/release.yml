@@ -1,9 +1,9 @@
 name: Release
 
-# Push a version tag (for example `v0.4.1`) to publish the exact package version
+# Push a version tag (for example `vX.Y.Z`) to publish the exact package version
 # to npm with provenance and create the matching GitHub Release:
 #
-#   git tag -a v0.4.1 -m "v0.4.1"
+#   git tag -a vX.Y.Z -m "vX.Y.Z"
 #   git push origin main --tags
 #
 # Required repository secret: NPM_TOKEN (npm automation token with publish

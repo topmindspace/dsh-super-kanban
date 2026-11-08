@@ -172,6 +172,35 @@ async function runScan(service) {
   }
 }
 
+/** Poll `predicate` until true (bounded); used to wait for a held provider call. */
+async function waitFor(predicate, { timeoutMs = 2000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("condition not met in time");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/** Poll the board until the current scan finishes (for tests that start one). */
+async function waitForScan(service) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const state = await getState(service);
+    if (state.scan.state !== "running") return state;
+    if (Date.now() > deadline) throw new Error("scan did not finish in time");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/** A provider call that stays open until `resolve()` — proves the AI mutex. */
+function deferredScript(inner) {
+  let open;
+  const gate = new Promise((resolve) => {
+    open = resolve;
+  });
+  return { script: () => gate.then(() => inner), resolve: () => open() };
+}
+
 /* ------------------------------------------------------------------ */
 /* Fake DSH host (ctx.llm + ctx.agentDefaultModel)                     */
 /* ------------------------------------------------------------------ */
@@ -247,7 +276,10 @@ function makeHost({
       streams.push(options);
       const script = queue.shift() || errorScript("EMPTY_SCRIPT");
       return (async function* replay() {
-        for (const chunk of script) yield chunk;
+        // A script may be a factory returning a promise: mutex tests use it to
+        // hold one provider call open while they probe concurrent commands.
+        const chunks = typeof script === "function" ? await script() : script;
+        for (const chunk of chunks) yield chunk;
       })();
     },
     listProviders() {
@@ -674,15 +706,32 @@ test("budget settings: auto/fixed roundtrip, clamp, invalid mode and old-client 
   const invalidMode = await command(service, "settings.update", { patch: { aiBudgetMode: "bogus" } });
   assert.equal(invalidMode.json.data.aiBudgetMode, "fixed", "an invalid mode leaves the previous value untouched");
 
-  // Old clients only send a number: that update is inferred as fixed.
+  // I1: a legacy full-form save (unrelated settings + a numeric budget value)
+  // is not a budget-only action, so it must NOT silently flip auto → fixed.
   await command(service, "settings.update", { patch: { aiBudgetMode: "auto" } });
+  const legacyForm = await command(service, "settings.update", {
+    patch: { autoScan: false, maxAiCallsPerScan: 30, dailyAiCallLimit: 120 },
+  });
+  assert.equal(legacyForm.json.data.aiBudgetMode, "auto", "legacy full-form save keeps the current mode");
+  assert.equal(legacyForm.json.data.maxAiCallsPerScan, 30);
+  assert.equal(legacyForm.json.data.dailyAiCallLimit, 120);
+
+  // A budget-only patch from an old client is still inferred as fixed.
   const legacy = await command(service, "settings.update", { patch: { maxAiCallsPerScan: 20 } });
   assert.equal(legacy.json.data.aiBudgetMode, "fixed");
   assert.equal(legacy.json.data.maxAiCallsPerScan, 20);
 
+  // A new client that sends aiBudgetMode explicitly keeps it (even alongside a
+  // numeric value), and an invalid mode leaves the previous value untouched.
+  const explicitAuto = await command(service, "settings.update", {
+    patch: { aiBudgetMode: "auto", maxAiCallsPerScan: 40 },
+  });
+  assert.equal(explicitAuto.json.data.aiBudgetMode, "auto");
+
   // Unrelated updates never flip the mode.
+  await command(service, "settings.update", { patch: { aiBudgetMode: "fixed" } });
   const unrelated = await command(service, "settings.update", { patch: { autoScan: false } });
-  assert.equal(unrelated.json.data.aiBudgetMode, "fixed");
+  assert.equal(unrelated.json.data.aiBudgetMode, "fixed", "unrelated save keeps the current mode");
 
   const backToAuto = await command(service, "settings.update", { patch: { aiBudgetMode: "auto" } });
   assert.equal(backToAuto.json.data.aiBudgetMode, "auto");
@@ -843,4 +892,174 @@ test("registered provider with an empty catalog still gets one attempt, then deg
   assert.match(state.scan.message, /1 个会话研判失败，5 分钟后重试/);
   assert.match(state.scan.message, /剩余 1 个会话下次扫描继续/);
   assert.equal(state.tasks[0].ai.engine, "rules");
+});
+
+/* ------------------------------------------------------------------ */
+/* B1: explicit AI commands and scans share ONE analyzer mutex         */
+/* ------------------------------------------------------------------ */
+
+test("task.analyze holds the AI mutex: scans and a second analyze get 409", async (t) => {
+  const gate = deferredScript(okScript(TASK_PAYLOAD("挂起研判")));
+  const host = makeHost({ scripts: [gate.script] });
+  const { service } = await setup(t, { sessionIds: ["sess-01"], host });
+  const created = await command(service, "task.create", { title: "Mutex card", sessionId: "sess-01" });
+  assert.equal(created.status, 200);
+
+  const pendingAnalyze = command(service, "task.analyze", { id: created.json.data.id });
+  // The analyze command acquired the mutex and is now waiting on the provider.
+  await waitFor(() => host.streams.length === 1);
+
+  const blockedScan = await command(service, "scan.start", { mode: "full" });
+  assert.equal(blockedScan.status, 409, "a scan must not start while an explicit AI command runs");
+  assert.equal(blockedScan.json.error, "busy");
+  assert.match(blockedScan.json.message, /AI 任务进行中/);
+
+  const blockedAnalyze = await command(service, "task.analyze", { id: created.json.data.id });
+  assert.equal(blockedAnalyze.status, 409, "two concurrent analyzes must not share the analyzer budget");
+  assert.match(blockedAnalyze.json.message, /其他 AI 任务进行中/);
+
+  const blockedPolish = await command(service, "task.polishPrompt", { prompt: "继续修复登录" });
+  assert.equal(blockedPolish.status, 409, "polish must be rejected while an analyze runs");
+
+  gate.resolve();
+  const analyzed = await pendingAnalyze;
+  assert.equal(analyzed.status, 200, JSON.stringify(analyzed.json));
+  assert.equal(analyzed.json.data.engine, "llm");
+
+  // The mutex is released on the normal path: the scan can start and finish.
+  const started = await command(service, "scan.start", { mode: "full" });
+  assert.equal(started.status, 200, JSON.stringify(started.json));
+  const scanned = await waitForScan(service);
+  assert.equal(scanned.scan.state, "done");
+  // Accounting stayed coherent: exactly the one successful analyze was recorded.
+  const state = await getState(service);
+  assert.equal(state.usage.calls, 1);
+  assert.ok(state.usage.calls <= state.settings.dailyAiCallLimit);
+});
+
+test("task.polishPrompt holds the same AI mutex as task.analyze", async (t) => {
+  const gate = deferredScript([
+    { type: "text-delta", index: 0, text: "润色后的提示词" },
+    { type: "finish", reason: { kind: "stop" } },
+  ]);
+  const host = makeHost({ scripts: [gate.script, okScript(TASK_PAYLOAD("锁释放后的研判"))] });
+  const { service } = await setup(t, { sessionIds: ["sess-01"], host });
+  const created = await command(service, "task.create", { title: "Polish mutex", sessionId: "sess-01" });
+
+  const pendingPolish = command(service, "task.polishPrompt", { prompt: "继续修复登录" });
+  await waitFor(() => host.streams.length === 1);
+  const blockedAnalyze = await command(service, "task.analyze", { id: created.json.data.id });
+  assert.equal(blockedAnalyze.status, 409);
+  assert.match(blockedAnalyze.json.message, /其他 AI 任务进行中/);
+
+  gate.resolve();
+  const polished = await pendingPolish;
+  assert.equal(polished.status, 200);
+  assert.equal(polished.json.data.polished, true);
+
+  // Lock released: the next analyze runs normally.
+  const analyzed = await command(service, "task.analyze", { id: created.json.data.id });
+  assert.equal(analyzed.status, 200, JSON.stringify(analyzed.json));
+  assert.equal(analyzed.json.data.engine, "llm");
+});
+
+test("the AI mutex is released when the provider call fails", async (t) => {
+  const host = makeHost({ scripts: [errorScript("AUTH")] });
+  const { service } = await setup(t, { sessionIds: ["sess-01"], host });
+  const created = await command(service, "task.create", { title: "Fail releases", sessionId: "sess-01" });
+  const analyzed = await command(service, "task.analyze", { id: created.json.data.id });
+  assert.equal(analyzed.status, 200, JSON.stringify(analyzed.json));
+  assert.equal(analyzed.json.data.engine, "rules");
+  // The failed attempt released the lock: a scan can start immediately.
+  const started = await command(service, "scan.start", { mode: "full" });
+  assert.equal(started.status, 200, JSON.stringify(started.json));
+  const scanned = await waitForScan(service);
+  assert.equal(scanned.scan.state, "done");
+});
+
+test("the AI mutex is released when the analyze command throws", async (t) => {
+  const host = makeHost();
+  const { home, service } = await setup(t, { sessionIds: ["sess-01"], host });
+  const created = await command(service, "task.create", { title: "Throw releases", sessionId: "sess-01" });
+  // Corrupt the session log so the explicit re-judge throws after taking the lock.
+  fs.writeFileSync(path.join(home, "sessions", "escaped-demo", "sess-01", SESSION_FILE_NAME), "not a zstd frame");
+  const analyzed = await command(service, "task.analyze", { id: created.json.data.id });
+  assert.equal(analyzed.status, 400);
+  assert.match(analyzed.json.message, /session-parse-failed/);
+  // A thrown command must not leave the mutex stuck.
+  const started = await command(service, "scan.start", { mode: "full" });
+  assert.equal(started.status, 200, JSON.stringify(started.json));
+  const scanned = await waitForScan(service);
+  assert.equal(scanned.scan.state, "done");
+});
+
+/* ------------------------------------------------------------------ */
+/* B2: task.analyze re-judges only the primary source session          */
+/* ------------------------------------------------------------------ */
+
+test("task.analyze re-judges only the primary session of a multi-session card", async (t) => {
+  const host = makeHost({
+    scripts: [okScript(TASK_PAYLOAD("主会话研判结果")), okScript(TASK_PAYLOAD("第二会话研判结果"))],
+  });
+  const { service } = await setup(t, { sessionIds: ["sess-main", "sess-other"], host });
+  const created = await command(service, "task.create", { title: "Multi session", sessionId: "sess-main" });
+  const relinked = await command(service, "task.relink", {
+    id: created.json.data.id,
+    sessionIds: ["sess-main", "sess-other"],
+  });
+  assert.equal(relinked.status, 200);
+  assert.equal(relinked.json.data.sessions.length, 2);
+  assert.equal(relinked.json.data.primarySessionId, "sess-main");
+
+  const analyzed = await command(service, "task.analyze", { id: created.json.data.id });
+  assert.equal(analyzed.status, 200, JSON.stringify(analyzed.json));
+  const data = analyzed.json.data;
+  assert.equal(data.aiCalls, 1, "one click spends at most one budget unit");
+  assert.equal(data.sessions, 1, "only the primary session is parsed/re-judged");
+  assert.equal(host.streams.length, 1, "the provider is called exactly once");
+  assert.equal(host.queue.length, 1, "the second session's script is never consumed");
+  assert.equal(data.task.title, "主会话研判结果", "the final card reflects the primary session only");
+  assert.equal(data.task.ai.engine, "llm");
+  assert.equal(data.task.ai.model, "deepseek-flash");
+  assert.equal(data.task.ai.provider, "deepseek-account");
+  assert.equal(data.task.sessions.length, 2, "the card keeps both linked sessions");
+  const state = await getState(service);
+  assert.equal(state.usage.calls, 1);
+});
+
+test("task.analyze falls back to the first linked session when primarySessionId is missing", async (t) => {
+  const host = makeHost({ scripts: [okScript(TASK_PAYLOAD("回退研判结果"))] });
+  const legacyTask = {
+    id: "t_legacy",
+    title: "Legacy linked card",
+    status: "in_progress",
+    progress: 40,
+    priority: "P2",
+    origin: "manual",
+    primarySessionId: null,
+    sessions: [{ id: "sess-01", title: "会话 0", seqEnd: 10, evidenceCount: 0 }],
+    tags: [],
+    issues: [],
+    nextSteps: [],
+    milestones: [],
+    evidence: [],
+    keyFacts: [],
+    subtasks: [],
+    artifacts: [],
+    lockedFields: [],
+    history: [],
+    archived: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const { service } = await setup(t, {
+    sessionIds: ["sess-01", "sess-02"],
+    state: { tasks: [legacyTask] },
+    host,
+  });
+  const analyzed = await command(service, "task.analyze", { id: "t_legacy" });
+  assert.equal(analyzed.status, 200, JSON.stringify(analyzed.json));
+  assert.equal(analyzed.json.data.sessions, 1);
+  assert.equal(host.streams.length, 1);
+  assert.equal(analyzed.json.data.task.title, "回退研判结果");
 });

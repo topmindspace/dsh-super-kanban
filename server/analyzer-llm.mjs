@@ -149,11 +149,22 @@ export function buildUserText(digest, existingTasks) {
   return `会话摘要：\n${digest}\n\n已有相关任务：\n${taskLines}\n\n输出 JSON。`;
 }
 
-/** Map DSH TokenUsage onto the three fields the board stores. */
+/**
+ * Map DSH TokenUsage onto the three fields the board stores.
+ *
+ * `totalTokens` is optional in the contract: adapters that omit it must not be
+ * recorded as input+output only — DSH's TokenUsage also reports cache reads and
+ * cache writes (disjoint from `inputTokens`), and dropping them under-counts the
+ * board's token usage/cost display.
+ */
 function normalizeUsage(usage) {
   const input = Number(usage?.inputTokens) || 0;
   const output = Number(usage?.outputTokens) || 0;
-  const total = Number.isFinite(Number(usage?.totalTokens)) ? Number(usage.totalTokens) : input + output;
+  const cacheRead = Number(usage?.cacheReadTokens) || 0;
+  const cacheWrite = Number(usage?.cacheWriteTokens) || 0;
+  const total = Number.isFinite(Number(usage?.totalTokens))
+    ? Number(usage.totalTokens)
+    : input + output + cacheRead + cacheWrite;
   return {
     promptTokens: input,
     completionTokens: output,

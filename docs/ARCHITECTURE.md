@@ -49,7 +49,7 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `server/auth.mjs` | owner 鉴权决策表：归一化 `connection.admit()` 结果，异常/畸形输入一律 fail-closed 403 |
 | `server/http.mjs` | HTTP 公共设施：JSON 响应、受控请求体读取、错误分类、id / 载荷校验 |
 | `server/titles.mjs` | 标题相似度：为跨扫描合并（merge gate）提供确定性的纯字符串打分 |
-| `cordis.patch.yml` | Cordis bundle patch：把 host 插件插入 profile |
+| `cordis.patch.yml` | Cordis bundle patch：只把 host 插件 insert 进 profile，**不含 `config:` 块**；看板设置来自 `state.json`（设置页） |
 | `install.sh` / `uninstall.sh` | 把仓库链接进 DSH profile / 回滚 |
 | `scripts/` | 校验、文档检查、版本一致性、隐私扫描、市场索引生成、发布辅助 |
 | `tests/` | `node --test` 套件（store / analyzer / sessions / service / http / auth / titles / host-entry / package / market-index / privacy） |
@@ -59,7 +59,7 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `dev/` | 维护者本地开发/截图/验收工具（**已在 `.gitignore` 中忽略，不随仓库分发**；见 `dev/README.md`） |
 | `internal/docs-internal/` | 历史设计/QA 归档（**同样被 git 忽略**；见该目录 README） |
 
-> npm 发布包只包含 `package.json` 的 `files` 列表（`index.mjs`、`client.js`、`cordis.patch.yml`、`server/`、`icon.svg`、`CHANGELOG.md`）；`docs/`、`dev/`、`internal/`、`.github/` 不进入 tarball。
+> npm 发布包 = `package.json` 的 `files` 列表（`index.mjs`、`client.js`、`cordis.patch.yml`、`server/`、`icon.svg`、`CHANGELOG.md`）+ npm 自动包含的 `README.md`、`README.en.md`、`LICENSE`、`package.json`；当前共 18 个文件。`docs/`、`dev/`、`internal/`、`.github/` 不进入 tarball。
 
 ## Host 半边
 
@@ -100,7 +100,7 @@ LLM 门控（可选）                 meaningful-change 门控 + 单次/每日�
 合并进看板                     会话锚点稳定 ID；用户锁定字段不覆盖；写历史
    │
    ▼
-store.saveState()              原子写（tmp + rename）；扫描进度经 SSE / 轮询可见
+store.saveState()              原子写（tmp + rename）；扫描进度经轮询可见（SSE 端点供第三方使用）
 ```
 
 关键行为：
@@ -120,7 +120,8 @@ store.saveState()              原子写（tmp + rename）；扫描进度经 SSE
   `lockedFields` 含 `subtasks` 的未完成清单时，状态降级为 `in_progress` 并写历史说明；锁定的 `status` 优先；
   `done` 时生成类子任务自动勾选，手动子任务不动；用户取消勾选会让卡回到 `in_progress`。
 - **隔离失败**：单个会话解析失败只记录日志并跳过，不影响其他会话和看板。
-- **并发保护**：扫描进行中再次触发返回 busy；支持取消；扫描结论写入 `scan.message` 供界面常驻展示。
+- **并发保护**：扫描与显式 AI 命令（`task.analyze` / `task.polishPrompt`）共享同一个 analyzer，三者互斥（并发返回 409 busy，
+  自动扫描顺延到下一 tick）；扫描进行中再次触发返回 busy；支持取消；扫描结论写入 `scan.message` 供界面常驻展示。
 
 ### 两个分析引擎
 
@@ -156,7 +157,7 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 | `POST /command` | 任务 / 设置 / 扫描等操作（`task.*`、`settings.update`、`scan.*` 等） |
 | `GET /session/:id` | 单会话事件时间线（证据跳转用） |
 | `GET /export` | 导出完整看板 JSON |
-| `GET /events` | 可选 SSE：扫描进度与任务变化 |
+| `GET /events` | 可选 SSE：扫描进度与任务变化（供第三方集成；浏览器半当前不订阅） |
 | `GET /ping` | 存活探测（开发脚本用，不含敏感数据） |
 
 ## 浏览器半边（`client.js`）
@@ -175,7 +176,7 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 
 ### 状态与数据流
 
-- 首屏拉取 `/state`，之后每 4 秒轮询（页面隐藏时暂停）；扫描中加快刷新；SSE 可用时优先使用。
+- 首屏拉取 `/state`，之后固定每 4 秒轮询（扫描中约 1.2 秒，页面隐藏时停止）；不使用 `EventSource`，`GET /events` 供第三方集成 / 后续使用。
 - 所有写操作走 `POST /command`：界面先乐观更新，失败回滚并 toast。
 - 设置弹窗的「AI 研判模型」在打开时读取 `GET /ai/models`（客户端 30s 内存缓存 + 超时保护），原生 `<select>`
   按 provider 分组、首项「跟随 DSH 默认」；只读目录，不保存凭证、不提供 API Key / baseURL 表单。
@@ -197,9 +198,9 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 
 - 全页看板页头常驻：搜索、扫描、设置齿轮、在右侧栏打开、主按钮「新建」；「⋯」菜单只保留「导出 JSON」。
 - 统计行常驻：状态计数 + 归档数 + 上一次扫描结论（运行中 / 失败+重试 / 完成）；扫描按钮在 AI 关闭时标题为「扫描（仅规则）」。
-- 设置弹窗顺序：AI 开关 → **AI 研判模型** → AI 预算（自动 / 固定单次上限 + 每日上限）→ 今日用量 → 自动扫描 /
-  扫描间隔 / 初始范围 → 显示与入口 → 排除工作区。模型 block 全宽、原生 select + 刷新按钮，无彩色盒子；
-  选中第三方提供方时用安静文字提示「压缩摘要会发送给该模型服务商」。
+- 设置弹窗顺序（与实现一致）：AI 开关 → **AI 研判模型** → 自动扫描 → 扫描间隔 → 初始扫描范围 →
+  AI 预算（单次上限 / 每日上限）→ 今日用量 → 显示与入口 → 排除工作区。模型 block 全宽、原生 select + 刷新按钮，
+  无彩色盒子；选中第三方提供方时用安静文字提示「压缩摘要会发送给该模型服务商」。
 - 右侧栏看板页头常驻：扫描、设置、在全页面板打开、新建、「⋯」（仅导出 JSON）；任何宽度都保留工作区筛选。
 - 卡片：完成卡不绘制进度线、归档卡带「已归档」标记；抽屉含 AI 研判块（provider / model）与「⋯」→「重新研判」。
 - 页头按钮的排列与图标属于浏览器半的**实现细节**，不在 Host/浏览器契约内；契约只约束注册的 slot / tab / 数据接口（见 [CONTRACT.md](CONTRACT.md)）。
@@ -264,7 +265,7 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 - **profile 依赖规格决定升级行为**：
   - 插件页/npm 安装写入**精确版本**（`pnpm add --save-exact`）；
   - 源码/本地目录安装写入 `link:`；
-  - 手工写成范围时，`^0.4.0` 只覆盖 0.4.x，`^0.3.0` 永远不会到 0.4.x（跨 minor 需精确版本）。
+  - 手工写成范围时，`^0.5.0` 只覆盖 0.5.x，`^0.4.0` 永远不会到 0.5.x（跨 minor 需精确版本）。
 - **升级动作由 DSH 完成**：第三方插件没有自动升级，也没有官方「更新」按钮；升级 = 卸载旧版 → 安装目标版本，然后刷新窗口（客户端 bundle 有缓存，必要时完全退出 DSH）。
 - 用户侧步骤、版本验证与排障见 [INSTALL.md](INSTALL.md) 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)；插件数据（`state.json`）与插件版本解耦（存储格式版本见 `store.mjs`）。
 

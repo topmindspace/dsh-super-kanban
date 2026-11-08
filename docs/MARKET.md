@@ -13,7 +13,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 | **Git 仓库** | 输入 Git 地址（提交被 pin 到 commit），要求仓库根目录是插件包 | 未发布 npm / 想跟进 main |
 | **本地目录** | 输入本机插件包目录，适合开发与内部安装 | 开发者 |
 
-> 官方随 DSH 安装附带的插件（`@deepseek-ai/*`）属于内置 on-demand 目录，第三方插件目前**不能直接提交进该目录**；第三方分发实际走上面的索引 / npm / Git 三条路。
+> 官方随 DSH 安装附带的插件（`@deepseek-ai/*`）属于内置 on-demand 目录，第三方插件目前**不能直接提交进该目录**；第三方分发实际走上面的索引 / npm / Git / 本地目录四条路径。
 
 ## 2. 我们提供的分发物
 
@@ -82,7 +82,7 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 
 - 插件页安装 npm/市场来源会用 `pnpm add --save-exact`，把**精确版本**写入 profile 依赖；所以升级需要重新安装目标版本，而不是只点一下刷新。
 - 若 profile 里被人为改成**范围依赖**：`^0.5.0` 可自然解析到 0.5.x 补丁版（0.5.1…），但 `^0.4.0` 永远不会解析到 0.5.x —— 跨 minor 升级必须安装**精确版本**（如 `dsh-super-kanban@0.5.0`）。
-- 市场索引由维护者在每次 Release 后运行 `npm run market:index` 并提交 `docs/index.json`；索引未刷新时，详情页看不到新版本。
+- 市场索引由 Release workflow 在发布成功后自动重新生成并提交 `docs/index.json`（维护者也可手动 `npm run market:index`）；索引未刷新时，详情页看不到新版本。
 
 更完整的用户升级/验证/回滚步骤见 [INSTALL.md](INSTALL.md#3-更新插件升级)。
 
@@ -142,7 +142,8 @@ npm version 0.5.0 --no-git-tag-version   # 只改 package.json 的版本号（�
 #   - 提交这一步，使工作区保持干净
 git add package.json CHANGELOG.md && git commit -m "chore: release v0.5.0"
 
-# 1. 更新市场索引并提交（索引的 git source 会 pin 到上一步的 commit）
+# 1. 更新市场索引并提交（可选：通常由 release workflow 在发布成功后自动重新生成并回写 main；
+#    若希望 tag 前的索引就指向 release commit，可在这里手动执行）
 npm run market:index
 git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for v0.5.0"
 
@@ -153,8 +154,9 @@ npm run check
 #  A) 推荐：GitHub Actions 自动发布 npm
 #     - 先在 npmjs.com 创建 Automation token，存为仓库 Secret：NPM_TOKEN
 #     - push tag 触发 .github/workflows/release.yml
-#     - verify job 会再次执行 npm run check（含 check:docs / check:version），
-#       tag 与 package.json / CHANGELOG / 索引不一致会直接失败
+#     - verify job 会依次执行各单项校验脚本（test / validate / check:privacy / check:docs / check:version），
+#       校验 tag 与 package.json / CHANGELOG 版本一致；索引的版本号由 check:version 校验，
+#       索引里的 commit pin 由发布后的 market-index job 自动修正
 git tag v0.5.0 && git push origin main --tags
 
 #  B) 本地发布
@@ -164,7 +166,7 @@ npm publish --access public
 
 > 也可以直接运行 `npm run release`（`scripts/release.mjs`）：它要求工作区干净（版本 commit 已完成），
 > 自动重新生成市场索引并依次运行全部检查，然后打印需要执行的指数提交与 tag 命令。
-> `--dry-run` 只做检查与索引 schema 校验，不写文件。
+> `--dry-run` 只做检查与索引 schema 校验（不比对已提交索引的 commit pin），不写文件。
 
 ### npm staged release 批准（首次发布/开启 staged publishing 时）
 
@@ -200,5 +202,5 @@ npx npm@11 stage approve <stage-id>    # 输入 OTP 完成审批，版本即刻�
 ## 7. 安全与信任
 
 - 市场索引内容来自第三方，DSH 会在安装前提示信任风险；用户应自行确认来源（本仓库）。
-- 插件只读本机 DSH 会话；AI 研判经 **DSH 原生模型服务**发送给你在 DSH 中配置的模型提供方（官方账号 / API Key / 第三方 provider），凭证由 DSH 管理、插件不读取不保存；看板自身无遥测，不向其它服务器发送数据。选择第三方模型时压缩会话摘要会发送给该服务商（设置页与 README / SECURITY 已披露）。
+- 插件只读本机 DSH 会话；AI 研判请求经 **DSH 原生模型服务**发出，目标是你在 DSH 中配置的模型服务商（官方账号 / API Key / 第三方 provider），凭证由 DSH 管理、插件不读取不保存。看板自身无遥测；除发往该模型服务商的 AI 请求外，不向其它服务器发送数据。选择第三方模型时压缩会话摘要会发送给该服务商，数据内容与边界见 [SECURITY.md](../SECURITY.md)。
 - 发布物不包含任何凭证；仓库 CI 会运行隐私扫描（`scripts/check-privacy.mjs`）阻止个人路径/密钥进入 Git。
