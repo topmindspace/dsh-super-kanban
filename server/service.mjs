@@ -22,9 +22,12 @@ import { homedir } from "node:os";
 import { createSessionSource } from "./sessions.mjs";
 import { analyzeSessionRules, normalizeAnalysis, titleSimilarity } from "./analyzer-rules.mjs";
 import { createLlmAnalyzer } from "./analyzer-llm.mjs";
+import { llmOf } from "./native-llm.mjs";
 import { badRequest, classifyError, clipText, conflict, decodeId, isStringArray, json, notFound, readBody } from "./http.mjs";
 import { titleMergeScore } from "./titles.mjs";
 import {
+  AI_CALLS_PER_SCAN_MAX,
+  AI_CALLS_PER_SCAN_MIN,
   ARTIFACT_LIMIT,
   createStore,
   DEFAULT_SETTINGS,
@@ -38,6 +41,7 @@ import {
   newManualTaskId,
   NEXTSTEP_LIMIT,
   NEXTSTEP_TEXT_LIMIT,
+  normalizeAiRoutePair,
   normalizeSettingsPatch,
   positiveSeqOrNull,
   pushHistory,
@@ -56,6 +60,11 @@ const DAY = 86_400_000;
 const MAX_AI_CONCURRENCY = 2;
 const MAX_SESSIONS_PER_TASK = 12;
 const MIN_AI_INTERVAL_MS = 180_000; // v2: same-session re-analysis cooldown
+/** v3 AI-phase guards (code constants, not user settings). */
+const AI_SCAN_MAX_MS = 600_000; // 10 min wall clock for the whole AI stage
+const AI_ERROR_COOLDOWN_MS = 300_000; // 5 min cooldown for sessions whose analysis failed
+const AI_CATALOG_TTL_MS = 30_000; // GET /ai/models cache
+const AI_CATALOG_TIMEOUT_MS = 12_000; // GET /ai/models and fallback-catalog timeout
 const FIELD_NAMES = ["title", "goal", "status", "progress", "priority", "tags", "issues", "nextSteps", "milestones"];
 const LOCKABLE_FIELDS = [...FIELD_NAMES, "keyFacts", "subtasks", "artifacts", "goalObject"];
 const STATUSES = ["backlog", "in_progress", "blocked", "done"];
@@ -69,12 +78,21 @@ const SSE_MAX_CLIENTS = 32;
 /* Service                                                             */
 /* ------------------------------------------------------------------ */
 
-export function createKanbanService({ ctx } = {}) {
+export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {}) {
   const logger = ctx?.logger;
   const dshHome = process.env.DSH_HOME || path.join(homedir(), ".dsh");
   const source = createSessionSource({ dshHome, logger });
-  const analyzer = createLlmAnalyzer({ dshHome, logger });
+  // The analyzer resolves the DSH native llm service lazily from `ctx`; a host
+  // composition without one degrades AI analysis to the rules engine.
+  const analyzer = createLlmAnalyzer({ ctx, logger });
   const store = createStore({ dshHome, logger });
+  /**
+   * Test seams only (production uses the module constants): the AI-phase wall
+   * clock and the model-catalog timeout.
+   */
+  const aiScanMaxMsValue = Number.isFinite(aiScanMaxMs) && aiScanMaxMs >= 0 ? aiScanMaxMs : AI_SCAN_MAX_MS;
+  const aiCatalogTimeoutMsValue =
+    Number.isFinite(aiCatalogTimeoutMs) && aiCatalogTimeoutMs > 0 ? aiCatalogTimeoutMs : AI_CATALOG_TIMEOUT_MS;
 
   const loaded = store.load();
   let state = loaded.state;
@@ -112,6 +130,345 @@ export function createKanbanService({ ctx } = {}) {
       logger?.warn?.(message);
     } catch {
       /* ignore logger failures */
+    }
+  }
+
+  /* --------------------- AI: route + catalog helpers ------------------ */
+
+  /** Short single-line error text safe for logs (never digests/tokens/keys). */
+  function shortError(error) {
+    const text = String(error?.message || error || "unknown")
+      .replace(/\s+/g, " ")
+      .trim();
+    return text.length > 160 ? `${text.slice(0, 159)}…` : text;
+  }
+
+  /** Reject with `code:"timeout"` after `timeoutMs`; the timer is always cleared. */
+  async function withTimeout(promise, timeoutMs, label = "timeout") {
+    let timer = null;
+    try {
+      return await Promise.race([
+        Promise.resolve(promise),
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(Object.assign(new Error(label), { code: "timeout" })), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function llmService() {
+    return llmOf(ctx);
+  }
+
+  /** Registered providers as `{id,name}` records; external host code is never trusted. */
+  function providerRoutes(llm) {
+    try {
+      const routes = llm.listProviders();
+      if (!Array.isArray(routes)) return [];
+      return routes
+        .filter((route) => route && typeof route.id === "string" && route.id)
+        .map((route) => ({ id: route.id, name: typeof route.name === "string" && route.name ? route.name : route.id }));
+    } catch (error) {
+      logWarn(`[super-kanban] listProviders failed: ${shortError(error)}`);
+      return [];
+    }
+  }
+
+  /** The DSH default model selection (live reference), or null when unreadable. */
+  function defaultModelSelection() {
+    try {
+      if (typeof ctx?.get !== "function") return null;
+      const selection = ctx.get("agentDefaultModel")?.currentSelection?.();
+      if (
+        selection &&
+        typeof selection.provider === "string" &&
+        selection.provider &&
+        typeof selection.model === "string" &&
+        selection.model
+      ) {
+        return { provider: selection.provider, model: selection.model };
+      }
+    } catch {
+      /* optional service: absent in minimal hosts, may also throw */
+    }
+    return null;
+  }
+
+  /**
+   * Sync route check (no catalog I/O — the scan hot path stays fast):
+   * explicit provider+model wins, otherwise the live DSH default is followed.
+   * Provider availability is a registry check only; a model id missing from the
+   * catalog is not a hard error because the core route may still accept it.
+   */
+  function syncAiSelection() {
+    const llm = llmService();
+    if (!llm) return { ok: false, reason: "llm-unavailable" };
+    const explicitProvider = typeof state.settings.aiProvider === "string" ? state.settings.aiProvider.trim() : "";
+    const explicitModel = typeof state.settings.aiModel === "string" ? state.settings.aiModel.trim() : "";
+    const routes = providerRoutes(llm);
+    const registered = (id) => routes.some((route) => route.id === id);
+    if (explicitProvider && explicitModel) {
+      if (!registered(explicitProvider)) {
+        return { ok: false, reason: "provider-unavailable", source: "settings", provider: explicitProvider, model: explicitModel };
+      }
+      return { ok: true, source: "settings", provider: explicitProvider, model: explicitModel };
+    }
+    const fallback = defaultModelSelection();
+    if (fallback) {
+      if (!registered(fallback.provider)) {
+        return { ok: false, reason: "provider-unavailable", source: "default", provider: fallback.provider, model: fallback.model };
+      }
+      return { ok: true, source: "default", provider: fallback.provider, model: fallback.model };
+    }
+    return { ok: false, reason: "no-default-model" };
+  }
+
+  /** First model of the first provider that returns a usable catalog. */
+  async function firstCatalogModel(llm) {
+    for (const route of providerRoutes(llm)) {
+      try {
+        const models = await withTimeout(llm.listModels(route.id), aiCatalogTimeoutMsValue, "catalog-timeout");
+        const first = Array.isArray(models) ? models.find((model) => model && typeof model.id === "string" && model.id) : null;
+        if (first) return { provider: route.id, model: first.id };
+      } catch {
+        /* try the next provider */
+      }
+    }
+    return null;
+  }
+
+  /** Rules-only explanation for an unavailable model route (host-side text). */
+  function aiRouteFailureMessage(selection) {
+    switch (selection.reason) {
+      case "llm-unavailable":
+        return "当前 DSH 未提供 AI 模型服务，本次仅规则分析；升级 DSH 后可用";
+      case "provider-unavailable":
+        return selection.source === "default"
+          ? `DSH 默认模型提供方 ${selection.provider} 不可用，请在 DSH 设置 → 模型 中配置`
+          : `所选模型提供方 ${selection.provider} 已不可用，请在设置中重新选择模型`;
+      case "no-default-model":
+        return "DSH 尚未设置默认模型，请在看板设置中选择模型（或先在 DSH 设置 → 模型 中配置）";
+      case "no-models":
+        return `${selection.provider} 没有可用模型（可能未配置 API Key 或未登录），请在 DSH 设置 → 模型 中完成配置`;
+      case "catalog-error":
+        return "读取模型目录失败，本次仅规则分析";
+      default:
+        return "AI 模型不可用，本次仅规则分析";
+    }
+  }
+
+  /**
+   * Async route resolution (once per scan / explicit command).
+   * Only the "no default model at all" case consults the catalog (first-model
+   * fallback); an explicit/default provider that is down stays an error so the
+   * board never silently switches the user's model.
+   */
+  async function resolveAiRoute() {
+    const llm = llmService();
+    if (!llm) {
+      const failure = { ok: false, reason: "llm-unavailable" };
+      return { ...failure, message: aiRouteFailureMessage(failure) };
+    }
+    const selection = syncAiSelection();
+    if (selection.ok) return selection;
+    if (selection.reason === "no-default-model") {
+      let fallback = null;
+      try {
+        // Bound the whole fallback (not just each provider) so an explicit
+        // command cannot hang on a host with several slow providers.
+        fallback = await withTimeout(firstCatalogModel(llm), aiCatalogTimeoutMsValue, "catalog-timeout");
+      } catch {
+        fallback = null;
+      }
+      if (fallback) return { ok: true, source: "catalog-fallback", ...fallback };
+    }
+    return { ...selection, message: aiRouteFailureMessage(selection) };
+  }
+
+  /** Whether AI analysis can run at all (presence of the native llm service). */
+  function analyzerHasService() {
+    try {
+      return Boolean(analyzer.hasService());
+    } catch {
+      return Boolean(llmService());
+    }
+  }
+
+  /** Snapshot of the analyzer budget (call/attempt accounting; never throws). */
+  function readAnalyzerBudget() {
+    try {
+      const budget = typeof analyzer.getBudget === "function" ? analyzer.getBudget() : null;
+      return {
+        calls: Math.max(0, Number(budget?.calls) || 0),
+        attempts: Math.max(0, Number(budget?.attempts) || 0),
+        tokens: Math.max(0, Number(budget?.tokens) || 0),
+      };
+    } catch {
+      return { calls: 0, attempts: 0, tokens: 0 };
+    }
+  }
+
+  /** Record a failed analysis so the session cools down before the next try. */
+  function markAiError(meta, error) {
+    const entry = cache.sessions[meta.id] || { sigKey: meta.sigKey, meta };
+    entry.meta = {
+      ...(entry.meta || meta),
+      llmError: shortError(error),
+      aiErrorAt: new Date().toISOString(),
+    };
+    cache.sessions[meta.id] = entry;
+    sessionsById.set(meta.id, entry.meta);
+  }
+
+  /**
+   * Per-scan AI budget limit: "auto" is unbounded here (the daily remaining caps
+   * it), "fixed" is the sanitized `maxAiCallsPerScan`.
+   */
+  function perScanAiLimit() {
+    if (state.settings.aiBudgetMode !== "fixed") return Number.POSITIVE_INFINITY;
+    const value = Number(state.settings.maxAiCallsPerScan);
+    if (!Number.isFinite(value)) return DEFAULT_SETTINGS.maxAiCallsPerScan;
+    return Math.min(AI_CALLS_PER_SCAN_MAX, Math.max(AI_CALLS_PER_SCAN_MIN, Math.round(value)));
+  }
+
+  /** Deterministic AI order: never-analyzed debt > changed > recent activity > id. */
+  function compareAiJobs(a, b) {
+    if (Boolean(a.firstAnalysis) !== Boolean(b.firstAnalysis)) return a.firstAnalysis ? -1 : 1;
+    if (Boolean(a.changed) !== Boolean(b.changed)) return a.changed ? -1 : 1;
+    const byActivity = (b.meta.lastActivityAt || 0) - (a.meta.lastActivityAt || 0);
+    if (byActivity !== 0) return byActivity;
+    return String(a.meta.id).localeCompare(String(b.meta.id));
+  }
+
+  /** Compose the human-readable scan conclusion (the host owns scan.message). */
+  function buildScanMessage({
+    lowValueSkipped = 0,
+    mergedTasks = 0,
+    aiRouteMessage = null,
+    aiDeferredReason = null,
+    aiBudget = 0,
+    aiPending = 0,
+    aiFailureCount = 0,
+  } = {}) {
+    const parts = [`扫描完成：${state.scan.processed}/${state.scan.total} 个会话`];
+    // Post-scan counters: finalizeScan() adds scan.aiCalls to usage.calls later, so
+    // the message must not read the pre-scan usage value (old accounting bug).
+    const usedAfter = (Number(state.usage.calls) || 0) + (Number(state.scan.aiCalls) || 0);
+    const dailyLimit = Number(state.settings.dailyAiCallLimit) || DEFAULT_SETTINGS.dailyAiCallLimit;
+    const pending = Math.max(0, Math.round(Number(aiPending) || 0));
+    if (state.scan.aiCalls > 0) parts.push(`AI ${state.scan.aiCalls} 次/${state.scan.tokens} tokens`);
+    else if (state.settings.aiEnabled) parts.push("本次无 AI 调用");
+    if (lowValueSkipped > 0) parts.push(`低价值跳过 ${lowValueSkipped}`);
+    if (aiRouteMessage) parts.push(aiRouteMessage);
+    if (aiDeferredReason === "daily") {
+      parts.push(`今日 AI 预算已用完（${usedAfter}/${dailyLimit}）`);
+      if (pending > 0) parts.push(`剩余 ${pending} 个会话明日继续（本次其余仅规则）`);
+    } else if (aiDeferredReason === "time") {
+      parts.push("本次 AI 阶段已达 10 分钟上限");
+      if (pending > 0) parts.push(`剩余 ${pending} 个会话下次扫描继续`);
+    } else if (aiDeferredReason === "budget") {
+      parts.push(`本次 AI 预算已用完（${Math.max(0, Math.round(Number(aiBudget) || 0))} 次）其余仅规则`);
+      if (pending > 0) parts.push(`剩余 ${pending} 个会话下次扫描继续`);
+    } else if (pending > 0) {
+      parts.push(`剩余 ${pending} 个会话下次扫描继续`);
+    }
+    if (mergedTasks > 0) parts.push(`合并重复卡 ${mergedTasks}`);
+    if (aiFailureCount > 0) parts.push(`${aiFailureCount} 个会话研判失败，5 分钟后重试`);
+    return parts.join(" · ");
+  }
+
+  /* ------------------------- AI model catalog ----------------------- */
+
+  /** 30s catalog cache + in-flight dedupe; invalidated by DSH model events. */
+  let aiCatalogCache = { at: 0, data: null };
+  let aiCatalogPromise = null;
+  let aiCatalogGeneration = 0;
+  const aiCatalogOffs = [];
+
+  function invalidateAiCatalog() {
+    aiCatalogGeneration += 1;
+    aiCatalogCache = { at: 0, data: null };
+    aiCatalogPromise = null;
+  }
+
+  /** Build the flat `GET /ai/models` payload (one provider failure never hides the rest). */
+  async function buildAiCatalog() {
+    const llm = llmService();
+    const fetchedAt = new Date().toISOString();
+    if (!llm) {
+      return { catalogAvailable: false, default: null, providers: [], models: [], failures: [], fetchedAt };
+    }
+    const routes = providerRoutes(llm);
+    const perProvider = await Promise.all(
+      routes.map(async (route) => {
+        try {
+          const models = await withTimeout(llm.listModels(route.id), aiCatalogTimeoutMsValue, "catalog-timeout");
+          const list = (Array.isArray(models) ? models : [])
+            .filter((model) => model && typeof model.id === "string" && model.id)
+            .map((model) => ({
+              provider: route.id,
+              id: model.id,
+              name: typeof model.name === "string" && model.name ? model.name : model.id,
+            }));
+          return { id: route.id, name: route.name, models: list, failure: null };
+        } catch (error) {
+          logWarn(`[super-kanban] listModels(${route.id}) failed: ${shortError(error)}`);
+          return { id: route.id, name: route.name, models: [], failure: shortError(error) };
+        }
+      }),
+    );
+    return {
+      catalogAvailable: true,
+      default: defaultModelSelection(),
+      providers: perProvider.map((provider) => ({ id: provider.id, name: provider.name, modelCount: provider.models.length })),
+      models: perProvider.flatMap((provider) => provider.models),
+      failures: perProvider
+        .filter((provider) => provider.failure)
+        .map((provider) => ({ provider: provider.id, name: provider.name, message: provider.failure })),
+      fetchedAt,
+    };
+  }
+
+  async function getAiCatalog() {
+    if (aiCatalogCache.data && Date.now() - aiCatalogCache.at < AI_CATALOG_TTL_MS) return aiCatalogCache.data;
+    if (aiCatalogPromise) return aiCatalogPromise;
+    const generation = aiCatalogGeneration;
+    const promise = buildAiCatalog();
+    aiCatalogPromise = promise;
+    try {
+      const data = await promise;
+      // Do not repopulate a cache that an event invalidated while we were listing.
+      if (generation === aiCatalogGeneration) aiCatalogCache = { at: Date.now(), data };
+      return data;
+    } catch (error) {
+      // The endpoint must degrade instead of 500: report it through `failures[]`.
+      logWarn(`[super-kanban] AI model catalog failed: ${shortError(error)}`);
+      return {
+        catalogAvailable: Boolean(llmService()),
+        default: defaultModelSelection(),
+        providers: [],
+        models: [],
+        failures: [{ provider: "", name: "", message: shortError(error) }],
+        fetchedAt: new Date().toISOString(),
+      };
+    } finally {
+      if (aiCatalogPromise === promise) aiCatalogPromise = null;
+    }
+  }
+
+  /** Subscribe to DSH catalog events when the host event bus exists. */
+  function subscribeAiCatalogEvents() {
+    if (typeof ctx?.on !== "function") return;
+    const invalidate = () => invalidateAiCatalog();
+    for (const event of ["llm/adapters-updated", "llm/models-updated"]) {
+      try {
+        const off = ctx.on(event, invalidate);
+        if (typeof off === "function") aiCatalogOffs.push(off);
+      } catch {
+        /* absent event: the 30s TTL still bounds staleness */
+      }
     }
   }
 
@@ -613,6 +970,10 @@ export function createKanbanService({ ctx } = {}) {
       aiUserCount: meta.userCount || 0,
       aiTurnEndKind: meta.lastTurnEnd?.kind || null,
       aiDigestBytes: digestBytes || 0,
+      // A successful analysis clears the previous failure/cooldown markers so a
+      // stale error can never gate the next meaningful change.
+      llmError: null,
+      aiErrorAt: null,
     };
     cache.sessions[metaId] = entry;
     sessionsById.set(metaId, entry.meta);
@@ -808,6 +1169,7 @@ export function createKanbanService({ ctx } = {}) {
     meta.aiTurnEndKind = previous?.aiTurnEndKind ?? null;
     meta.aiDigestBytes = previous?.aiDigestBytes || 0;
     meta.llmError = previous?.llmError || null;
+    meta.aiErrorAt = previous?.aiErrorAt || null;
     return { sigKey: meta.sigKey, meta };
   }
 
@@ -1008,9 +1370,9 @@ export function createKanbanService({ ctx } = {}) {
         let parsed = null;
         const preEligible = meta ? isEligibleForAutoTask(meta, cutoff) : false;
         // "aiMissing" re-parses a session that never got an AI verdict. Only
-        // worth the parse when a credential actually exists; otherwise every
-        // incremental scan would re-parse every unchanged session forever.
-        const aiMissing = state.settings.aiEnabled && analyzer.hasCredential() && !cached?.meta?.aiAt;
+        // worth the parse when an AI service exists; otherwise every incremental
+        // scan would re-parse every unchanged session forever.
+        const aiMissing = state.settings.aiEnabled && analyzerHasService() && !cached?.meta?.aiAt;
         const forceMainParse =
           preEligible && (mode === "full" || changed || !findTaskBySession(discovered.id) || aiMissing);
         if (changed || forceMainParse) {
@@ -1055,7 +1417,11 @@ export function createKanbanService({ ctx } = {}) {
           // v2 token gate: low-value sessions and unchanged verdict inputs stay rules-only.
           const lowValue = isLowValueForAi(meta);
           if (lowValue) lowValueSkipped += 1;
-          const aiDue = state.settings.aiEnabled && !lowValue && shouldRunAi(meta, cachedMeta);
+          // A session whose last analysis failed cools down before it burns
+          // another budget unit (upstream outages must not drain the daily budget).
+          const failureCooling =
+            cachedMeta?.aiErrorAt && Date.now() - (Date.parse(cachedMeta.aiErrorAt) || 0) < AI_ERROR_COOLDOWN_MS;
+          const aiDue = state.settings.aiEnabled && !lowValue && !failureCooling && shouldRunAi(meta, cachedMeta);
           let digest = "";
           let digestBytes = 0;
           if (aiDue) {
@@ -1070,6 +1436,7 @@ export function createKanbanService({ ctx } = {}) {
           analysisJobs.push({
             meta,
             changed,
+            firstAnalysis: !cachedMeta?.aiAt,
             digest,
             digestBytes,
             rules,
@@ -1089,60 +1456,104 @@ export function createKanbanService({ ctx } = {}) {
       if (state.scan.processed % 6 === 0) schedulePersist();
     }
 
-    // Phase B: LLM analysis (meaningful-change gate + per-scan/daily budgets).
-    if (state.settings.aiEnabled && !scanCancel && !stopped && analysisJobs.length > 0) {
+    // Phase B: LLM analysis (model route + meaningful-change gate + budgets).
+    // The model route is resolved once per scan; an unavailable route degrades
+    // the whole AI phase to rules-only instead of failing the scan.
+    let aiDeferredReason = null;
+    let aiRouteMessage = null;
+    let aiFailureCount = 0;
+    const aiJobs = analysisJobs.filter((job) => job.needsAi).sort(compareAiJobs);
+    state.scan.aiDue = aiJobs.length;
+    if (aiJobs.length > 0) {
       const dailyRemaining = dailyAiRemaining();
-      const perScanLimit = state.settings.maxAiCallsPerScan || DEFAULT_SETTINGS.maxAiCallsPerScan;
-      const scanBudget = Math.max(0, Math.min(perScanLimit, dailyRemaining));
-      analyzer.resetBudget(scanBudget);
-      const aiJobs = analysisJobs.filter((job) => job.needsAi);
-      if (aiJobs.length > 0) {
-        if (!analyzer.hasCredential()) {
-          state.scan.message = "未找到账号凭证，使用规则引擎分析";
-          logWarn("[super-kanban] no DeepSeek account credential found; falling back to rules engine");
-        } else if (scanBudget <= 0) {
-          aiBudgetExhausted = true;
-          state.scan.message = `今日 AI 预算已用完（${state.usage.calls}/${state.settings.dailyAiCallLimit}），本次仅规则分析`;
-          for (const job of aiJobs) job.llmBudgetExceeded = true;
-          logWarn("[super-kanban] daily AI budget exhausted; rules only this scan");
+      if (!state.settings.aiEnabled || scanCancel || stopped) {
+        state.scan.aiBudget = 0;
+        state.scan.aiPending = aiJobs.length;
+      } else {
+        const route = await resolveAiRoute();
+        if (!route.ok) {
+          aiRouteMessage = route.message;
+          state.scan.aiBudget = 0;
+          state.scan.aiPending = aiJobs.length;
+          logWarn(`[super-kanban] AI route unavailable (${route.reason}); rules only this scan`);
         } else {
-          state.scan.message = `AI 研判 ${aiJobs.length} 个会话（预算 ${scanBudget}）…`;
-          broadcastScan(true);
-          for (let index = 0; index < aiJobs.length; index += MAX_AI_CONCURRENCY) {
-            if (scanCancel || stopped) break;
-            if (state.scan.aiCalls >= scanBudget) {
-              aiBudgetExhausted = true;
-              for (const job of aiJobs.slice(index)) job.llmBudgetExceeded = true;
-              break;
+          const perScanLimit = perScanAiLimit();
+          // The contract defines the scan budget as min(due sessions, per-scan
+          // limit, daily remaining); capping at the due count also keeps the
+          // reported budget/progress meaningful (e.g. 1/2, not 1/150).
+          const scanBudget = Math.max(0, Math.min(perScanLimit, dailyRemaining, aiJobs.length));
+          const dailyCapped = dailyRemaining <= perScanLimit;
+          state.scan.aiBudget = scanBudget;
+          analyzer.resetBudget(scanBudget);
+          if (scanBudget <= 0) {
+            aiDeferredReason = "daily";
+            aiBudgetExhausted = true;
+            state.scan.aiPending = aiJobs.length;
+            for (const job of aiJobs) job.llmBudgetExceeded = true;
+            state.scan.message = `今日 AI 预算已用完（${state.usage.calls}/${state.settings.dailyAiCallLimit}），本次仅规则分析`;
+            logWarn("[super-kanban] daily AI budget exhausted; rules only this scan");
+          } else {
+            state.scan.message = `AI 研判 ${aiJobs.length} 个会话（预算 ${scanBudget}）…`;
+            broadcastScan(true);
+            // Wall-clock guard for the whole AI stage: a slow/retrying provider
+            // must never keep the scan mutex for hours.
+            const aiDeadline = Date.now() + aiScanMaxMsValue;
+            for (let index = 0; index < aiJobs.length; index += MAX_AI_CONCURRENCY) {
+              if (scanCancel || stopped) break;
+              if (Date.now() >= aiDeadline) {
+                aiDeferredReason = "time";
+                for (const job of aiJobs.slice(index)) job.llmDeferred = true;
+                logWarn("[super-kanban] AI stage wall-clock limit reached; remaining sessions deferred");
+                break;
+              }
+              // Budget accounting uses analyzer attempts (failed analyses count
+              // against the budget too), not just successful calls.
+              if (readAnalyzerBudget().calls >= scanBudget) {
+                aiDeferredReason = dailyCapped ? "daily" : "budget";
+                aiBudgetExhausted = true;
+                for (const job of aiJobs.slice(index)) job.llmBudgetExceeded = true;
+                logWarn("[super-kanban] per-scan AI budget exhausted; remaining sessions deferred");
+                break;
+              }
+              const batch = aiJobs.slice(index, index + MAX_AI_CONCURRENCY);
+              await Promise.all(
+                batch.map(async (job) => {
+                  const result = await analyzer.analyze({
+                    provider: route.provider,
+                    model: route.model,
+                    digest: job.digest,
+                    existingTasks: promptCandidateTasks(job.meta),
+                    signal: scanAbort?.signal,
+                  });
+                  if (result.ok) {
+                    job.llm = result;
+                    state.scan.aiCalls += 1;
+                    state.scan.tokens += result.usage?.totalTokens || 0;
+                  } else if (result.code === "budget") {
+                    job.llmBudgetExceeded = true;
+                    // Fix the mixed case: a budget hit alone must still emit the
+                    // "budget used up" hint even when other calls failed.
+                    aiBudgetExhausted = true;
+                  } else if (result.code === "aborted") {
+                    job.llmAborted = true;
+                  } else {
+                    job.llmError = result.error;
+                    aiFailureCount += 1;
+                    markAiError(job.meta, result.error);
+                    logWarn(`[super-kanban] LLM analysis degraded to rules: ${result.code || "llm-failed"}`);
+                  }
+                }),
+              );
+              const usedCalls = state.usage.calls + state.scan.aiCalls;
+              state.scan.message = `AI 研判 ${Math.min(state.scan.aiCalls, aiJobs.length)}/${aiJobs.length} 个会话（今日 ${usedCalls}/${state.settings.dailyAiCallLimit}）…`;
+              broadcastScan();
             }
-            const batch = aiJobs.slice(index, index + MAX_AI_CONCURRENCY);
-            await Promise.all(
-              batch.map(async (job) => {
-                const result = await analyzer.analyze({
-                  digest: job.digest,
-                  existingTasks: promptCandidateTasks(job.meta),
-                  model: state.settings.model,
-                  signal: scanAbort?.signal,
-                });
-                if (result.ok) {
-                  job.llm = result;
-                  state.scan.aiCalls += 1;
-                  state.scan.tokens += result.usage?.totalTokens || 0;
-                } else if (result.code === "budget") {
-                  job.llmBudgetExceeded = true;
-                } else if (result.code !== "aborted") {
-                  job.llmError = result.error;
-                  const jobMeta = job.meta;
-                  const entry = cache.sessions[jobMeta.id] || { sigKey: jobMeta.sigKey, meta: jobMeta };
-                  entry.meta = { ...(entry.meta || jobMeta), llmError: result.error };
-                  cache.sessions[jobMeta.id] = entry;
-                  logWarn(`[super-kanban] LLM analysis degraded to rules: ${result.error}`);
-                }
-              }),
-            );
-            state.scan.message = `AI 研判 ${Math.min(state.scan.aiCalls, aiJobs.length)}/${aiJobs.length} 个会话…`;
-            broadcastScan();
           }
+          const budgetAfter = readAnalyzerBudget();
+          state.scan.aiAttempts = budgetAfter.attempts;
+          state.scan.aiPending = aiJobs.filter((job) => !job.llm).length;
+          if (!aiDeferredReason && aiBudgetExhausted) aiDeferredReason = dailyCapped ? "daily" : "budget";
+          state.scan.aiDeferredReason = aiDeferredReason;
         }
       }
     }
@@ -1159,9 +1570,11 @@ export function createKanbanService({ ctx } = {}) {
             applyAiMeta(meta.id, meta, { digestBytes: job.digestBytes });
             continue;
           }
+          const llmModel = job.llm.model || "";
+          const llmProvider = job.llm.provider || null;
           const normalized = job.llm.tasks
             .slice(0, Math.max(1, state.settings.maxTasksPerSession || 3))
-            .map((raw) => normalizeAnalysis(raw, context, { engine: "llm", model: job.llm.model || state.settings.model }))
+            .map((raw) => normalizeAnalysis(raw, context, { engine: "llm", model: llmModel }))
             .filter(Boolean)
             .map((analysis) => ({
               ...analysis,
@@ -1171,7 +1584,8 @@ export function createKanbanService({ ctx } = {}) {
           if (normalized.length > 0) {
             const result = applyAnalysisList(normalized, meta, context, {
               engine: "llm",
-              model: job.llm.model || state.settings.model,
+              model: llmModel,
+              provider: llmProvider,
               rules,
               childSummaries,
               context,
@@ -1181,7 +1595,8 @@ export function createKanbanService({ ctx } = {}) {
           } else {
             applied = applyAnalysisList(rules.tasks, meta, context, {
               engine: "rules",
-              model: state.settings.model,
+              model: "",
+              provider: null,
               rules,
               childSummaries,
               context,
@@ -1199,7 +1614,8 @@ export function createKanbanService({ ctx } = {}) {
           } else {
             applied = applyAnalysisList(rules.tasks, meta, context, {
               engine: "rules",
-              model: state.settings.model,
+              model: "",
+              provider: null,
               rules,
               childSummaries,
               context,
@@ -1215,19 +1631,21 @@ export function createKanbanService({ ctx } = {}) {
     // Phase C2: collapse auto tasks that describe the same work.
     const mergedTasks = mergeDuplicateTasks() + orphanMerged;
 
-    // Phase D: persist derived board data.
+    // Phase D: persist derived board data + the human-readable scan conclusion.
     state.workspaces = computeWorkspaces(discovery.workspaces, [...sessionsById.values()]);
     state.activity = computeActivity();
     if (scanCancel) {
       state.scan.message = "扫描已取消";
     } else {
-      const parts = [`扫描完成：${state.scan.processed}/${state.scan.total} 个会话`];
-      if (state.scan.aiCalls > 0) parts.push(`AI ${state.scan.aiCalls} 次/${state.scan.tokens} tokens`);
-      else if (state.settings.aiEnabled) parts.push("本次无 AI 调用");
-      if (lowValueSkipped > 0) parts.push(`低价值跳过 ${lowValueSkipped}`);
-      if (aiBudgetExhausted) parts.push(`预算已用完（${state.usage.calls}/${state.settings.dailyAiCallLimit}）其余仅规则`);
-      if (mergedTasks > 0) parts.push(`合并重复卡 ${mergedTasks}`);
-      state.scan.message = parts.join(" · ");
+      state.scan.message = buildScanMessage({
+        lowValueSkipped,
+        mergedTasks,
+        aiRouteMessage,
+        aiDeferredReason,
+        aiBudget: state.scan.aiBudget,
+        aiPending: state.scan.aiPending,
+        aiFailureCount,
+      });
     }
     broadcastScan(true);
     // Cache entries for sessions that were never parsed keep their old meta.
@@ -1376,10 +1794,17 @@ export function createKanbanService({ ctx } = {}) {
     for (const session of task.sessions) session.evidenceCount = counts.get(session.id) || 0;
   }
 
-  function analysisAiInfo(analysis, { engine, model }) {
+  /**
+   * `task.ai` provenance. LLM verdicts record the requested provider+model;
+   * rules verdicts keep an empty model and a null provider (the deprecated
+   * `settings.model` is never attributed to a rules result).
+   */
+  function analysisAiInfo(analysis, { engine, model, provider } = {}) {
+    const isLlm = engine === "llm";
     return {
       analyzedAt: new Date().toISOString(),
-      model: model || state.settings.model || DEFAULT_SETTINGS.model,
+      model: isLlm ? String(model || "") : "",
+      provider: isLlm && typeof provider === "string" && provider ? provider : null,
       confidence: Number.isFinite(analysis.confidence) ? analysis.confidence : null,
       reason: analysis.reason || "",
       engine,
@@ -1909,14 +2334,19 @@ export function createKanbanService({ ctx } = {}) {
       refreshSessionIndex();
       const sessionIds = [...new Set([task.primarySessionId, ...(task.sessions || []).map((session) => session.id)].filter(Boolean))];
       if (sessionIds.length === 0) throw badRequest("task-has-no-session");
+      // Same route resolver as the scan: an explicit selection or the live DSH
+      // default; an unavailable route falls back to the rules engine.
+      const route = await resolveAiRoute();
       const dailyRemaining = dailyAiRemaining();
-      const budgetExhausted = state.settings.aiEnabled && analyzer.hasCredential() && dailyRemaining <= 0;
-      const aiEnabled = state.settings.aiEnabled && analyzer.hasCredential() && dailyRemaining > 0;
-      const perTaskBudget = Math.min(state.settings.maxAiCallsPerScan || DEFAULT_SETTINGS.maxAiCallsPerScan, dailyRemaining);
+      const budgetExhausted = state.settings.aiEnabled && dailyRemaining <= 0;
+      const aiEnabled = state.settings.aiEnabled && route.ok && dailyRemaining > 0;
+      const perTaskBudget = Math.min(perScanAiLimit(), dailyRemaining);
       analyzer.resetBudget(aiEnabled ? Math.min(perTaskBudget, sessionIds.length) : 0);
       let aiCalls = 0;
       let tokens = 0;
       let engine = "rules";
+      let model = "";
+      let provider = null;
       let parsedAny = 0;
       let budgetHit = false;
       for (const sessionId of sessionIds.slice(0, MAX_SESSIONS_PER_TASK)) {
@@ -1939,7 +2369,8 @@ export function createKanbanService({ ctx } = {}) {
         const context = buildV2Context(parsed, meta, meta.workspaceTitle);
         let analyses = rules.tasks;
         let jobEngine = "rules";
-        let model = state.settings.model;
+        let jobModel = "";
+        let jobProvider = null;
         if (aiEnabled && !budgetHit && aiCalls < perTaskBudget) {
           const digest = source.buildDigest(parsed, {
             workspaceTitle: meta.workspaceTitle,
@@ -1947,14 +2378,19 @@ export function createKanbanService({ ctx } = {}) {
             baselineSeq: 0, // manual re-judge: give the model the full recent picture
           });
           const result = await analyzer.analyze({
+            provider: route.provider,
+            model: route.model,
             digest,
             existingTasks: promptCandidateTasks(meta),
-            model: state.settings.model,
           });
           if (result.ok) {
+            // A successful analysis consumes one budget unit even when the model
+            // says "no card needed" (ignore) — the tokens were still spent.
+            aiCalls += 1;
+            tokens += result.usage?.totalTokens || 0;
             const normalized = result.tasks
               .slice(0, Math.max(1, state.settings.maxTasksPerSession || 3))
-              .map((raw) => normalizeAnalysis(raw, context, { engine: "llm", model: result.model }))
+              .map((raw) => normalizeAnalysis(raw, context, { engine: "llm", model: result.model || route.model }))
               .filter(Boolean)
               .map((analysis) => ({
                 ...analysis,
@@ -1964,23 +2400,31 @@ export function createKanbanService({ ctx } = {}) {
             if (normalized.length > 0 && !result.ignore) {
               analyses = normalized;
               jobEngine = "llm";
-              model = result.model || model;
+              jobModel = result.model || route.model;
+              jobProvider = result.provider || route.provider;
               engine = "llm";
-              aiCalls += 1;
-              tokens += result.usage?.totalTokens || 0;
+              model = jobModel;
+              provider = jobProvider;
             }
             applyAiMeta(sessionId, meta, { digestBytes: Buffer.byteLength(digest, "utf8") });
           } else if (result.code === "budget") {
             budgetHit = true;
             logWarn("[super-kanban] task.analyze budget exhausted; rules fallback");
-          } else {
-            logWarn(`[super-kanban] task.analyze LLM degraded: ${result.error}`);
+          } else if (result.code !== "aborted") {
+            markAiError(meta, result.error);
+            logWarn(`[super-kanban] task.analyze LLM degraded: ${result.code || "llm-failed"}`);
           }
         }
         // Explicit analyze updates exactly this task (scan owns auto splitting).
         const primary = analyses[0];
         if (primary) {
-          updateTaskFromAnalysis(task, primary, meta, { engine: jobEngine, model, rules, context });
+          updateTaskFromAnalysis(task, primary, meta, {
+            engine: jobEngine,
+            model: jobModel,
+            provider: jobProvider,
+            rules,
+            context,
+          });
         }
       }
       task.origin = task.origin === "auto" ? "auto+edited" : task.origin;
@@ -1989,13 +2433,13 @@ export function createKanbanService({ ctx } = {}) {
       if (aiCalls > 0) recordUsage({ calls: aiCalls, tokens });
       persistState();
       emitChanged("task", 1);
-      const message =
-        engine === "llm"
-          ? "AI 研判完成"
-          : budgetHit || budgetExhausted
-            ? "今日 AI 预算已用完，已用规则引擎重判"
-            : "AI 不可用或未启用，已用规则引擎重判";
-      return { task, engine, aiCalls, tokens, sessions: parsedAny, message };
+      let message;
+      if (engine === "llm") message = "AI 研判完成";
+      else if (aiCalls > 0) message = `AI 判断该会话无需建卡（已消耗 ${aiCalls} 次）`;
+      else if (budgetHit || budgetExhausted) message = "今日 AI 预算已用完，已用规则引擎重判";
+      else if (state.settings.aiEnabled && !route.ok) message = `${route.message}，已用规则引擎重判`;
+      else message = "AI 不可用或未启用，已用规则引擎重判";
+      return { task, engine, aiCalls, tokens, sessions: parsedAny, message, model, provider };
     },
 
     /* ----------------------- v2 linkage ops ------------------------ */
@@ -2147,12 +2591,13 @@ export function createKanbanService({ ctx } = {}) {
       if (!original) throw badRequest("prompt-required");
       if (original.length > 3000) throw badRequest("prompt-too-long");
       if (scanPromise) throw conflict("扫描进行中，请稍后再试");
+      const route = await resolveAiRoute();
       const dailyRemaining = dailyAiRemaining();
-      if (!state.settings.aiEnabled || !analyzer.hasCredential() || dailyRemaining <= 0) {
+      if (!state.settings.aiEnabled || !route.ok || dailyRemaining <= 0) {
         return { prompt: original, polished: false };
       }
-      analyzer.resetBudget(1);
-      const result = await analyzer.polish({ prompt: original, model: state.settings.model });
+      analyzer.resetBudget(Math.min(perScanAiLimit(), dailyRemaining, 1));
+      const result = await analyzer.polish({ provider: route.provider, model: route.model, prompt: original });
       if (!result.ok) return { prompt: original, polished: false };
       recordUsage({ calls: 1, tokens: result.usage?.totalTokens || 0 });
       persistState();
@@ -2181,10 +2626,19 @@ export function createKanbanService({ ctx } = {}) {
     "settings.update"(payload) {
       const patch = payload.patch && typeof payload.patch === "object" ? payload.patch : payload;
       const normalized = normalizeSettingsPatch(patch);
+      // Old clients (pre-0.5) only send `maxAiCallsPerScan`: that is a deliberate
+      // fixed-budget choice, so keep their numeric setting effective by inferring
+      // `fixed` for this update only (loading old state still defaults to auto).
+      if (normalized.maxAiCallsPerScan !== undefined && !Object.hasOwn(patch, "aiBudgetMode")) {
+        normalized.aiBudgetMode = "fixed";
+      }
       const previous = state.settings;
       // normalizeSettingsPatch only returns contract settings keys, so a hostile
       // patch can never add __proto__/lastScanAt/unknown properties here.
-      state.settings = { ...state.settings, ...normalized };
+      const merged = { ...state.settings, ...normalized };
+      const halfRoute = Boolean(merged.aiProvider) !== Boolean(merged.aiModel);
+      if (halfRoute) logWarn("[super-kanban] half-set AI model route normalized to follow-default");
+      state.settings = normalizeAiRoutePair(merged);
       if (JSON.stringify(previous) !== JSON.stringify(state.settings)) {
         state.workspaces = state.workspaces.map((workspace) => ({
           ...workspace,
@@ -2379,6 +2833,12 @@ export function createKanbanService({ ctx } = {}) {
         json(res, 200, buildStatePayload());
         return;
       }
+      if (route === "/ai/models" && method === "GET") {
+        // Owner admission is enforced by the prefix handler in index.mjs. The
+        // catalog is additive and never part of /state (4s polling stays small).
+        json(res, 200, { ok: true, ...(await getAiCatalog()) });
+        return;
+      }
       if (route === "/command" && method === "POST") {
         const body = await readBody(req);
         if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -2477,6 +2937,7 @@ export function createKanbanService({ ctx } = {}) {
 
   function start() {
     if (stopped || autoTimer) return;
+    subscribeAiCatalogEvents();
     // First scan should happen within ~8s of plugin boot.
     startupTimer = setTimeout(() => {
       startupTimer = null;
@@ -2500,6 +2961,13 @@ export function createKanbanService({ ctx } = {}) {
     saveTimer = null;
     if (scanBroadcastTimer) clearTimeout(scanBroadcastTimer);
     scanBroadcastTimer = null;
+    for (const off of aiCatalogOffs.splice(0)) {
+      try {
+        off();
+      } catch {
+        /* disposer is host code */
+      }
+    }
     for (const client of [...sseClients]) removeSseClient(client);
     // Flush any state the running scan already produced; the scan itself stops at
     // its next checkpoint and its finalizer is exception-isolated.

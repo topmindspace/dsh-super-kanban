@@ -1,28 +1,50 @@
 /**
- * Super Kanban — LLM analyzer.
+ * Super Kanban — LLM analyzer over the DSH native model service.
  *
- * Reuses the DSH account quota: the bearer token lives in
- * $DSH_HOME/.credentials.yaml under `records.deepseek-account-platform/default`
- * and is sent as `x-dsh-auth-token` to the OpenAI-compatible endpoint.
+ * The board no longer talks to a provider endpoint itself: every analysis goes
+ * through the host composition's `llm` service (`ctx.llm`), so credentials,
+ * providers, third-party gateways and the model catalog are all owned by DSH.
+ * This module keeps the board-side policy: prompt, JSON repair and correction
+ * retries, per-scan call budget, request timeout and concurrency.
  *
- * Hardening: 60s timeout, one retry, ≤3 concurrent requests, per-scan call
- * budget, strict JSON extraction and graceful degradation to the rules engine.
- * The account token is never logged and never leaves this module.
+ * Provider-request shape (verified against DSH 0.2.1-rc.5 / 0.2.2-rc.1):
+ *   llm.stream({ provider, model, system, messages, maxTokens, signal })
+ *   - `messages` accepts request-only user input: { role:'user', content:[{type:'text',text}] }
+ *   - the stream ends with `usage` then exactly one terminal `finish`
+ *   - there is NO JSON mode / response_format; JSON validity is handled here
+ *   - never pass `sessionId`: that would let the official route attach its
+ *     session-log payload to the request.
+ *
+ * The returned analyzer is transport-neutral for tests: the LLM service is
+ * resolved lazily from `ctx`, and `createLlmAnalyzer({ ctx })` never throws
+ * when the service is absent (analysis then degrades to the rules engine).
  */
-import fs from "node:fs";
-import path from "node:path";
+import { llmOf } from "./native-llm.mjs";
 
-const CREDENTIALS_FILE = ".credentials.yaml";
-const API_URL = "https://api.deepseek.com/v1/chat/completions";
-const DEFAULT_MODEL = "deepseek-flash";
-const MAX_CONCURRENCY = 2;
 const TIMEOUT_MS = 60_000;
-const MAX_OUTPUT_TOKENS = 2200;
-const TOKEN_PATTERN = /\bdeepseek-account-platform\/default:/;
+const MAX_OUTPUT_TOKENS = 4096;
+const POLISH_OUTPUT_TOKENS = 800;
+const MAX_ATTEMPTS = 3;
+const MAX_RETRY_DELAY_MS = 10_000;
+
+/** Codes worth another provider attempt; everything else fails closed. */
+const RETRYABLE_CODES = new Set([
+  "RATE_LIMIT",
+  "SERVER",
+  "TIMEOUT",
+  "EMPTY_RESPONSE",
+  "STREAM_CLOSED",
+  "MALFORMED_RESPONSE",
+  "UNKNOWN",
+  "llm-failed",
+  "timeout",
+  "empty-response",
+  "stream-closed",
+]);
 
 const SYSTEM_PROMPT = [
   "你是任务看板研判引擎。输入是一段 DSH（AI 编程助手）会话的紧凑摘要，输出任务卡 JSON。",
-  "只输出一个 JSON 对象，不要 markdown，不要解释。结构：",
+  "只输出一个 JSON 对象，不要 markdown 代码块，不要解释，不要任何 JSON 之外的文字。结构：",
   '{ "sessionSummary":"≤60字", "ignore":false,',
   '  "tasks":[ { "title":"≤40字 动词开头", "goal":"≤100字 目标/完成标准",',
   '    "status":"backlog|in_progress|blocked|done", "progress":0, "priority":"P0|P1|P2|P3",',
@@ -44,28 +66,12 @@ const SYSTEM_PROMPT = [
   "8. 没有明确用户委托时 ignore=true、tasks=[]。输出必须紧凑完整，确保 JSON 闭合。",
 ].join("\n");
 
-/** Read the DeepSeek account token. Never log the returned value. */
-export function readAccountToken(dshHome) {
-  const file = path.join(dshHome, CREDENTIALS_FILE);
-  let text;
-  try {
-    text = fs.readFileSync(file, "utf8");
-  } catch {
-    return null;
-  }
-  const marker = text.match(TOKEN_PATTERN);
-  if (!marker || marker.index === undefined) return null;
-  const rest = text.slice(marker.index + marker[0].length);
-  // Stop at the next top-level (2-space indented) record key.
-  const block = rest.split(/\n(?= {2}\S[^\n]*:)/)[0];
-  const tokenMatch = block.match(/\n[ \t]+token:[ \t]*["']?([^\s"']+)["']?/);
-  return tokenMatch ? tokenMatch[1] : null;
-}
+const POLISH_SYSTEM_PROMPT =
+  "你是提示词润色助手。把用户给出的「继续任务」提示词改写得更清晰、可执行：保留原意与所有事实，补充验收标准与汇报要求，不要添加新需求，不要解释，只输出润色后的提示词正文（≤600字）。";
 
 /**
- * Some deepseek-flash outputs contain a malformed evidence field like
- * `"seq=917"` instead of `"seq": 917`, or trailing commas. Repair those before
- * giving up on a response.
+ * Some model outputs contain a malformed evidence field like `"seq=917"`
+ * instead of `"seq": 917`, or trailing commas. Repair those before giving up.
  */
 function repairModelJson(text) {
   return String(text || "")
@@ -118,6 +124,7 @@ export function extractJsonObject(text) {
   return null;
 }
 
+/** Validate the task payload shape without trusting model output. */
 function validatePayload(data) {
   if (!data || typeof data !== "object") return { error: "not-an-object" };
   let tasks = [];
@@ -133,280 +140,226 @@ function validatePayload(data) {
   };
 }
 
-function buildMessages(digest, existingTasks, model) {
+/** Build the user-visible part of an analysis request. */
+export function buildUserText(digest, existingTasks) {
   const relevant = Array.isArray(existingTasks) ? existingTasks.slice(0, 3) : [];
   const taskLines = relevant.length
     ? relevant.map((task) => `- ${task.id}「${String(task.title || "").slice(0, 30)}」${task.status}`).join("\n")
     : "(无)";
-  return [
-    { role: "system", content: SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: `模型:${model}\n\n会话摘要：\n${digest}\n\n已有相关任务：\n${taskLines}\n\n输出 JSON。`,
-    },
-  ];
+  return `会话摘要：\n${digest}\n\n已有相关任务：\n${taskLines}\n\n输出 JSON。`;
 }
 
-export function createLlmAnalyzer({ dshHome, logger } = {}) {
-  if (!dshHome) throw new Error("createLlmAnalyzer requires dshHome");
-  const log = logger || console;
-  let credential = { token: null, mtimeMs: -1, checkedAt: 0 };
-  let inflight = 0;
-  const waiters = [];
-  let budget = { limit: 40, calls: 0, tokens: 0 };
+/** Map DSH TokenUsage onto the three fields the board stores. */
+function normalizeUsage(usage) {
+  const input = Number(usage?.inputTokens) || 0;
+  const output = Number(usage?.outputTokens) || 0;
+  const total = Number.isFinite(Number(usage?.totalTokens)) ? Number(usage.totalTokens) : input + output;
+  return {
+    promptTokens: input,
+    completionTokens: output,
+    totalTokens: Math.max(0, total),
+  };
+}
 
-  function getToken({ force = false } = {}) {
-    const file = path.join(dshHome, CREDENTIALS_FILE);
-    let stat = null;
-    try {
-      stat = fs.statSync(file);
-    } catch {
-      credential = { token: null, mtimeMs: -1, checkedAt: Date.now() };
-      return null;
-    }
-    const stale = force || Date.now() - credential.checkedAt > 5 * 60_000 || stat.mtimeMs !== credential.mtimeMs;
-    if (stale) {
-      credential = { token: readAccountToken(dshHome), mtimeMs: stat.mtimeMs, checkedAt: Date.now() };
-    }
-    return credential.token;
-  }
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
+}
 
-  async function acquire(signal) {
-    if (inflight < MAX_CONCURRENCY) {
-      inflight += 1;
-      return;
-    }
-    await new Promise((resolve, reject) => {
-      const waiter = { resolve, reject };
-      waiters.push(waiter);
-      if (signal) {
-        signal.addEventListener(
-          "abort",
-          () => {
-            const index = waiters.indexOf(waiter);
-            if (index >= 0) waiters.splice(index, 1);
-            reject(Object.assign(new Error("aborted"), { code: "aborted" }));
-          },
-          { once: true },
-        );
-      }
+/**
+ * Prepare one call, picking the model's least reasoning effort and a sane
+ * output cap. Falls back to a plain stream when the adapter has no prepareCall.
+ */
+async function prepareCall({ llm, provider, model, signal, maxTokens = MAX_OUTPUT_TOKENS }) {
+  if (typeof llm.prepareCall !== "function") return null;
+  try {
+    const call = await llm.prepareCall({ provider, model }, signal, (controls, modelInfo) => {
+      const effort = modelInfo?.reasoning?.efforts?.[0]?.id;
+      const modelDefault = Number(modelInfo?.defaultMaxTokens);
+      const cap = Number.isFinite(modelDefault) && modelDefault > 0 ? Math.min(maxTokens, modelDefault) : maxTokens;
+      const next = { ...controls, maxTokens: cap };
+      return effort === undefined ? next : { ...next, reasoningEffort: effort };
     });
-    inflight += 1;
+    return call && typeof call.stream === "function" ? call : null;
+  } catch {
+    return null;
   }
+}
 
-  function release() {
-    inflight = Math.max(0, inflight - 1);
-    const waiter = waiters.shift();
-    if (waiter) waiter.resolve();
-  }
-
-  async function requestOnce({ model, messages, token, signal, jsonMode, maxTokens = MAX_OUTPUT_TOKENS }) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(Object.assign(new Error("llm-timeout"), { code: "timeout" })), TIMEOUT_MS);
-    const onAbort = () => controller.abort(Object.assign(new Error("aborted"), { code: "aborted" }));
-    if (signal) {
-      if (signal.aborted) {
-        clearTimeout(timer);
-        throw Object.assign(new Error("aborted"), { code: "aborted" });
-      }
-      signal.addEventListener("abort", onAbort, { once: true });
+/**
+ * One provider attempt: accumulate text deltas, capture usage and the terminal
+ * finish. Never throws for provider outcomes — they become `{ok:false, code}`.
+ */
+async function streamOnce({ llm, provider, model, system, messages, signal, maxTokens = MAX_OUTPUT_TOKENS }) {
+  if (signal?.aborted) return { ok: false, code: "aborted" };
+  const controller = new AbortController();
+  let timedOut = false;
+  const onOuterAbort = () => controller.abort();
+  signal?.addEventListener("abort", onOuterAbort, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, TIMEOUT_MS);
+  if (typeof timer.unref === "function") timer.unref();
+  let text = "";
+  let usage = null;
+  let finish = null;
+  let thrown = null;
+  try {
+    const call = await prepareCall({ llm, provider, model, signal: controller.signal, maxTokens });
+    const config = call ? { ...call.config } : { provider, model, maxTokens };
+    const options = { ...config, messages, system, signal: controller.signal };
+    const iterable = call ? call.stream(options) : llm.stream(options);
+    for await (const chunk of iterable) {
+      if (!chunk || typeof chunk !== "object") continue;
+      if (chunk.type === "text-delta") text += chunk.text;
+      else if (chunk.type === "usage") usage = normalizeUsage(chunk.usage);
+      else if (chunk.type === "finish") finish = chunk.reason;
     }
-    const body = {
-      model,
-      messages,
-      temperature: 0,
-      max_tokens: maxTokens,
-      stream: false,
+  } catch (error) {
+    thrown = error;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onOuterAbort);
+  }
+  if (signal?.aborted) return { ok: false, code: "aborted" };
+  if (timedOut) return { ok: false, code: "timeout", message: `LLM timed out after ${TIMEOUT_MS}ms` };
+  if (thrown) return { ok: false, code: "llm-failed", message: String(thrown?.message || thrown) };
+  if (!finish) return { ok: false, code: "stream-closed", message: "LLM stream ended without a terminal finish" };
+  if (finish.kind === "aborted") return { ok: false, code: "aborted" };
+  if (finish.kind === "error") {
+    const providerCode = String(finish.failure?.code || "UNKNOWN");
+    return {
+      ok: false,
+      code: providerCode,
+      providerCode,
+      message: String(finish.failure?.message || providerCode),
+      retryAfterMs: Number(finish.failure?.providerRetryAfterMs) || 0,
     };
-    if (jsonMode) body.response_format = { type: "json_object" };
-    try {
-      const response = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-dsh-auth-token": token,
-          accept: "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        const error = new Error(`http-${response.status}`);
-        error.status = response.status;
-        error.body = text.slice(0, 300);
-        throw error;
-      }
-      let payload;
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        throw Object.assign(new Error("invalid-json-response"), { body: text.slice(0, 200) });
-      }
-      const content = payload?.choices?.[0]?.message?.content;
-      if (typeof content !== "string" || !content.trim()) {
-        throw Object.assign(new Error("empty-content"), { usage: payload?.usage || null });
-      }
-      return { content, usage: payload?.usage || null, model: payload?.model || model };
-    } finally {
-      clearTimeout(timer);
-      if (signal) signal.removeEventListener("abort", onAbort);
-    }
+  }
+  if (finish.kind === "max-tokens") return { ok: false, code: "truncated", message: "output truncated by maxTokens" };
+  if (finish.kind === "tool-calls") return { ok: false, code: "tool-calls", message: "unexpected tool call" };
+  if (!text.trim()) return { ok: false, code: "empty-response", message: "provider returned empty content" };
+  return { ok: true, text, usage: usage || normalizeUsage(null) };
+}
+
+/**
+ * Create the board's LLM analyzer bound to the host context.
+ * @param {object} options
+ * @param {object} options.ctx Cordis host context (may expose `llm` / `logger`).
+ * @param {object} [options.logger] logger override (tests).
+ */
+export function createLlmAnalyzer({ ctx, logger } = {}) {
+  const log = logger || ctx?.logger || console;
+  let budget = { limit: 40, calls: 0, attempts: 0, tokens: 0 };
+
+  /** @returns {boolean} whether the host composition exposes `ctx.llm`. */
+  function hasService() {
+    return Boolean(llmOf(ctx));
   }
 
   /**
    * Analyze one session digest.
-   *
    * @returns {Promise<{ok:true, tasks:Array<object>, sessionSummary:string, ignore:boolean,
-   *                    usage:{promptTokens:number, completionTokens:number, totalTokens:number}, model:string}
-   *                 | {ok:false, error:string, code:string}>}
+   *   usage:{promptTokens:number, completionTokens:number, totalTokens:number},
+   *   model:string, provider:string} | {ok:false, error:string, code:string}>}
    */
-  async function analyze({ digest, existingTasks, model = DEFAULT_MODEL, signal } = {}) {
-    const token = getToken();
-    if (!token) return { ok: false, error: "no-credential", code: "no-credential" };
+  async function analyze({ provider, model, digest, existingTasks, signal } = {}) {
+    const llm = llmOf(ctx);
+    if (!llm) return { ok: false, error: "llm service unavailable", code: "llm-unavailable" };
+    if (!provider || !model) return { ok: false, error: "provider and model are required", code: "no-route" };
     if (budget.calls >= budget.limit) return { ok: false, error: "scan-call-budget-exhausted", code: "budget" };
 
-    const messages = buildMessages(digest, existingTasks, model);
+    const messages = [{ role: "user", content: [{ type: "text", text: buildUserText(digest, existingTasks) }] }];
     const correctionMessage = {
       role: "user",
-      content:
-        "注意：你上一次的输出不是合法 JSON（例如把 evidence 的 seq 写成了 \"seq=917\"）。请严格输出一个完整闭合的 JSON 对象；evidence 必须是 {\"seq\": 数字, \"kind\": \"...\", \"quote\": \"...\"}。",
+      content: [
+        {
+          type: "text",
+          text: '注意：你上一次的输出不是合法 JSON（例如把 evidence 的 seq 写成了 "seq=917"）。请严格输出一个完整闭合的 JSON 对象；evidence 必须是 {"seq": 数字, "kind": "...", "quote": "..."}。不要输出 markdown 代码块。',
+        },
+      ],
     };
     let lastExtractFailed = false;
-    budget.calls += 1;
     let lastError = null;
-    let forcedRefresh = false;
+    budget.calls += 1;
     try {
-      await acquire(signal);
-    } catch (error) {
-      return { ok: false, error: String(error?.message || error), code: "aborted" };
-    }
-    try {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const jsonMode = attempt === 0;
-        try {
-          const attemptMessages = lastExtractFailed ? [...messages, correctionMessage] : messages;
-          const response = await requestOnce({ model, messages: attemptMessages, token: getToken({ force: forcedRefresh }), signal, jsonMode });
-          const parsed = extractJsonObject(response.content);
-          if (!parsed) {
-            lastExtractFailed = true;
-            lastError = Object.assign(new Error("json-extract-failed"), { code: "json", raw: response.content.slice(0, 200) });
-            continue;
-          }
-          const validated = validatePayload(parsed);
-          if (validated.error) {
-            lastError = Object.assign(new Error(validated.error), { code: "schema" });
-            continue;
-          }
-          const usage = response.usage || {};
-          budget.tokens += Number(usage.total_tokens) || 0;
-          return {
-            ok: true,
-            ...validated.data,
-            usage: {
-              promptTokens: Number(usage.prompt_tokens) || 0,
-              completionTokens: Number(usage.completion_tokens) || 0,
-              totalTokens: Number(usage.total_tokens) || 0,
-            },
-            model: response.model,
-          };
-        } catch (error) {
-          lastError = error;
-          if (error?.code === "aborted" || signal?.aborted) {
-            return { ok: false, error: "aborted", code: "aborted" };
-          }
-          // Invalid/unsupported response_format: retry once without JSON mode.
-          if (error?.status === 400 && /response_format|json/i.test(String(error.body || "")) && jsonMode) {
-            lastError = Object.assign(new Error("json-mode-unsupported"), { code: "json-mode" });
-            continue;
-          }
-          if (error?.status === 401 || error?.status === 403) {
-            forcedRefresh = true;
-            getToken({ force: true });
-          }
-          // Retry only transient failures (network/timeout/429/5xx); also retry
-          // once when JSON extraction failed.
-          const transient =
-            !error?.status || error?.code === "timeout" || error.status === 429 || (error.status >= 500 && error.status < 600);
-          if (transient && attempt < 2) {
-            const delay = error?.status === 429 || /rate/i.test(String(error?.body || error?.message || "")) ? 3000 : 800;
-            await new Promise((resolve) => setTimeout(resolve, delay));
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        const attemptMessages = lastExtractFailed ? [...messages, correctionMessage] : messages;
+        const outcome = await streamOnce({ llm, provider, model, system: SYSTEM_PROMPT, messages: attemptMessages, signal });
+        budget.attempts += 1;
+        if (!outcome.ok) {
+          lastError = { code: outcome.code, error: outcome.message || outcome.code };
+          if (outcome.code === "aborted") return { ok: false, error: "aborted", code: "aborted" };
+          if (outcome.code === "truncated" || outcome.code === "tool-calls") break;
+          const retryable = RETRYABLE_CODES.has(outcome.code);
+          if (retryable && attempt < MAX_ATTEMPTS - 1) {
+            const delay = Number(outcome.retryAfterMs) > 0 ? Math.min(Number(outcome.retryAfterMs), MAX_RETRY_DELAY_MS) : 800 * (attempt + 1);
+            await sleep(delay);
             continue;
           }
           break;
         }
+        budget.tokens += outcome.usage.totalTokens;
+        const parsed = extractJsonObject(outcome.text);
+        if (!parsed) {
+          lastExtractFailed = true;
+          lastError = { code: "json", error: "json-extract-failed" };
+          continue;
+        }
+        const validated = validatePayload(parsed);
+        if (validated.error) {
+          lastError = { code: "schema", error: validated.error };
+          continue;
+        }
+        return { ok: true, ...validated.data, usage: outcome.usage, model, provider };
       }
-      return {
-        ok: false,
-        error: String(lastError?.message || lastError || "llm-failed"),
-        code: lastError?.code || "llm-failed",
-      };
+      return { ok: false, error: lastError?.error || "llm-failed", code: lastError?.code || "llm-failed" };
     } finally {
-      release();
+      /* budget bookkeeping happens above; nothing to release */
     }
   }
 
   /**
    * Optional one-shot prompt polish (task.polishPrompt). Counts against the
-   * same AI budget; returns ok:false instead of throwing when unavailable.
+   * same budget and returns ok:false instead of throwing when unavailable.
    */
-  async function polish({ prompt, model = DEFAULT_MODEL, signal } = {}) {
+  async function polish({ provider, model, prompt, signal } = {}) {
     const text = typeof prompt === "string" ? prompt.trim() : "";
     if (!text) return { ok: false, error: "prompt-required", code: "invalid-input" };
-    if (!getToken()) return { ok: false, error: "no-credential", code: "no-credential" };
+    const llm = llmOf(ctx);
+    if (!llm) return { ok: false, error: "llm service unavailable", code: "llm-unavailable" };
+    if (!provider || !model) return { ok: false, error: "provider and model are required", code: "no-route" };
     if (budget.calls >= budget.limit) return { ok: false, error: "call-budget-exhausted", code: "budget" };
     budget.calls += 1;
-    try {
-      await acquire(signal);
-    } catch (error) {
-      return { ok: false, error: String(error?.message || error), code: "aborted" };
-    }
-    try {
-      const messages = [
-        {
-          role: "system",
-          content:
-            "你是提示词润色助手。把用户给出的「继续任务」提示词改写得更清晰、可执行：保留原意与所有事实，补充验收标准与汇报要求，不要添加新需求，不要解释，只输出润色后的提示词正文（≤600字）。",
-        },
-        { role: "user", content: text.slice(0, 3000) },
-      ];
-      const response = await requestOnce({ model, messages, token: getToken(), signal, jsonMode: false, maxTokens: 800 });
-      const usage = response.usage || {};
-      budget.tokens += Number(usage.total_tokens) || 0;
-      return {
-        ok: true,
-        prompt: String(response.content || "").trim().slice(0, 2000),
-        usage: {
-          promptTokens: Number(usage.prompt_tokens) || 0,
-          completionTokens: Number(usage.completion_tokens) || 0,
-          totalTokens: Number(usage.total_tokens) || 0,
-        },
-        model: response.model,
-      };
-    } catch (error) {
-      if (signal?.aborted) return { ok: false, error: "aborted", code: "aborted" };
-      return { ok: false, error: String(error?.message || error), code: "llm-failed" };
-    } finally {
-      release();
-    }
+    const outcome = await streamOnce({
+      llm,
+      provider,
+      model,
+      system: POLISH_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: [{ type: "text", text: text.slice(0, 3000) }] }],
+      signal,
+      maxTokens: POLISH_OUTPUT_TOKENS,
+    });
+    budget.attempts += 1;
+    if (!outcome.ok) return { ok: false, error: outcome.message || outcome.code, code: outcome.code };
+    budget.tokens += outcome.usage.totalTokens;
+    const polished = outcome.text.trim().slice(0, 2000);
+    if (!polished) return { ok: false, error: "empty-response", code: "empty-response" };
+    return { ok: true, prompt: polished, usage: outcome.usage, model, provider };
   }
 
   return {
     analyze,
     polish,
-    hasCredential: () => Boolean(getToken()),
-    invalidateCredential: () => {
-      credential = { token: null, mtimeMs: -1, checkedAt: 0 };
-    },
+    hasService,
     resetBudget: (limit = 40) => {
-      budget = { limit: Math.max(0, Math.round(limit)), calls: 0, tokens: 0 };
+      budget = { limit: Math.max(0, Math.round(Number(limit) || 0)), calls: 0, attempts: 0, tokens: 0 };
     },
     getBudget: () => ({ ...budget }),
-    addTokens: (count) => {
-      budget.tokens += Math.max(0, Number(count) || 0);
-    },
-    defaultModel: DEFAULT_MODEL,
-    apiUrl: API_URL,
     log,
   };
 }
+
+export { SYSTEM_PROMPT, POLISH_SYSTEM_PROMPT, TIMEOUT_MS, MAX_OUTPUT_TOKENS };

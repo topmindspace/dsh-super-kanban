@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-08
+
 ### Added
+
+- **AI analysis through the DSH native model service**: analysis requests now go
+  through DSH's `llm` service instead of the plugin's built-in DeepSeek API
+  client. Model catalogue, default model, third-party providers and credentials
+  are all managed by DSH; the plugin no longer reads `.credentials.yaml` or
+  hard-codes a model endpoint, and old DSH builds without the service fall back
+  to the rules engine with an explicit scan message.
+- **AI model selection**: new board settings `aiProvider`/`aiModel` (empty =
+  follow the DSH default model, which is a live reference), an “AI 研判模型”
+  block in the settings dialog with a native grouped select and a refresh
+  button, and support for models configured in **DSH Settings → Models**
+  (catalogue providers or custom OpenAI/Anthropic-compatible endpoints), which
+  become selectable without restarting the board.
+- **Model catalogue endpoint** `GET /super-kanban/api/ai/models` (flat
+  `{ok, catalogAvailable, default, providers, models, failures, fetchedAt}`,
+  owner-only, 30s host cache, per-provider failure isolation) and
+  `task.ai.provider` for the drawer (“provider / model”; rules results now carry
+  `model:""`, `provider:null`).
+- **Automatic AI budget**: new `settings.aiBudgetMode` (`"auto"` default =
+  min(sessions due this scan, daily remainder) or `"fixed"`); the per-scan limit
+  `maxAiCallsPerScan` can now be set up to **150** (5–150, fixed mode only), the
+  daily limit stays 150 budget units, and a 10-minute AI-phase wall clock plus a
+  5-minute per-session failure cooldown keep long scans bounded.
+- **Budget observability and continuation**: new optional scan fields
+  `aiDue/aiBudget/aiAttempts/aiPending/aiDeferredReason`; scans prioritise
+  never-analysed sessions, then changed, then most recently active; messages
+  such as “剩余 N 个会话下次扫描继续” / “今日 AI 预算已用完（150/150）· 剩余 N 个会话明日继续”
+  explain deferred work, and the settings page shows used/limit/remaining,
+  tokens and the last scan.
 
 - **Task-level AI review and re-analysis**: the drawer shows an “AI 研判 / 规则推断”
   block (engine, model, confidence, last-analysis time, one-line reason) and a
@@ -45,6 +76,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **AI budget default behaviour change**: upgrading from 0.4.x switches the AI
+  budget from a fixed 40 calls to “auto” (up to the daily remainder). The daily
+  limit (150), the local-day rollover and the rules-engine fallback are
+  unchanged; pick “固定 40 次” in settings to restore the old behaviour.
+- **Analysis results record the provider**: the drawer shows provider / model
+  for new analyses; `task.ai.model` is empty and `task.ai.provider` is `null`
+  for rules results (the rules engine no longer copies the deprecated
+  `settings.model`). Existing tasks are not rewritten and keep rendering with
+  the model they show today.
+- **Old clients stay compatible**: a `settings.update` that only sends
+  `maxAiCallsPerScan` without `aiBudgetMode` is treated as `"fixed"` for that
+  update, while loading an old `state.json` still defaults to `"auto"`.
+- `settings.model` is deprecated and no longer used for analysis; it is kept
+  only for old-state / old-client compatibility and will be removed in v0.6.
+- README (zh/en), SECURITY, CONTRACT, ARCHITECTURE, DESIGN, INSTALL, MARKET and
+  TROUBLESHOOTING now describe the DSH-native model path, third-party data
+  recipients, the new budget semantics and the 0.5 upgrade notes.
 - Text limits are now a single source of truth (`TEXT_LIMITS` in
   `server/store.mjs`): title 80, goal 280, tags 4×12, subtasks 12×60,
   issues/next steps 5×160, milestones 20×120, key facts 6×60, evidence 8
@@ -71,6 +119,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The budget-exhausted scan message no longer reports pre-scan “used/limit”
+  numbers (it could show e.g. 23/24 while the scan had actually used 24/24);
+  all counters in the scan message are now post-scan.
+- A failed analysis no longer leaves the session to be retried on every scan:
+  failures write `llmError`/`aiErrorAt` and honour the 5-minute cooldown, while
+  a cancelled scan no longer records a failure.
+- `task.analyze` now counts analyses that decide “no card needed” (ignore/empty)
+  against the budget and reports the consumption honestly.
+- The “budget used up” flag is now set for mixed success/failure batches too, so
+  the scan message no longer silently omits that the budget ran out.
 - Clicking “锁定字段” in the task drawer no longer throws (`EDITABLE_FIELDS` was
   referenced but never defined).
 - Scan finalization can no longer leave the scan mutex locked (and emit an
@@ -93,6 +151,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/release.mjs` regenerates the market index before running checks.
 - The new-task dialog no longer claims sessions can be linked from the drawer
   (relinking is a documented roadmap item).
+
+### Security
+
+- **Third-party model disclosure**: the compressed session digest (≤1.5KB per
+  session, including session excerpts) is sent to the model provider selected
+  through DSH; explicitly choosing a third-party provider sends it to that
+  provider. The settings dialog, README and SECURITY document this, and the
+  previous “nothing is sent to third-party servers” wording has been removed.
+- **Credential handling moved to DSH**: the plugin no longer reads or parses
+  `.credentials.yaml`, no longer holds a DeepSeek token and no longer
+  hard-codes an API endpoint; requests go through DSH's native model service
+  and its credentials seam, so the plugin never sees provider credentials.
+- **No session-log upload**: analysis requests do not pass a `sessionId`, so
+  DSH's official session-log extension is not attached to model requests.
 
 ## [0.4.1] - 2026-11-05
 
@@ -193,7 +265,8 @@ workspace into a maintainable task board.
   with the local DSH account token; tokens are never logged or persisted by the
   plugin. See [SECURITY.md](./SECURITY.md).
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.5.0...HEAD
 [0.3.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.3.0
 [0.4.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.0
 [0.4.1]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.4.1
+[0.5.0]: https://github.com/topmindspace/dsh-super-kanban/releases/tag/v0.5.0

@@ -10,10 +10,13 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 │                ├─ sessions.mjs   只读扫描      ├─ 全页主面板（main slot）     │
 │                ├─ analyzer-rules.mjs           ├─ 侧边栏入口                 │
 │                ├─ analyzer-llm.mjs             ├─ 右侧栏 tab 类型            │
-│                └─ store.mjs      本机持久化    ├─ 会话头部快捷入口            │
+│                ├─ native-llm.mjs  DSH 模型服务 ├─ 会话头部快捷入口            │
+│                └─ store.mjs      本机持久化    │                             │
 │                         ▲                     │                             │
 │                         │  HTTP /super-kanban/api（owner 鉴权）              │
 │                         └─────────────────────┘                             │
+│                                                                            │
+│  DSH 原生 LLM 服务（ctx.llm）──► 用户配置的模型提供方（官方账号 / API Key / 第三方）│
 │                                                                            │
 │  数据源（只读）：~/.dsh/storages/workspace.json                              │
 │                  ~/.dsh/sessions/<project>/<session>/session.v4.jsonl.zstd  │
@@ -26,7 +29,10 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 - **零构建、零第三方依赖**：host 与 browser 都是手写 ESM/CJS，直接随包分发。
 - **浏览器半边只通过 HTTP API 访问 host**：不直接读文件系统，不做跨源请求。
 - **分析永远可降级**：规则引擎是基线，LLM 只是增强；任何 LLM 失败都不影响看板。
-- **本机优先**：只有压缩摘要（可选）会离开本机。
+- **模型由 DSH 提供**：AI 研判不直连任何模型端点，统一经 DSH 原生 LLM 服务（`ctx.llm`）发起；
+  模型目录、默认模型、第三方 provider 与凭证全部由 DSH 管理，看板只做「目录消费者」。
+- **本机优先**：只有压缩会话摘要（可选）会离开本机；请求发送给「你在 DSH 中配置的模型服务商」，
+  选择第三方模型时摘要会发给该第三方。
 
 ## 仓库结构
 
@@ -34,10 +40,11 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | --- | --- |
 | `index.mjs` | Host 入口：挂载 `/super-kanban/api` 前缀路由，校验 owner 身份，启动/停止服务 |
 | `client.js` | 浏览器半边：单文件 bundle，注册面板 / 入口 / 右侧栏 tab / 会话头部按钮 |
-| `server/service.mjs` | 服务主体：路由分发、状态编排、扫描调度、命令处理、SSE 广播 |
+| `server/service.mjs` | 服务主体：路由分发、状态编排、扫描调度、模型解析、命令处理、SSE 广播 |
 | `server/sessions.mjs` | 会话扫描与解析：发现、zstd 解压、事件解析、摘要 / 证据 / 子任务 / 产物提取 |
 | `server/analyzer-rules.mjs` | 本地规则引擎：从解析结果推导任务、状态、进度、问题、优先级 |
-| `server/analyzer-llm.mjs` | 可选 LLM 引擎：调用 DeepSeek 推理接口，预算控制、JSON 解析、降级 |
+| `server/native-llm.mjs` | 通过 `ctx.get("llm")` 惰性获取 DSH 原生 LLM 服务（不 import `@deepseek-ai/*`，服务缺失返回 undefined） |
+| `server/analyzer-llm.mjs` | 可选 LLM 引擎：经 DSH 原生 LLM 服务发起请求，流累积、usage 映射、JSON 修复、预算控制、超时与降级 |
 | `server/store.mjs` | 持久化：`state.json` / `sessions-cache.json`，原子写、裁剪、版本迁移、损坏恢复 |
 | `server/auth.mjs` | owner 鉴权决策表：归一化 `connection.admit()` 结果，异常/畸形输入一律 fail-closed 403 |
 | `server/http.mjs` | HTTP 公共设施：JSON 响应、受控请求体读取、错误分类、id / 载荷校验 |
@@ -87,7 +94,8 @@ buildV2Context()               keyFacts / subtasks / artifacts / sessionContext 
    │
    ▼
 LLM 门控（可选）                 meaningful-change 门控 + 单次/每日预算
-   │                           → buildDigest() ≤1.5KB → DeepSeek API
+   │                           → resolveAiRoute()：settings → DSH 默认 → 目录首模型
+   │                           → buildDigest() ≤1.5KB → DSH 原生 LLM 服务（ctx.llm）
    ▼
 合并进看板                     会话锚点稳定 ID；用户锁定字段不覆盖；写历史
    │
@@ -99,8 +107,15 @@ store.saveState()              原子写（tmp + rename）；扫描进度经 SSE
 
 - **会话锚点**：自动任务以 `primarySessionId` 为种子生成稳定 ID，重复扫描不会重复建卡。
 - **增量门控**：仅在「用户消息数增加、上一轮 turn 已结束、首次分析、手动重新研判」时调用模型；活跃 turn 内不重复分析；同一会话有最小间隔。
-- **预算**：单次扫描 AI 调用上限、每日上限（设置可调），超限自动降级规则引擎并在扫描消息中提示；
-  每日计数按**用户本地日历日**滚动（`todayKey`），不是 UTC 日。
+- **模型解析**：每次扫描 / 单卡重判 / 润色前解析一次（`settings.aiProvider/aiModel` → DSH 默认模型 → 目录首模型兜底）。
+  显式或默认 provider 不可用时不自动换模型，直接规则降级并在扫描结论说明；无 `ctx.llm` 的旧 DSH 同样规则降级。
+  请求不传 `sessionId`、不传 tools / 图片。
+- **预算**：单次预算按 `aiBudgetMode` 解析（`auto` = min(待研判会话, 每日剩余)；`fixed` = min(单次上限 5–150, 每日剩余)）；
+  每日计数按**用户本地日历日**滚动（`todayKey`），不是 UTC 日。AI 阶段有 10 分钟墙钟护栏；
+  超预算 / 到点 / 每日耗尽的剩余会话降级规则引擎并保留到下次扫描继续，失败会话有 5 分钟冷却。
+  任务优先级：从未 AI 研判的欠账 > 本轮有变化 > 最近活跃 > 会话 id 兜底（确定性）。
+- **模型目录**：`GET /ai/models` 读取 `listProviders()` + 逐 provider `listModels()`，Host 侧 30s 缓存 + 目录事件失效；
+  单个 provider 失败只记入 `failures[]`，不影响扫描。
 - **用户工作优先（trust rule）**：AI/规则判定 `done` 但仍有未完成的 `source:"manual"` 子任务、或
   `lockedFields` 含 `subtasks` 的未完成清单时，状态降级为 `in_progress` 并写历史说明；锁定的 `status` 优先；
   `done` 时生成类子任务自动勾选，手动子任务不动；用户取消勾选会让卡回到 `in_progress`。
@@ -111,10 +126,13 @@ store.saveState()              原子写（tmp + rename）；扫描进度经 SSE
 
 | 引擎 | 输入 | 输出 | 何时使用 |
 | --- | --- | --- | --- |
-| 规则（`analyzer-rules.mjs`） | 本地解析结果 | 任务标题 / 目标 / 状态 / 进度 / 问题 / 证据（启发式） | 默认基线；关闭 AI、未登录、网络失败、超预算时 |
-| LLM（`analyzer-llm.mjs`） | 压缩摘要 digest + 已有任务上下文 | 结构化 JSON（任务、状态、进度、问题、关键事实、置信度、理由、merge 建议） | AI 开启且凭证可用、预算内、门控通过时 |
+| 规则（`analyzer-rules.mjs`） | 本地解析结果 | 任务标题 / 目标 / 状态 / 进度 / 问题 / 证据（启发式） | 默认基线；关闭 AI、无 DSH 模型服务、模型不可用、超预算时 |
+| LLM（`analyzer-llm.mjs`，经 `native-llm.mjs`） | 压缩摘要 digest + 已有任务上下文 + 解析出的 provider/model | 结构化 JSON（任务、状态、进度、问题、关键事实、置信度、理由、merge 建议） | AI 开启、解析出可用 route、预算内、门控通过时 |
 
-LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读取，**不打印、不外发**），默认模型 `deepseek-flash`。调用失败（网络 / 鉴权 / 解析）会重试一次后降级规则引擎。
+LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直连模型端点、不读取 `.credentials.yaml`、不保存凭证；
+模型与 provider 来自看板设置（默认跟随 DSH 默认模型），第三方模型在「DSH 设置 → 模型」中配置。
+调用失败（网络 / 鉴权 / 限流 / 非法 JSON）会按错误码重试（≤3 attempt）后降级规则引擎并写入失败冷却。
+实际使用的 provider/model 记录到 `task.ai`。
 
 ### 持久化（`store.mjs`）
 
@@ -133,7 +151,8 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 
 | 路由 | 作用 |
 | --- | --- |
-| `GET /state` | 看板快照：任务、统计、工作区、扫描状态、设置、用量 |
+| `GET /state` | 看板快照：任务、统计、工作区、扫描状态（含 AI 预算观测字段）、设置、用量 |
+| `GET /ai/models` | AI 模型目录（DSH 原生 LLM 服务；只读，30s 缓存，provider 失败隔离） |
 | `POST /command` | 任务 / 设置 / 扫描等操作（`task.*`、`settings.update`、`scan.*` 等） |
 | `GET /session/:id` | 单会话事件时间线（证据跳转用） |
 | `GET /export` | 导出完整看板 JSON |
@@ -158,8 +177,12 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 
 - 首屏拉取 `/state`，之后每 4 秒轮询（页面隐藏时暂停）；扫描中加快刷新；SSE 可用时优先使用。
 - 所有写操作走 `POST /command`：界面先乐观更新，失败回滚并 toast。
-- 抽屉展示 `task.ai`（引擎 / 模型 / 置信度 / 时间 / 理由）；来源会话在研判后又有新活动
-  （`lastActivityAt > analyzedAt + 5 分钟`）才提示「可能已过期」；「重新研判」调用
+- 设置弹窗的「AI 研判模型」在打开时读取 `GET /ai/models`（客户端 30s 内存缓存 + 超时保护），原生 `<select>`
+  按 provider 分组、首项「跟随 DSH 默认」；只读目录，不保存凭证、不提供 API Key / baseURL 表单。
+- 设置弹窗的预算与用量：单次上限单下拉（自动（推荐）/ 20 / 40 / 80 / 150）、每日上限、今日用量行
+  （已用 / 上限 / 剩余 / tokens / 上次扫描）；页头扫描运行中可显示 `· AI c/预算`。
+- 抽屉展示 `task.ai`（引擎 / 提供方与模型 / 置信度 / 时间 / 理由）；无 `provider` 的旧任务只显示模型；
+  来源会话在研判后又有新活动（`lastActivityAt > analyzedAt + 5 分钟`）才提示「可能已过期」；「重新研判」调用
   `task.analyze`；编辑中的草稿在后台更新后保留并显示提醒。
 - 抽屉、浮层、筛选等纯 UI 状态保存在本地（localStorage / 组件状态），不入库。
 - 深浅色、字体、圆角全部使用 DSH 设计 token，不引入外部字体 / 图片 / 网络资源。
@@ -170,12 +193,15 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 - 按根容器宽度分档：窄（单列 + 状态分段）/ 中 / 宽（四列）。右侧栏可拖宽，拖到全屏时自动切到宽档。
 - 抽屉在页面形态从右侧覆盖，在右侧栏形态则覆盖整个面板。
 
-### 页头与入口（v0.4 实现细节）
+### 页头与入口（v0.5 实现细节）
 
 - 全页看板页头常驻：搜索、扫描、设置齿轮、在右侧栏打开、主按钮「新建」；「⋯」菜单只保留「导出 JSON」。
 - 统计行常驻：状态计数 + 归档数 + 上一次扫描结论（运行中 / 失败+重试 / 完成）；扫描按钮在 AI 关闭时标题为「扫描（仅规则）」。
+- 设置弹窗顺序：AI 开关 → **AI 研判模型** → AI 预算（自动 / 固定单次上限 + 每日上限）→ 今日用量 → 自动扫描 /
+  扫描间隔 / 初始范围 → 显示与入口 → 排除工作区。模型 block 全宽、原生 select + 刷新按钮，无彩色盒子；
+  选中第三方提供方时用安静文字提示「压缩摘要会发送给该模型服务商」。
 - 右侧栏看板页头常驻：扫描、设置、在全页面板打开、新建、「⋯」（仅导出 JSON）；任何宽度都保留工作区筛选。
-- 卡片：完成卡不绘制进度线、归档卡带「已归档」标记；抽屉含 AI 研判块与「⋯」→「重新研判」。
+- 卡片：完成卡不绘制进度线、归档卡带「已归档」标记；抽屉含 AI 研判块（provider / model）与「⋯」→「重新研判」。
 - 页头按钮的排列与图标属于浏览器半的**实现细节**，不在 Host/浏览器契约内；契约只约束注册的 slot / tab / 数据接口（见 [CONTRACT.md](CONTRACT.md)）。
 
 ### 与 DSH 其他服务的联动
@@ -217,10 +243,10 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 | --- | --- |
 | 网络监听 | 只由 DSH 的本地 web server 提供 API；无独立端口、无外部监听 |
 | API 鉴权 | `connection.admit` + owner 身份；非 owner 一律 403 |
-| 出站请求 | 仅 `https://api.deepseek.com`（可选、可关闭、只发摘要） |
-| 遥测 | 无 |
-| 凭证 | 只在本机读取、只用于设置请求头；不写入日志、不随摘要发送 |
-| 已发送内容 | 压缩会话摘要（≤1.5KB/会话）：标题、最近用户请求、最近回复、todo、错误、文件与工具摘要；不含全文、不含文件内容 |
+| 出站请求 | AI 研判经 **DSH 原生 LLM 服务**发出，目标是「你在 DSH 中配置的模型服务商」（官方账号 / API Key / 第三方 provider）；可选、可关闭、只发压缩摘要。看板自身无其它出站请求（无遥测、无更新检查、无远程配置） |
+| 凭证 | 不再由插件读取或保存：凭证由 DSH 的 credentials 机制解析，经 `ctx.llm` 使用；插件日志与导出中不含任何 token |
+| 请求内容 | system prompt + 压缩会话摘要（≤1.5KB/会话）：标题、最近用户请求、最近回复、todo、错误、文件与工具摘要；不含全文、不含文件内容；不传 `sessionId`（不会附带官方会话日志扩展字段）、不传 tools / 图片 |
+| 第三方模型 | 用户选择第三方 provider 时，压缩摘要会发送给该服务商（由用户自行在 DSH 中配置并承担其条款）；设置页与 README / SECURITY 均明确披露 |
 
 ## 扩展点一览
 
@@ -246,11 +272,13 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 
 | 场景 | 行为 |
 | --- | --- |
-| 没有账号 / 网络不可用 | 规则引擎继续工作，看板可用 |
-| LLM 返回非法 JSON | 该会话本次用规则结果，记录日志 |
+| 没有 DSH 模型服务（无 `ctx.llm`） | 规则引擎继续工作，看板可用；扫描结论说明「当前 DSH 未提供 AI 模型服务」 |
+| 模型提供方不可用 / 未配置凭证 / 未登录 | 该会话（或整轮）规则降级 + 明确文案 + 5 分钟失败冷却；不整轮失败、不 5xx |
+| 所选模型已下线 / provider 被删 | 不自动换模型：规则降级并在扫描结论提示重选；模型只是不在目录时先按原 route 尝试 |
+| LLM 返回非法 JSON / 输出截断 | 带纠正消息重试（≤3 attempt）；仍失败则该会话本次用规则结果，记录日志 |
 | 会话日志损坏 / 格式升级 | 跳过该会话并计数，其余会话正常 |
 | 存储文件损坏 | 移到 `backups/`，以空状态重建，看板可继续使用 |
-| 扫描被中断 | 已完成部分保留，扫描状态标记取消 |
+| 扫描被中断 / 取消 | 已完成部分保留，扫描状态标记取消；取消是静默的，不写 `llmError`、不进入失败冷却 |
 | 浏览器服务缺失（如右侧栏不可用） | 相关按钮提示不支持，其余功能正常 |
 
 ## 测试
@@ -259,7 +287,8 @@ LLM 调用使用本机 DSH 账号凭证（从 `$DSH_HOME/.credentials.yaml` 读�
 
 - `store.test.mjs` / `store-robustness.test.mjs`：默认值、裁剪、v1→v2 迁移、损坏文件与畸形 JSON 的自愈；
 - `analyzer.test.mjs`：规则引擎的状态 / 进度 / 问题判断；
-- `analyzer-llm.test.mjs`：LLM 引擎的预算、超时、非法响应与降级；
+- `analyzer-llm.test.mjs`：原生 LLM 引擎的流累积 / usage 映射 / 失败码 / JSON 修复 / 超时与降级（fake `ctx.llm`，不联网）；
+- `ai-budget.test.mjs` / `ai-models.test.mjs`：AI 预算（auto / fixed、优先级、墙钟、冷却、剩余文案）与模型解析、目录端点（fake `ctx`）；
 - `sessions.test.mjs`：会话发现、事件解析、digest 预算、产物 / 子任务提取；
 - `service.test.mjs`：扫描 / 合并 / 命令编排（不启动 DSH）；
 - `http.test.mjs` / `auth.test.mjs`：HTTP 设施与载荷校验 / owner 鉴权 fail-closed；

@@ -109,6 +109,19 @@ test("index exports the plugin name and mounts a prefix route", (t) => {
   assert.equal(typeof captured.registered.handler, "function");
 });
 
+test("owner can read the AI model catalog through the real wiring", async (t) => {
+  const { captured } = setup(t, () => owner);
+  const { status, json } = await callHandler(captured.registered, { url: `${API_PREFIX}/ai/models` });
+  assert.equal(status, 200);
+  assert.equal(json.ok, true);
+  // This fake context has no `llm` service: the endpoint degrades, never throws.
+  assert.equal(json.catalogAvailable, false);
+  assert.equal(json.default, null);
+  assert.deepEqual(json.providers, []);
+  assert.deepEqual(json.models, []);
+  assert.deepEqual(json.failures, []);
+});
+
 test("owner requests are forwarded to the kanban service", async (t) => {
   const { captured } = setup(t, () => owner);
   const ping = await callHandler(captured.registered);

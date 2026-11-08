@@ -9,6 +9,7 @@
 - 浏览器半边是单文件 bundle（无构建），由 DSH 模块加载器加载。
 - 数据目录：`$DSH_HOME/storages/super-kanban/`（`state.json`、`sessions-cache.json`、`backups/`）。
 - 数据源（只读）：`$DSH_HOME/storages/workspace.json`、`$DSH_HOME/sessions/<project>/<session>/session.v4.jsonl.zstd`、`$DSH_HOME/storages/session_projcache/sessions/<session>.json`。
+- AI 研判经 **DSH 原生 LLM 服务**（`ctx.llm`）发起，模型目录 / 默认模型 / 第三方 provider / 凭证全部由 DSH 管理；看板不直连模型端点、不读取凭证文件（模型解析与预算规则见 §5）。
 
 ## 1. 状态与优先级
 
@@ -59,7 +60,8 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   ],
   "ai": {                                // 最近一次智能研判
     "analyzedAt": "2026-11-04T02:00:00.000Z",
-    "model": "deepseek-flash",
+    "model": "deepseek-flash",           // LLM 研判时实际请求的模型；engine:"rules" 时为 ""
+    "provider": "deepseek-account",      // v0.5 新增：LLM 实际使用的提供方 id；rules 时为 null（旧任务可能缺失）
     "confidence": 0.82,
     "reason": "一句话理由",
     "engine": "llm|rules"
@@ -110,6 +112,11 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 - `ai`：AI/规则每次研判都会写入（规则引擎为 `engine:"rules"`）；`confidence` 为 0–1，`analyzedAt` 为研判时间。
   详情抽屉据此展示研判块；当来源会话在研判之后又有新活动——`sessionContext.lastActivityAt`（缺失时取
   `task.lastActivityAt`）晚于 `ai.analyzedAt + 5 分钟`——时提示「可能已过期」，没有新活动时旧研判仍然有效。
+- `ai.provider`（v0.5，additive）：LLM 研判实际使用的 DSH 模型提供方 id（来自 `GET /ai/models` 的 `providers[].id`）；
+  `engine:"rules"` 时恒为 `null`、`ai.model` 恒为 `""`（规则引擎不再用旧 `settings.model` 填充）。
+  旧任务可能没有该字段，客户端按「无 provider」降级展示；下次研判后由 Host 补齐。
+- 旧 `settings.model` 字段已 **deprecated**：仅为旧状态 / 旧客户端兼容保留，**不权威、不用于研判，UI 不再展示**；
+  模型真值来自 `settings.aiProvider/aiModel`（空 = 跟随 DSH 默认模型）。计划在 v0.6 移除。
 - v1 → v2 迁移：`keyFacts ← evidence 前 3`、`subtasks ← milestones`、`artifacts = []`、`sessionContext ← 首个 session`、`evidence` 截断 8 条。
 
 ### 2.1 文本与裁剪上限（Host 单一来源）
@@ -169,22 +176,31 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   "scan": {
     "state": "idle|running|done|error",
     "startedAt": "ISO|null", "finishedAt": "ISO|null",
-    "processed": 7, "total": 10,
+    "processed": 10, "total": 10,
     "newTasks": 0, "updatedTasks": 2, "aiCalls": 3, "tokens": 5120,
-    "message": "扫描完成：10/10 个会话 · AI 3 次/5120 tokens",  // 人类可读结论，见下
+    // v0.5 新增，全部可选 / additive；旧客户端可忽略
+    "aiDue": 5,                              // 本轮需要 AI 研判的会话数
+    "aiBudget": 5,                           // 本次解析后的预算（按 aiBudgetMode）
+    "aiAttempts": 3,                         // 本次实际 provider attempt 次数（含内部重试）
+    "aiPending": 2,                          // 本次未拿到 AI 结论、下次继续的会话数（含失败待重试）
+    "aiDeferredReason": null,                // null|"budget"|"time"|"daily"
+    "message": "扫描完成：10/10 个会话 · AI 3 次/5120 tokens · 剩余 2 个会话下次扫描继续",
     "error": null
   },
   "settings": {
     "autoScan": true,
     "scanIntervalSeconds": 120,             // 自动增量扫描间隔
     "aiEnabled": true,                      // false 时扫描按钮显示「扫描（仅规则）」
-    "model": "deepseek-flash",
+    "model": "deepseek-flash",              // deprecated：不权威、不用于研判，仅为旧状态/旧客户端兼容保留（v0.6 移除）
+    "aiProvider": "",                       // v0.5：DSH 模型提供方 id；"" = 跟随 DSH 默认模型（与 aiModel 成对）
+    "aiModel": "",                          // v0.5：模型 id；空 = 跟随 DSH 默认模型
+    "aiBudgetMode": "auto",                 // v0.5：auto（默认）=min(待研判, 每日剩余)；fixed=用 maxAiCallsPerScan
     "initialDays": 30,
     "maxTasksPerSession": 3,                // 单会话单次扫描最多产出的自动卡数
     "excludeWorkspaces": [],
     "lastScanAt": "ISO|null",
-    "maxAiCallsPerScan": 40,
-    "dailyAiCallLimit": 150
+    "maxAiCallsPerScan": 40,                // 默认 40，钳 5–150；仅 aiBudgetMode="fixed" 生效
+    "dailyAiCallLimit": 150                 // 每日预算单位上限（10–500，用户本地日历日滚动）；不是硬成本上限
   },
   "usage": {
     "date": "YYYY-MM-DD",                   // 用户本地日历日（不是 UTC 日）
@@ -195,17 +211,63 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 }
 ```
 
-`scan.message` 是**持久化的人类可读扫描结论**，客户端统计行直接展示（不再自行拼接）。典型内容：
+`scan.message` 是**持久化的人类可读扫描结论**，客户端统计行直接展示（不再自行拼接、不做机器解析）。典型内容：
 
 - `扫描完成：28/28 个会话 · 本次无 AI 调用`（AI 开启但本次未调用；AI 关闭时只有前半段）；
 - `扫描完成：28/28 个会话 · AI 3 次/5120 tokens · 低价值跳过 2 · 合并重复卡 1`；
-- `扫描完成：… · 预算已用完（150/150）其余仅规则`（每日预算耗尽后降级）；
+- `扫描完成：41/41 个会话 · AI 40 次/72000 tokens · 剩余 18 个会话下次扫描继续`（单次预算或 10 分钟墙钟到点，未研判会话下次继续）；
+- `本次 AI 预算已用完（40 次）其余仅规则 · 剩余 18 个会话下次扫描继续`（固定档本次预算耗尽，每日额度仍有剩余）；
+- `今日 AI 预算已用完（150/150）· 剩余 18 个会话明日继续（本次其余仅规则）`；
+- `本次 AI 阶段已达 10 分钟上限 · 剩余 32 个会话下次扫描继续`；
+- `… · N 个会话研判失败，5 分钟后重试`（进入失败冷却，冷却期内不会每轮重试）；
+- `当前 DSH 未提供 AI 模型服务，本次仅规则分析` / `所选模型提供方不可用，请在设置中重新选择` /
+  `DSH 默认模型不可用，请在 DSH 设置或看板设置中调整` / `<provider> 没有可用模型（可能未配置 API Key 或未登录）`；
 - `扫描失败：<错误信息>` / `扫描已取消（已完成部分保留）`；
-- 扫描过程中的瞬时提示（如 `未找到账号凭证，使用规则引擎分析`、`AI 研判 N 个会话（预算 M）…`）也会写入
+- 扫描过程中的瞬时提示（如 `AI 研判 12/57 个会话（今日 12/150）…`、`AI 研判 N 个会话（预算 M）…`）也会写入
   `scan.message`（SSE / 轮询可见），但界面的统计行在运行中只显示进度，结束后展示最终结论。
 
+`scan.message` 的口径（Host 保证）：
+
+- 所有「已用/上限」都是**扫描后**数字（`usage.calls` 已含本次成功调用）；
+- 只要本轮仍有会话没拿到 AI 结论，就必须出现「剩余 N 个会话…继续」；`N` 与 `scan.aiPending` 一致；
+- 文案不包含 session id / 会话标题，是给人看的自然语言，不承诺机器可解析；
+- `scan.aiCalls` = 成功调用数（与 message 的「AI N 次」一致）；`scan.aiAttempts` = 实际 attempt 数（含内部重试）。
+
 `usage.date` 跟随用户本地日历日：每日 AI 调用计数与 `dailyAiCallLimit` 在**本地午夜**滚动重置；
-设置页显示的「今日」数字与预算判断都使用该字段。
+设置页显示的「今日」数字与预算判断都使用该字段。`usage.calls` / `usage.tokens` 只累计**成功**的 analyze
+（失败 attempt 的 tokens 不计入）；失败 analyze 仍占用 1 个预算单位（见 §5.3）。
+
+### GET `/ai/models`
+
+只读的 AI 模型目录端点（v0.5 新增）：给看板设置页的「AI 研判模型」下拉提供数据。数据来自 DSH 原生 LLM 服务
+（`listProviders()` + 每个 provider 的 `listModels()`），**不写入、不保存任何凭证**。Host 侧缓存 30 秒、整体超时约 12 秒，
+并订阅 DSH 的模型目录变更事件失效缓存；单个 provider 失败只体现在 `failures[]`，不影响其它 provider（客户端建议 15 秒超时 + 30 秒内存缓存）。
+
+```jsonc
+{
+  "ok": true,
+  "catalogAvailable": true,               // false = 当前 DSH 没有原生 LLM 服务（旧组合），目录数组为空
+  "default": { "provider": "deepseek-account", "model": "deepseek-flash" },  // 或 null
+  "providers": [
+    { "id": "deepseek-account", "name": "DeepSeek Account", "modelCount": 2 },
+    { "id": "minimax-cn", "name": "minimax-cn", "modelCount": 0 }
+  ],
+  "models": [ { "provider": "deepseek-account", "id": "deepseek-flash", "name": "DeepSeek Flash" } ],
+  "failures": [ { "provider": "minimax-cn", "name": "minimax-cn", "message": "credential unavailable" } ],
+  "fetchedAt": "2026-11-08T04:00:00.000Z"
+}
+```
+
+- **扁平包络**：与 `GET /state` 一致，不包 `data`；字段全部必返（无数据时为空数组 / `null`）。
+- `catalogAvailable`：当前 DSH 组合是否提供 `llm` 服务；`false` 时 `default:null`、数组为空，看板设置页引导升级 DSH。
+- `default`：DSH 的默认模型选择（`agentDefaultModel.currentSelection()`），**只含 provider/model**（不输出
+  reasoningEffort —— 看板不消费）；读取不到时为 `null`。
+- `providers[]`：已注册的模型提供方（`modelCount` 是该 provider 的可用模型数，可以为 0）。
+- `models[]`：全部可用模型的扁平列表（`provider/id/name`），客户端按 provider 分组展示。
+- `failures[]`：**provider 列表本身读取失败**的原因（网络/超时等）；「provider 正常但 `modelCount:0`」不算失败，
+  多数是未配置凭证或未登录——客户端需要区分这两种空态，不能把失败误报成「未配置」。
+- 错误：端点为 owner 鉴权（非 owner 403），无 `llm` 服务时仍返回 `200` + `catalogAvailable:false`，不返回 5xx。
+- 该端点不进入 `GET /state`（避免 4 秒轮询携带大目录）；目录故障只影响设置页，**不阻塞扫描**。
 
 ### POST `/command`
 
@@ -223,13 +285,13 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 | `task.unlock` | `{id, fields?: string[]}` | 解锁字段，交还 AI 维护 |
 | `task.analyze` | `{id}` | 立即对该任务来源会话重跑研判（扫描进行中返回 `409 busy`；AI 不可用/超预算自动降级规则） |
 | `task.continuePrompt` | `{id, target: "session"\|"newSession"}` | 生成「继续此任务」提示词（本地模板，0 token） |
-| `task.polishPrompt` | `{id, prompt}` | AI 润色提示词（耗 1 次调用，不可用时原样返回） |
+| `task.polishPrompt` | `{id, prompt}` | AI 润色提示词（耗 1 个预算单位，不可用时原样返回） |
 | `task.importTodos` | `{id}` | 从来源会话导入待办为子任务 |
 | `task.toggleSubtask` | `{id, subtaskId, done}` | 勾选子任务 |
 | `task.addSubtask` | `{id, text}` | 新增子任务 |
 | `task.removeSubtask` | `{id, subtaskId}` | 删除子任务 |
 | `session.ignore` / `session.unignore` | `{sessionId}` | 忽略会话：不再自动建卡（**Host 接口已支持，当前 UI 未暴露**） |
-| `settings.update` | `{patch: {...settings}}` | 更新设置 |
+| `settings.update` | `{patch: {...settings}}` | 更新设置；`aiProvider/aiModel` 成对提交（半对归一为跟随默认）、`aiBudgetMode` 非法值忽略；**旧客户端只带 `maxAiCallsPerScan` 不带 `aiBudgetMode` 时，本次更新推断为 `fixed`**（见 §6） |
 | `scan.start` | `{mode: "incremental"\|"full"}` | 触发扫描（运行中返回 busy） |
 | `scan.cancel` | `{}` | 取消扫描 |
 
@@ -238,9 +300,15 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 `task.analyze` 返回（客户端据此提示引擎与本次消耗）：
 
 ```jsonc
-{ "task": { /* 更新后的 Task */ }, "engine": "llm|rules", "aiCalls": 1, "tokens": 3120,
-  "sessions": 1, "message": "AI 研判完成|今日 AI 预算已用完，已用规则引擎重判|AI 不可用或未启用，已用规则引擎重判" }
+{ "task": { /* 更新后的 Task */ }, "engine": "llm|rules", "aiCalls": 1, "tokens": 3120, "sessions": 1,
+  "message": "AI 研判完成|AI 判断该会话无需建卡（已消耗 1 次）|今日 AI 预算已用完，已用规则引擎重判|模型不可用，已用规则引擎重判" }
 ```
+
+- `task.analyze` 使用与扫描**相同的模型解析结果**（`settings.aiProvider/aiModel` → DSH 默认模型 → 目录首模型兜底，
+  见 §5.2）；成功后任务的 `ai.provider/model` 为实际使用的 route。
+- 每次 `task.analyze` 的 analyze 记为 1 个预算单位：即使判定「无需建卡」（`ignore`/空任务）也消耗 1 次；
+  内部重试不重复计单位；失败 attempt 的 tokens 不计入 `tokens`。
+- AI 不可用或本次预算不足时用规则引擎重判，`engine:"rules"`，`message` 说明原因；不返回 5xx。
 
 `task.continuePrompt` 返回：
 
@@ -309,10 +377,20 @@ data: {"reason":"scan"|"task"|"settings","tasksChanged":2}
 - 样式只使用 DSH 设计 token（`--dsw-alias-*` 等）与插件自有 CSS 变量，深浅色自适应。
 - 轮询 `/state`（4 秒，页面隐藏时暂停）；扫描中加快刷新；SSE 可选。
 - 所有写操作乐观更新 + 失败回滚 + 轻量 toast。
-- 抽屉在存在 `task.ai` 时展示研判块（引擎 `AI 研判`/`规则推断`、模型、置信度、最近研判时间、理由）；
+- 抽屉在存在 `task.ai` 时展示研判块（引擎 `AI 研判`/`规则推断`、提供方与模型、置信度、最近研判时间、理由）；
+  `ai.provider` 缺失的旧任务只展示 `model`，不再显示空的分隔符；
   当来源会话在研判后又有新活动（`sessionContext.lastActivityAt`，缺失时取 `task.lastActivityAt`，
   晚于 `ai.analyzedAt + 5 分钟`）时标记「可能已过期」，没有新活动时旧研判仍然有效。用户从抽屉
   「⋯」→「重新研判」调用 `task.analyze`。
+- 设置弹窗提供「AI 研判模型」只读控件：数据来自 `GET /ai/models`，原生 `<select>` 按 provider 分组，
+  首项「跟随 DSH 默认」；不提供 API Key / baseURL / 模型拉取表单（第三方模型与凭证统一在「DSH 设置 → 模型」
+  配置，看板只读目录、不保存凭证）；选中非官方提供方时提示「压缩摘要会发送给该模型服务商」。
+  下拉必须能覆盖「加载中 / 目录为空 / 无 provider / provider 读取失败 / 旧 DSH 无 llm / 已保存模型不在目录」等状态。
+- 设置弹窗的预算与用量：单次上限为单个下拉（`自动（推荐）/ 20 / 40 / 80 / 150`，当前值不在档位时补「固定 N 次」）；
+  每日上限仍可调；用量行展示今日 `已用/上限/剩余`、tokens 与上次扫描，剩余不足或耗尽用琥珀文字说明
+  （不加大进度条 / 彩色盒子）。
+- 页头扫描状态在运行中可追加 `· AI c/预算`（`scan.aiCalls` / `scan.aiBudget`，缺失时只显示次数）；
+  完成/失败时仍原样展示 Host 的 `scan.message`，客户端不解析 message 数字、不自行拼「剩余」。
 - 用户正在编辑字段时，后台轮询 / 扫描 / 重新研判不得丢弃草稿；展示一条「后台已更新；保存将覆盖 AI 的新结果」提醒。
 - 打开会话 / 产物 / 终端后自动收起抽屉。
 - 页头按钮的布局与图标（如设置常驻、右侧栏入口常驻、「⋯」仅导出 JSON）属于浏览器半实现细节，不在本契约内；契约只约束注册项、数据交互与行为约定。
@@ -341,15 +419,67 @@ if (target) ctx.get("sidebarRight").toggleFullscreen(target);
 
 ## 5. 存储上限、Token 与 AI 信任规则
 
+### 5.1 存储、输出与门控
+
 - 存储裁剪上限见 [§2.1](#21-文本与裁剪上限host-单一来源)；`truncateTask` 在加载与保存时都执行同一套上限。
-- 会话摘要 digest ≤1.5KB/会话；LLM 输出 ≤2200 tokens；每个会话最多产出 `maxTasksPerSession`（默认 3）个任务。
-- 重新研判门控：用户消息数增加 **或** 最后 turn 结束原因变化 **或** 首次 **或** 手动触发；活跃会话同一 turn 内不重复；同一会话最小分析间隔 180 秒。
-- 单次扫描 AI 调用 ≤ `maxAiCallsPerScan`（5–40），每日 ≤ `dailyAiCallLimit`（10–500）；超限降级规则引擎并在 `scan.message` 说明。
+- 会话摘要 digest ≤1.5KB/会话；单次 LLM 请求 `maxTokens` ≤4096（Host 按模型能力取 `min(4096, 模型输出上限)`）；
+  每个会话最多产出 `maxTasksPerSession`（默认 3）个任务。
+- 重新研判门控：用户消息数增加 **或** 最后 turn 结束原因变化 **或** 首次 **或** 手动触发；活跃会话同一 turn 内不重复；
+  同一会话最小分析间隔 180 秒。
 - **用户工作优先（trust rule）**：AI/规则给出 `done`，但任务仍有未完成的 `source:"manual"` 子任务或
   `lockedFields` 含 `subtasks` 的清单时，Host 会把状态降级为 `in_progress` 并追加一条 `history` 说明
   （「…建议完成，但仍有 N 个手动子任务未完成；保持进行中…」）。用户锁定的 `status` 优先，不会被覆盖；
   状态为 `done` 时**生成类**子任务（`source` 非 `manual`）自动勾选完成，`manual` 子任务不动；
   用户取消勾选子任务会让 `done` 卡回到 `in_progress`（写历史）。
+
+### 5.2 AI 模型解析（v0.5，Host 唯一入口）
+
+扫描、`task.analyze`、`task.polishPrompt` 都使用**同一个**解析器，在扫描开始时快照一次（中途改设置不影响本轮）。
+解析只做**同步**检查（`listProviders()` 注册表 + DSH 默认模型的活引用），不在扫描热路径调用 `listModels`
+（模型目录只服务设置页）；判断顺序：
+
+| 输入情况 | 行为 |
+| --- | --- |
+| 无 DSH 原生 LLM 服务（旧 DSH / 极简组合） | 规则引擎；`scan.message` 说明「当前 DSH 未提供 AI 模型服务，本次仅规则分析」 |
+| 显式 `aiProvider + aiModel` 均非空且 provider 已注册 | 使用显式 route；模型不在目录里只告警不阻断（运行时失败按错误码降级） |
+| 显式字段非空但 provider 未注册 | **不自动换模型**；规则引擎 + 提示「所选模型提供方不可用，请在设置中重新选择」 |
+| 只有 provider 或只有 model（半对） | 归一为「跟随 DSH 默认」+ 告警（Host 侧与设置归一保持一致） |
+| 无显式 + DSH 默认模型有效且 provider 已注册 | 使用 DSH 默认模型（**活引用**：用户在 DSH 里切模型会跟随） |
+| 无显式 + DSH 默认 provider 未注册 | **不自动换模型**；规则引擎 + 提示「DSH 默认模型不可用，请在 DSH 设置或看板设置中调整」 |
+| 无显式 + 无 DSH 默认模型可读（服务缺失 / `currentSelection()` 为 null） | 目录首模型兜底：取第一个有模型的 provider 的第一个模型；目录为空 / 读取失败 → 规则引擎 + 提示 |
+| 显式/默认 provider 已注册但目录 0 模型（多为凭证缺失） | 不预先拦截，仍按 route 尝试一次；失败码（`MISSING_CREDENTIAL` / 未登录 / `NO_ADAPTER` 等）→ 该会话规则降级 + 失败冷却，不整轮失败 |
+| 扫描取消 / abort | 静默，不写 `llmError`、不进入失败冷却 |
+
+- 请求经 **DSH 原生 LLM 服务**发出：看板不读 `.credentials.yaml`、不硬编码 endpoint、不保存凭证；
+  模型目录、默认模型与第三方 provider 全部由 DSH 管理。
+- 请求**不传 `sessionId`**（否则官方路由会附带会话日志扩展字段）、不传 tools / 图片；
+  出站内容 = system prompt + ≤1.5KB 会话摘要 + 请求的 provider/model。
+- 模型输出由 Host 解析 JSON 并修复；不合法时附带纠正消息重试（单次 analyze 内 ≤3 次 provider attempt，
+  可重试错误码才重试，`truncated` / 上下文超限等直接降级）。
+- 实际使用的 `provider/model` 写入 `task.ai`；`task.analyze` 的提示需说明使用的引擎与模型。
+
+### 5.3 AI 预算规则（v0.5）
+
+- **单次预算**：
+  - `settings.aiBudgetMode = "auto"`（默认）：本次预算 = `min(本轮待研判会话数, 每日剩余预算单位)`；
+  - `settings.aiBudgetMode = "fixed"`：本次预算 = `min(maxAiCallsPerScan, 每日剩余预算单位)`，`maxAiCallsPerScan` 钳 **5–150**。
+- **每日上限**：`dailyAiCallLimit`（10–500，默认 150）是**每日 analyzer 预算单位上限**，按用户本地日历日滚动重置。
+- **预算单位口径**：一次 `analyze`（含 `task.analyze`，即使判定无需建卡 / `ignore` / 空任务）消耗 1 个预算单位；
+  失败 analyze 也占 1 个；**内部重试不重复计单位**。`usage.calls` / `usage.tokens` 只累计成功调用，
+  失败 attempt 的 tokens 不计入。
+- 每日上限**不是硬成本 / 硬请求上限**：一次 analyze 最多 3 次 provider attempt（含内部重试），最坏出站请求 / 费用
+  可达预算单位的 3×（默认每日最坏 450 次 attempt）；文档与界面不得宣称「日成本硬上限」。
+- **AI 阶段墙钟上限 600 秒（10 分钟）**：到点停止派发新批次，已在途的请求最多等到自身超时；未研判会话标记为
+  「下次继续」。
+- **优先级**：从未做过 AI 研判的欠账 > 本轮有变化 > 最近活跃时间降序 > 会话 id 兜底（确定性）。
+- **失败冷却 300 秒（5 分钟）**：会话级 analyze 失败后记录 `llmError` / `aiErrorAt`，冷却期内本轮不再尝试，
+  避免每轮扫描反复烧预算；用户取消（abort）不写错误、不冷却。
+- **超限行为**：超出单次预算 / 墙钟 / 每日上限后，未研判会话降级规则引擎并**保留待下次重试**；
+  `scan.aiPending` = 本次未拿到 AI 结论的会话数（**含失败待重试**）；
+  `scan.aiDeferredReason = "budget" | "time" | "daily" | null` 说明未完成原因；
+  `scan.message` 用「剩余 N 个会话下次扫描继续」/「今日 AI 预算已用完…明日继续」解释续跑。
+- `scan.aiCalls` = 成功调用次数；`scan.aiAttempts` = 实际 attempt 次数（含重试）；
+  `task.polishPrompt` 同样消耗 1 个预算单位，不可用时原样返回提示词。
 
 ## 6. 版本与迁移
 
@@ -358,13 +488,38 @@ if (target) ctx.get("sidebarRight").toggleFullscreen(target);
 - 运行时版本由 DSH profile 的 `node_modules/dsh-super-kanban` 决定；profile 依赖规格（精确版本 / 范围 / `link:`）影响升级行为，见 [INSTALL.md](INSTALL.md) 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 - 契约变更需同步更新：本文件、`tests/` 中的契约相关断言、以及 CHANGELOG。
 
+### 6.1 v0.5 迁移与兼容（AI 模型 + 预算）
+
+v0.5 把 AI 研判从插件内置的 DeepSeek 官方直连改为 **DSH 原生 LLM 服务**，并重构预算语义。变更全部保持
+**additive / 向后兼容**，`state.version` 仍为 2（不需要 schema 升级）：
+
+| 变更 | 兼容约定 |
+| --- | --- |
+| `settings.aiProvider` / `settings.aiModel` | 新增字段，空串 = 跟随 DSH 默认模型；必须**成对**（同时为空或同时非空），半对输入归一为跟随默认；字符集 `provider` = `[A-Za-z0-9._:-]{0,100}`、`model` = `[A-Za-z0-9._:/@-]{0,200}`，非法值丢弃。不要求模型当前存在于目录（保存后下次扫描生效，运行时失败再降级）。 |
+| `settings.aiBudgetMode` | 新增 `"auto" \| "fixed"`，默认 `"auto"`；非法值丢弃、保留原值。旧 `state.json` 缺该字段 → 加载时自然继承默认 `"auto"`，`maxAiCallsPerScan` 原值保留（**无迁移代码**）。 |
+| `maxAiCallsPerScan` | 钳制范围由 5–40 放宽为 **5–150**；仅在 `fixed` 下生效，`auto` 下保留数值供切回。 |
+| 旧客户端 `settings.update` | 只带合法 `maxAiCallsPerScan`、不带 `aiBudgetMode` → Host 把**本次更新**推断为 `"fixed"`（旧 UI 的数值设置继续生效）；加载旧 state 不走该推断，仍默认 `"auto"`。 |
+| `GET /ai/models` | 新增只读端点；旧 Host 无此路由时新客户端按 `catalogAvailable:false` 降级（不得阻塞设置保存）。 |
+| `task.ai.provider` | 新增可选字段；旧任务缺失时客户端按「无 provider」展示，下一次研判后补齐。`engine:"rules"` 时 `model:""`、`provider:null`。 |
+| `scan.aiDue/aiBudget/aiAttempts/aiPending/aiDeferredReason` | 新增可选字段；旧客户端忽略即可。缺失时新客户端只做最小降级（运行中仅显示 `aiCalls`）。 |
+| `settings.model` | **deprecated**：不权威、不用于研判，仅为旧状态 / 旧客户端兼容保留，UI 不再展示；计划 v0.6 移除。 |
+| 旧直连通道 | **已移除**：不再读取 `.credentials.yaml`、不再硬编码模型 endpoint；DSH 无 `ctx.llm` 时规则引擎兜底并在 `scan.message` 说明。`engines.dsh` 维持 `>=0.2.1-rc.5 <0.3.0`，靠运行时 feature-detect。 |
+
 ## 7. 验收标准
 
 1. 打开「任务看板」主面板：统计行 + 四列看板 + 工作区筛选 + 搜索可见。
 2. 自动发现初始扫描范围内的会话并生成 / 更新任务；卡片显示目标、进度、来源工作区、最近活动时间、问题标记。
-3. 点击卡片打开抽屉：AI 研判块（引擎/模型/置信度/时间/理由）、关键事实、子任务、问题 / 下一步、会话联动、产物、证据时间线；「⋯」→「重新研判」只重判该卡。
-4. 手动：新建、编辑、拖拽换列、归档、删除、锁定字段（AI 不覆盖）、设置（AI 开关 / 间隔 / 排除工作区 / 预算）。
+3. 点击卡片打开抽屉：AI 研判块（引擎 / 提供方与模型 / 置信度 / 时间 / 理由）、关键事实、子任务、问题 / 下一步、会话联动、产物、证据时间线；「⋯」→「重新研判」只重判该卡。
+4. 手动：新建、编辑、拖拽换列、归档、删除、锁定字段（AI 不覆盖）、设置（AI 开关 / 模型 / 间隔 / 排除工作区 / 预算）。
 5. 自动扫描：启动后数秒内首扫；之后按间隔增量扫描；统计行常驻显示上次扫描结论（完成 / 失败+重试 / 运行中+取消），结果落盘可追溯。
 6. 视觉：与 DSH 深浅色主题一致、无横向溢出、空态 / 加载态完整、1680px 与 1280px 宽度均可用。
 7. 会话联动：「继续此任务」默认 0 token；提示词放入输入框但不自动发送；打开会话 / 产物 / 终端后抽屉收起。
 8. 控制台无 error / 404；AI 不可用时看板仍可用（规则引擎）。
+9. **AI 模型（v0.5）**：`GET /super-kanban/api/ai/models` owner 可读、非 owner 403；旧 DSH 无 `ctx.llm` 时返回
+   `catalogAvailable:false` 而非 5xx；provider 读取失败进 `failures[]` 且不影响其它 provider；设置页保存
+   `aiProvider/aiModel` 后下一次扫描 / 重新研判生效（无需重启），扫描任务 `task.ai.provider` 为实际 route。
+10. **AI 预算（v0.5）**：`aiBudgetMode:"auto"` 与 `"fixed"` 两种模式均按 §5.3 生效；`aiDue/aiBudget/aiAttempts/aiPending/
+    aiDeferredReason` 按可选字段下发；`scan.message` 的「已用/上限」为扫描后数字并带「剩余 N 个会话下次继续」；
+    10 分钟墙钟与 5 分钟失败冷却生效；旧客户端只发 `maxAiCallsPerScan` 时按 `fixed` 生效。
+11. **隐私（v0.5）**：AI 请求经 DSH 原生 LLM 服务、不传 `sessionId`、不传 tools / 图片；看板不读、不存模型凭证；
+    选中第三方提供方时设置页提示摘要会发送给该服务商；README / SECURITY 的数据流说明与实际一致。

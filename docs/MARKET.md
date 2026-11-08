@@ -56,7 +56,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 ### 方式 B：npm 包名
 
-DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.4.1`，升级时推荐）→ 安装 → 启用 → 刷新。
+DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.5.0`，升级时推荐）→ 安装 → 启用 → 刷新。
 
 ### 方式 C：Git 仓库
 
@@ -81,7 +81,7 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 注意：
 
 - 插件页安装 npm/市场来源会用 `pnpm add --save-exact`，把**精确版本**写入 profile 依赖；所以升级需要重新安装目标版本，而不是只点一下刷新。
-- 若 profile 里被人为改成**范围依赖**：`^0.4.0` 可自然解析到 0.4.x 补丁版（0.4.1…），但 `^0.3.0` 永远不会解析到 0.4.x —— 跨 minor 升级必须安装**精确版本**（如 `dsh-super-kanban@0.4.1`）。
+- 若 profile 里被人为改成**范围依赖**：`^0.5.0` 可自然解析到 0.5.x 补丁版（0.5.1…），但 `^0.4.0` 永远不会解析到 0.5.x —— 跨 minor 升级必须安装**精确版本**（如 `dsh-super-kanban@0.5.0`）。
 - 市场索引由维护者在每次 Release 后运行 `npm run market:index` 并提交 `docs/index.json`；索引未刷新时，详情页看不到新版本。
 
 更完整的用户升级/验证/回滚步骤见 [INSTALL.md](INSTALL.md#3-更新插件升级)。
@@ -111,17 +111,17 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
       "repository": { "url": "https://github.com/topmindspace/dsh-super-kanban" },
       "metadata": { "category": "productivity", "labels": ["kanban"], "keywords": ["dsh", "kanban"] },
       // 详情页默认展示 versions 中的第一个（按版本号从新到旧排列）；
-      // 也可选填 "defaultVersion": "0.4.0" 指定默认版本。
+      // 也可选填 "defaultVersion": "0.5.0" 指定默认版本。
       "versions": [                              // 索引中的全部可用版本（新版本由维护者生成）
         {
-          "version": "0.4.0",
-          "publishTimestamp": 1793800000,          // Unix 秒
+          "version": "0.5.0",
+          "publishTimestamp": 1794000000,          // Unix 秒
           "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0" },
           "source": { "type": "npm" }              // 或 { "type": "git", "url": "...", "commit": "<40位 SHA>" }
         },
         {
-          "version": "0.3.0",                    // 历史版本保留，便于回滚/固定版本安装
-          "publishTimestamp": 1793600000,
+          "version": "0.4.1",                    // 历史版本保留，便于回滚/固定版本安装
+          "publishTimestamp": 1793700000,
           "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0" },
           "source": { "type": "git", "url": "...", "commit": "<40位 SHA>" }
         }
@@ -137,14 +137,14 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 
 ```bash
 # 0. 版本变更（package.json + CHANGELOG.md 必须同步）
-npm version 0.4.1 --no-git-tag-version   # 只改 package.json 的版本号（版本号以本次发布为准）
-#   - 在 CHANGELOG.md 顶部添加 "## [0.4.1] - YYYY-MM-DD" 与底部 tag 链接
+npm version 0.5.0 --no-git-tag-version   # 只改 package.json 的版本号（版本号以本次发布为准）
+#   - 在 CHANGELOG.md 顶部添加 "## [0.5.0] - YYYY-MM-DD" 与底部 tag 链接
 #   - 提交这一步，使工作区保持干净
-git add package.json CHANGELOG.md && git commit -m "chore: release v0.4.1"
+git add package.json CHANGELOG.md && git commit -m "chore: release v0.5.0"
 
 # 1. 更新市场索引并提交（索引的 git source 会 pin 到上一步的 commit）
 npm run market:index
-git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for v0.4.1"
+git add docs/index.json docs/icon.svg && git commit -m "chore: refresh market index for v0.5.0"
 
 # 2. 全量自检（测试 + 校验 + 隐私 + 文档 + 版本一致性）
 npm run check
@@ -155,7 +155,7 @@ npm run check
 #     - push tag 触发 .github/workflows/release.yml
 #     - verify job 会再次执行 npm run check（含 check:docs / check:version），
 #       tag 与 package.json / CHANGELOG / 索引不一致会直接失败
-git tag v0.4.1 && git push origin main --tags
+git tag v0.5.0 && git push origin main --tags
 
 #  B) 本地发布
 npm login
@@ -200,5 +200,5 @@ npx npm@11 stage approve <stage-id>    # 输入 OTP 完成审批，版本即刻�
 ## 7. 安全与信任
 
 - 市场索引内容来自第三方，DSH 会在安装前提示信任风险；用户应自行确认来源（本仓库）。
-- 插件只读本机 DSH 会话、只调用本机已登录 DSH 账号的 DeepSeek 推理额度，不向第三方服务器发送数据。
+- 插件只读本机 DSH 会话；AI 研判经 **DSH 原生模型服务**发送给你在 DSH 中配置的模型提供方（官方账号 / API Key / 第三方 provider），凭证由 DSH 管理、插件不读取不保存；看板自身无遥测，不向其它服务器发送数据。选择第三方模型时压缩会话摘要会发送给该服务商（设置页与 README / SECURITY 已披露）。
 - 发布物不包含任何凭证；仓库 CI 会运行隐私扫描（`scripts/check-privacy.mjs`）阻止个人路径/密钥进入 Git。

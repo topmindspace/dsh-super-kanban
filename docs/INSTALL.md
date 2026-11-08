@@ -7,7 +7,7 @@
 - 市场索引：<https://topmindspace.github.io/dsh-super-kanban/index.json>
 - 许可证：[MIT](../LICENSE)
 
-> 文档按 **0.4.x** 系列编写；具体可用版本以 DSH 插件页显示与 npm latest 为准。遇到问题请先看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+> 文档按 **0.5.x** 系列编写；具体可用版本以 DSH 插件页显示与 npm latest 为准。遇到问题请先看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
 ## 0. 前置条件
 
@@ -15,7 +15,7 @@
 | --- | --- |
 | DeepSeek Harness | `>= 0.2.1-rc.5 < 0.3.0`（桌面版） |
 | Node.js | `>= 22.19.0`（DSH 已自带，无需单独安装） |
-| 账号 | 可选。不登录也能用本地规则分析；登录后可启用 AI 联网研判 |
+| 模型服务 | 可选。DSH 未提供模型服务（旧版本/极简组合）时用本地规则分析；DSH 提供原生模型服务后，可跟随 DSH 默认模型或选择第三方模型启用 AI 研判 |
 | 本机 DSH Home | 至少打开过一次 DSH（存在 `~/.dsh/profiles/desktop`） |
 | `bash` + `python3` | 仅源码脚本（方式 D2）与卸载脚本需要：`install.sh` / `uninstall.sh` 用 python3 读写 profile 清单；用插件页安装则不需要 |
 
@@ -46,7 +46,7 @@
 1. DSH → 插件 → **添加插件**；
 2. 输入包名：
    - 不带版本：`dsh-super-kanban`（安装 npm latest）；
-   - 带版本：`dsh-super-kanban@0.4.1`（**推荐写精确版本**，见第 3 节）；
+   - 带版本：`dsh-super-kanban@0.5.0`（**推荐写精确版本**，见第 3 节）；
 3. 安装 → 启用 → 刷新窗口。
 
 适合能访问 npm registry 的用户。插件无第三方运行时依赖。
@@ -95,7 +95,7 @@ DSH 插件页安装 **npm/市场来源** 的包时，会把**精确版本**写�
 ```jsonc
 // ~/.dsh/profiles/desktop/package.json
 "dependencies": {
-  "dsh-super-kanban": "0.4.1",                    // 插件页/npm 安装：精确版本
+  "dsh-super-kanban": "0.5.0",                    // 插件页/npm 安装：精确版本
   // 或
   "dsh-super-kanban": "link:/path/to/checkout"    // 源码/本地目录安装
 }
@@ -103,21 +103,22 @@ DSH 插件页安装 **npm/市场来源** 的包时，会把**精确版本**写�
 
 ## 2. 验证安装与版本
 
-### 2.1 界面验证（v0.4 特征）
+### 2.1 界面验证（v0.5 特征）
 
-安装/更新成功后，看板应具备以下 v0.4 特征：
+安装/更新成功后，看板应具备以下 v0.5 特征：
 
 - 看板页头常驻：**搜索、扫描、设置齿轮、在右侧栏打开、新建**；
 - 页头「⋯」菜单**只有「导出 JSON」**；
 - 统计行常驻状态计数 + 归档数 + 上一次扫描结论（`上次扫描 X 前 · 扫描完成：…`；失败带「重试」）；
 - 卡片有状态点、克制的优先级颜色、问题/产物/子任务计数与进度线；**完成卡不显示进度线**，
   归档卡带「已归档」小标签；
-- 抽屉顶部有「AI 研判 / 规则推断」块（模型、置信度、最近研判时间、理由；来源会话在研判后又有新活动时标「可能已过期」），
+- 设置弹窗里有「AI 研判模型」block（跟随 DSH 默认 / 按 provider 分组 + 刷新模型目录）与 AI 预算「自动（推荐）」档；
+- 抽屉顶部有「AI 研判 / 规则推断」块（提供方与模型、置信度、最近研判时间、理由；来源会话在研判后又有新活动时标「可能已过期」），
   抽屉「⋯」菜单里有「重新研判」；
 - AI 关闭时扫描按钮的悬停提示为「扫描（仅规则）」；
 - 右侧栏形态页头同样常驻扫描、设置等图标按钮，且任何宽度都保留工作区筛选。
 
-如果「⋯」里还能看到「设置」「在右侧栏打开」，或卡片没有状态点，说明加载的仍是 **0.3 的旧 bundle**，按第 3.5 节处理。
+如果设置弹窗里没有「AI 研判模型」block 或预算下拉没有「自动」，说明加载的仍是 **0.4 的旧 bundle**，按第 3.5 节处理。如果「⋯」里还能看到「设置」「在右侧栏打开」，则加载的是更旧的 0.3 bundle。
 
 ### 2.2 插件页查看版本
 
@@ -145,17 +146,18 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 | 输出 | 含义 |
 | --- | --- |
-| `0.4.1` | 精确版本（插件页/npm 安装的典型结果） |
-| `^0.4.0` | 范围依赖，可解析到 0.4.x 的补丁版本（0.4.1、0.4.2…），**不会**到 0.5.x |
-| `^0.3.0` | 范围依赖，只会解析 0.3.x，**永远不会**到 0.4.x（本次“更新后仍是旧界面”的根因） |
+| `0.5.0` | 精确版本（插件页/npm 安装的典型结果） |
+| `^0.5.0` | 范围依赖，可解析到 0.5.x 的补丁版本（0.5.1…），**不会**到 0.6.x |
+| `^0.4.0` | 范围依赖，只会解析 0.4.x，**永远不会**到 0.5.x（跨 minor 升级必须精确版本） |
+| `^0.3.0` | 更旧的范围依赖，只会解析 0.3.x，永远不会到 0.4.x / 0.5.x |
 | `link:/path/to/checkout` | 源码安装，版本跟随该目录，无需按版本升级 |
 
-### 2.4 npm 安装路径与 `^0.4.0` 范围行为
+### 2.4 npm 安装路径与 `^0.5.0` 范围行为
 
-- 插件页从 npm / 市场安装时使用 `pnpm add --save-exact`，profile 里记录的是**精确版本**（如 `0.4.1`）。
-- 如果依赖被写成 **`^0.4.0`**：重新执行安装或 `pnpm install` 时，npm 会把 **0.4.x 的补丁版本**（0.4.1、0.4.2…）视为可解析，因此 0.4.x 内可以正常更新。
-- 如果依赖仍是 **`^0.3.0`**：语义化版本只允许 `<0.4.0`，**0.4.x 不会被解析**。无论插件页怎么“更新”、怎么刷新，磁盘上仍然是 0.3.x。
-- **跨 minor**（0.3 → 0.4、0.4 → 0.5）必须显式安装**精确版本**（如 `dsh-super-kanban@0.4.1`）或手动把依赖范围改到新的 minor，再重新安装。
+- 插件页从 npm / 市场安装时使用 `pnpm add --save-exact`，profile 里记录的是**精确版本**（如 `0.5.0`）。
+- 如果依赖被写成 **`^0.5.0`**：重新执行安装或 `pnpm install` 时，npm 会把 **0.5.x 的补丁版本**（0.5.1…）视为可解析，因此 0.5.x 内可以正常更新。
+- 如果依赖仍是 **`^0.4.0`**：语义化版本只允许 `<0.5.0`，**0.5.x 不会被解析**。无论插件页怎么“更新”、怎么刷新，磁盘上仍然是 0.4.x。
+- **跨 minor**（0.4 → 0.5）必须显式安装**精确版本**（如 `dsh-super-kanban@0.5.0`）或手动把依赖范围改到新的 minor，再重新安装。
 
 ## 3. 更新插件（升级）
 
@@ -165,7 +167,8 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 2. DSH 插件页只对**按需安装的官方插件**提供「更新」按钮；对第三方插件，界面会提示：**“其他插件请先卸载再安装新版”**。
 3. 通过插件页/npm 安装的依赖是**精确版本**，所以升级 = **卸载旧版 → 安装目标版本**（不会只改个 `package.json` 就自动生效）。
 4. 更新完成后：**先按 `Cmd+R` 刷新窗口**；如果界面没变，**完全退出 DSH 再重新打开**（客户端 bundle 有缓存）。
-5. 跨 minor 升级必须用**精确版本**（见 3.3）；`^0.3.0` 这类旧范围不会升级到 0.4.x。
+5. 跨 minor 升级必须用**精确版本**（见 3.3）；`^0.4.0` 这类旧范围不会升级到 0.5.x。
+6. **0.5.0 的默认行为变化**：AI 预算默认改为「自动」（单次最多用完当日剩余额度），模型默认跟随 DSH 默认模型。升级后想恢复旧行为，可在看板设置里把单次上限切回「固定 40 次」。
 
 ### 3.2 推荐升级步骤（所有安装方式通用）
 
@@ -179,9 +182,9 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 3. **完全退出 DSH**（不是只关窗口）。插件文件被占用时安装可能失败或残留旧文件。
 4. 按安装来源升级：
 
-   **A. 市场（发现）**：插件 → 已安装 → Super Kanban → **卸载** → 插件 → 发现 → 打开 Super Kanban 详情 → 在版本列表里**选择目标版本**（如 `0.4.1`）→ **安装** → **启用**。
+   **A. 市场（发现）**：插件 → 已安装 → Super Kanban → **卸载** → 插件 → 发现 → 打开 Super Kanban 详情 → 在版本列表里**选择目标版本**（如 `0.5.0`）→ **安装** → **启用**。
 
-   **B. npm**：插件 → 已安装 → Super Kanban → **卸载** → 添加插件 → 输入**精确版本** `dsh-super-kanban@0.4.1` → 安装 → 启用。
+   **B. npm**：插件 → 已安装 → Super Kanban → **卸载** → 添加插件 → 输入**精确版本** `dsh-super-kanban@0.5.0` → 安装 → 启用。
 
    **C. Git**：插件 → 已安装 → 卸载 → 添加插件 → 重新粘贴仓库地址（DSH 会 pin 到当前 commit）→ 安装 → 启用。
 
@@ -190,7 +193,7 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
    ```bash
    cd /path/to/dsh-super-kanban
    git fetch --tags
-   git checkout v0.4.1     # 用目标 Release 的 tag；跟随 main 则用 git pull
+   git checkout v0.5.0     # 用目标 Release 的 tag；跟随 main 则用 git pull
    ./install.sh -y         # 重新链接（首次安装已 link 的可省略，但仍建议刷新 profile）
    ```
 
@@ -202,14 +205,15 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 ```
 ^0.3.0  →  >=0.3.0 <0.4.0   只收 0.3.x，永远到不了 0.4.0
-^0.4.0  →  >=0.4.0 <0.5.0   收 0.4.x（0.4.1、0.4.2…），到不了 0.5.0
-0.4.1   →  精确版本          只装 0.4.1
+^0.4.0  →  >=0.4.0 <0.5.0   只收 0.4.x，永远到不了 0.5.0
+^0.5.0  →  >=0.5.0 <0.6.0   收 0.5.x（0.5.1…），到不了 0.6.0
+0.5.0   →  精确版本          只装 0.5.0
 ```
 
 因此：
 
-- **0.3.x → 0.4.x**：必须安装精确版本（`dsh-super-kanban@0.4.1`）或按来源重装；只点“更新”不会跨 minor。
-- **0.4.0 → 0.4.1**：如果依赖是精确版本 `0.4.0`，同样要卸载后安装 `0.4.1`；如果依赖被写成 `^0.4.0`，重新安装/`pnpm install` 即可拿到 0.4.x 补丁。
+- **0.4.x → 0.5.x**：必须安装精确版本（`dsh-super-kanban@0.5.0`）或按来源重装；只点“更新”不会跨 minor。
+- **0.5.0 → 0.5.1**：如果依赖是精确版本 `0.5.0`，同样要卸载后安装 `0.5.1`；如果依赖被写成 `^0.5.0`，重新安装/`pnpm install` 即可拿到 0.5.x 补丁。
 - 排查“更新后界面仍旧”时，先按 2.3 节确认 **node_modules 里的实际版本** 与 **profile 里的依赖规格**，不要只看插件页提示。
 
 ### 3.4 高级：命令行升级（可选）
@@ -218,14 +222,14 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 ```bash
 # 安装/升级到精确版本（dsh plugin 会把参数转发给 profile 里的 pnpm）
-dsh plugin --profile desktop add dsh-super-kanban@0.4.1
+dsh plugin --profile desktop add dsh-super-kanban@0.5.0
 
 # 卸载
 dsh plugin --profile desktop remove dsh-super-kanban
 ```
 
 - `dsh plugin …` 需要终端里能使用 `dsh` CLI；若没有，请优先使用插件页。
-- 想临时让 `^0.4.x` 自动收补丁：把 profile `package.json` 里的依赖改成 `"^0.4.0"`，再执行一次 `dsh plugin --profile desktop install`（或插件页重新安装一次），之后 0.4.x 补丁版可被解析。**跨 minor 仍需精确版本。**
+- 想临时让 `^0.5.x` 自动收补丁：把 profile `package.json` 里的依赖改成 `"^0.5.0"`，再执行一次 `dsh plugin --profile desktop install`（或插件页重新安装一次），之后 0.5.x 补丁版可被解析。**跨 minor 仍需精确版本。**
 
 ### 3.5 更新后界面仍旧？（4 步快速排查）
 
@@ -238,7 +242,7 @@ dsh plugin --profile desktop remove dsh-super-kanban
 
 ## 4. 回滚到旧版本
 
-升级后如遇问题，可以回滚。看板数据与插件版本解耦（当前存储格式版本为 2，0.3.x/0.4.x 通用），回滚一般不会丢看板数据，但**跨存储格式版本回滚前务必备份**。
+升级后如遇问题，可以回滚。看板数据与插件版本解耦（当前存储格式版本为 2，0.3.x/0.4.x/0.5.x 通用），回滚一般不会丢看板数据，但**跨存储格式版本回滚前务必备份**。
 
 1. 备份数据：
 
@@ -294,7 +298,7 @@ rm -rf ~/.dsh/storages/super-kanban
 | 左侧栏没有「任务看板」 | 刷新窗口 / 重启 DSH；仍没有见 [TROUBLESHOOTING](TROUBLESHOOTING.md#入口缺失) |
 | 有入口但面板空白 / 一直加载 | 见 [TROUBLESHOOTING](TROUBLESHOOTING.md#看板空白或加载失败) |
 | 扫描不跑 / 卡片不更新 | 手动点扫描；检查设置里「自动扫描」；见 [TROUBLESHOOTING](TROUBLESHOOTING.md#扫描不跑卡片不更新) |
-| AI 一直不生效 | 设置里确认 AI 开启、DSH 已登录；见 [TROUBLESHOOTING](TROUBLESHOOTING.md#ai-不生效或一直等待) |
+| AI 一直不生效 / 模型不可用 | 设置里确认 AI 开启与「AI 研判模型」（跟随 DSH 默认或已配置的 provider）；见 [TROUBLESHOOTING](TROUBLESHOOTING.md#ai-不生效或一直等待) |
 | 升级 DSH 后插件失效 | DSH 大版本可能变更插件接口；先重装与当前 DSH 兼容的版本，数据不会丢 |
 
 更多安全与隐私说明见 README 的「AI 与隐私」一节；安全问题请按 [SECURITY.md](../SECURITY.md) 私下报告。
@@ -321,8 +325,8 @@ dsh plugin --profile web add dsh-super-kanban@^0.3.0
 node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh-dev/profiles/web/package.json', 'utf8')).dependencies['dsh-super-kanban']"
 node -p "require(require('os').homedir() + '/.dsh-dev/profiles/web/node_modules/dsh-super-kanban/package.json').version"
 
-# 3) 换成精确版本重装，确认界面换成 v0.4
-dsh plugin --profile web add dsh-super-kanban@0.4.1
+# 3) 换成精确版本重装，确认界面换成 v0.5
+dsh plugin --profile web add dsh-super-kanban@0.5.0
 ```
 
 > 桌面版 profile（`desktop`）由桌面 App 持有：命令行操作前**完全退出 DSH**，否则会提示 profile 被占用或安装失败。

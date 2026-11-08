@@ -350,6 +350,85 @@ test("load applies truncateTask to persisted overlong values", (t) => {
   assert.equal(task.subtasks[0].text.length, TEXT_LIMITS.subtaskText);
 });
 
+test("load: pre-0.5 state defaults aiBudgetMode to auto and keeps the old cap", (t) => {
+  const home = tempHome(t);
+  // A v0.4.x state.json: no aiProvider/aiModel/aiBudgetMode, only the old
+  // numeric cap and the deprecated single `model` field.
+  writeJsonFile(path.join(storeDir(home), "state.json"), {
+    version: 2,
+    tasks: [],
+    settings: {
+      autoScan: false,
+      model: "deepseek-chat",
+      maxAiCallsPerScan: 20,
+      dailyAiCallLimit: 150,
+      lastScanAt: null,
+    },
+    usage: { date: "1970-01-01", calls: 0, tokens: 0 },
+    ignoredSessions: [],
+    scan: { state: "done", processed: 3, total: 3 },
+  });
+  const store = createStore({ dshHome: home, logger: { warn() {} } });
+  const loaded = store.load();
+  const settings = loaded.state.settings;
+  assert.equal(settings.aiBudgetMode, "auto", "missing aiBudgetMode merges the DEFAULT_SETTINGS auto");
+  assert.equal(settings.aiProvider, "");
+  assert.equal(settings.aiModel, "");
+  assert.equal(settings.model, "deepseek-chat", "deprecated model is still readable");
+  assert.equal(settings.maxAiCallsPerScan, 20, "the user's old fixed cap is preserved for a later switch");
+  assert.equal(settings.dailyAiCallLimit, 150);
+  // Old scan blobs merge the additive v3 fields instead of crashing.
+  assert.equal(loaded.state.scan.processed, 3);
+  assert.equal(loaded.state.scan.aiDue, 0);
+  assert.equal(loaded.state.scan.aiBudget, 0);
+  assert.equal(loaded.state.scan.aiAttempts, 0);
+  assert.equal(loaded.state.scan.aiPending, 0);
+  assert.equal(loaded.state.scan.aiDeferredReason, null);
+});
+
+test("load: explicit fixed budget mode and model route survive a reload", (t) => {
+  const home = tempHome(t);
+  const store = createStore({ dshHome: home, logger: { warn() {} } });
+  const state = store.load().state;
+  state.settings.aiBudgetMode = "fixed";
+  state.settings.aiProvider = "minimax-cn";
+  state.settings.aiModel = "MiniMax-M2.7";
+  state.settings.maxAiCallsPerScan = 80;
+  store.saveState(state);
+
+  const reloaded = createStore({ dshHome: home, logger: { warn() {} } }).load();
+  assert.equal(reloaded.state.settings.aiBudgetMode, "fixed");
+  assert.equal(reloaded.state.settings.aiProvider, "minimax-cn");
+  assert.equal(reloaded.state.settings.aiModel, "MiniMax-M2.7");
+  assert.equal(reloaded.state.settings.maxAiCallsPerScan, 80);
+});
+
+test("load: a half-set model route is normalized to follow-default", (t) => {
+  const home = tempHome(t);
+  writeJsonFile(path.join(storeDir(home), "state.json"), {
+    version: 2,
+    tasks: [],
+    settings: { aiProvider: "deepseek-account", aiModel: "" },
+    scan: {},
+    usage: { date: "1970-01-01" },
+  });
+  const loaded = createStore({ dshHome: home, logger: { warn() {} } }).load();
+  assert.equal(loaded.state.settings.aiProvider, "");
+  assert.equal(loaded.state.settings.aiModel, "");
+
+  const home2 = tempHome(t);
+  writeJsonFile(path.join(storeDir(home2), "state.json"), {
+    version: 2,
+    tasks: [],
+    settings: { aiProvider: "deepseek-account", aiModel: "deepseek-flash" },
+    scan: {},
+    usage: { date: "1970-01-01" },
+  });
+  const loaded2 = createStore({ dshHome: home2, logger: { warn() {} } }).load();
+  assert.equal(loaded2.state.settings.aiProvider, "deepseek-account");
+  assert.equal(loaded2.state.settings.aiModel, "deepseek-flash");
+});
+
 test("positiveSeqOrNull never invents seq 0", () => {
   assert.equal(positiveSeqOrNull(12), 12);
   assert.equal(positiveSeqOrNull("12"), 12);

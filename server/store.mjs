@@ -75,10 +75,51 @@ export const TEXT_LIMITS = Object.freeze({
 
 const BACKUP_KEEP = 10;
 
+/**
+ * v3 AI model selection. Provider ids come from the DSH model catalog and model
+ * ids may contain real-world characters (`alibaba/qwen-3-14b`,
+ * `amazon.nova-2-lite-v1:0`), so the charsets are permissive; the empty string
+ * means "follow the DSH default model".
+ */
+const AI_PROVIDER_RE = /^[A-Za-z0-9._:-]{0,100}$/;
+const AI_MODEL_RE = /^[A-Za-z0-9._:/@-]{0,200}$/;
+
+/** v3: fixed per-scan AI budget bounds (`maxAiCallsPerScan`; auto is daily-bounded). */
+export const AI_CALLS_PER_SCAN_MIN = 5;
+export const AI_CALLS_PER_SCAN_MAX = 150;
+
+/**
+ * A model route is either fully explicit (provider + model) or "follow the DSH
+ * default" (both empty). Half-set input is normalized to "follow default" so
+ * the board never carries a mixed state that cannot be resolved.
+ *
+ * @param {object} settings mutated in place.
+ * @returns {object} the same settings object.
+ */
+export function normalizeAiRoutePair(settings) {
+  if (!settings || typeof settings !== "object") return settings;
+  const provider = typeof settings.aiProvider === "string" ? settings.aiProvider.trim() : "";
+  const model = typeof settings.aiModel === "string" ? settings.aiModel.trim() : "";
+  if (Boolean(provider) !== Boolean(model)) {
+    settings.aiProvider = "";
+    settings.aiModel = "";
+  } else {
+    settings.aiProvider = provider;
+    settings.aiModel = model;
+  }
+  return settings;
+}
+
 export const DEFAULT_SETTINGS = {
   autoScan: true,
   scanIntervalSeconds: 120,
   aiEnabled: true,
+  /**
+   * @deprecated v0.5 — the model is resolved from the DSH native LLM service
+   * (`settings.aiProvider/aiModel` or the DSH default). Kept only so old states
+   * and third-party clients keep loading; it is normalized but never used for
+   * analysis. Slated for removal in v0.6.
+   */
   model: "deepseek-flash",
   initialDays: 30,
   maxTasksPerSession: 3,
@@ -87,6 +128,11 @@ export const DEFAULT_SETTINGS = {
   // v2 AI budget
   maxAiCallsPerScan: 40,
   dailyAiCallLimit: 150,
+  // v3 model selection: "" = follow the DSH default model; set together.
+  aiProvider: "",
+  aiModel: "",
+  /** "auto" = min(due sessions, daily remaining); "fixed" = maxAiCallsPerScan. */
+  aiBudgetMode: "auto",
 };
 
 /**
@@ -147,6 +193,12 @@ export function emptyScanState() {
     updatedTasks: 0,
     aiCalls: 0,
     tokens: 0,
+    // v3 additive observability fields (old clients ignore them).
+    aiDue: 0,
+    aiBudget: 0,
+    aiAttempts: 0,
+    aiPending: 0,
+    aiDeferredReason: null, // null | "budget" | "time" | "daily"
     message: "等待首次扫描",
     error: null,
   };
@@ -406,7 +458,11 @@ function migrateStateV1V2(raw) {
   const state = createEmptyState();
   state.tasks = taskList(raw.tasks).map((task) => truncateTask(migrateTaskV1V2(task)));
   if (isRecord(raw.settings)) {
-    state.settings = { ...DEFAULT_SETTINGS, ...normalizeSettingsPatch(raw.settings), lastScanAt: raw.settings.lastScanAt || null };
+    state.settings = normalizeAiRoutePair({
+      ...DEFAULT_SETTINGS,
+      ...normalizeSettingsPatch(raw.settings),
+      lastScanAt: raw.settings.lastScanAt || null,
+    });
   }
   if (Array.isArray(raw.ignoredSessions)) state.ignoredSessions = stringList(raw.ignoredSessions);
   if (Array.isArray(raw.suppressedSessions)) state.suppressedSessions = stringList(raw.suppressedSessions);
@@ -440,7 +496,21 @@ export function normalizeSettingsPatch(patch) {
     result.excludeWorkspaces = [...new Set(patch.excludeWorkspaces.filter((id) => typeof id === "string"))].slice(0, 100);
   }
   if (Number.isFinite(Number(patch.maxAiCallsPerScan))) {
-    result.maxAiCallsPerScan = Math.min(40, Math.max(5, Math.round(Number(patch.maxAiCallsPerScan))));
+    result.maxAiCallsPerScan = Math.min(
+      AI_CALLS_PER_SCAN_MAX,
+      Math.max(AI_CALLS_PER_SCAN_MIN, Math.round(Number(patch.maxAiCallsPerScan))),
+    );
+  }
+  if (typeof patch.aiProvider === "string") {
+    const value = patch.aiProvider.trim();
+    if (AI_PROVIDER_RE.test(value)) result.aiProvider = value;
+  }
+  if (typeof patch.aiModel === "string") {
+    const value = patch.aiModel.trim();
+    if (AI_MODEL_RE.test(value)) result.aiModel = value;
+  }
+  if (patch.aiBudgetMode === "auto" || patch.aiBudgetMode === "fixed") {
+    result.aiBudgetMode = patch.aiBudgetMode;
   }
   if (Number.isFinite(Number(patch.dailyAiCallLimit))) {
     result.dailyAiCallLimit = Math.min(500, Math.max(10, Math.round(Number(patch.dailyAiCallLimit))));
@@ -596,7 +666,11 @@ export function createStore({ dshHome, logger } = {}) {
     // keep only records with the shape the rest of the service assumes.
     target.tasks = taskList(raw.tasks);
     if (isRecord(raw.settings)) {
-      target.settings = { ...DEFAULT_SETTINGS, ...normalizeSettingsPatch(raw.settings), lastScanAt: raw.settings.lastScanAt || null };
+      target.settings = normalizeAiRoutePair({
+        ...DEFAULT_SETTINGS,
+        ...normalizeSettingsPatch(raw.settings),
+        lastScanAt: raw.settings.lastScanAt || null,
+      });
     }
     if (Array.isArray(raw.ignoredSessions)) target.ignoredSessions = stringList(raw.ignoredSessions);
     if (Array.isArray(raw.suppressedSessions)) target.suppressedSessions = stringList(raw.suppressedSessions);

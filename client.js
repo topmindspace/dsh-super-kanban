@@ -22,6 +22,18 @@ window.__ModuleLoader__.load({
     const PREFS_KEY = "dsh-super-kanban:prefs";
     const DEFAULT_PREFS = Object.freeze({ fullEntry: true, sideEntry: true });
 
+    /* ---------------------- v0.5：AI 模型 / 预算常量 ---------------------- */
+
+    // 与 Host 契约对齐（docs/CONTRACT.md「GET /ai/models」与 settings.aiBudgetMode）。
+    const AI_CATALOG_TIMEOUT_MS = 15_000; // 客户端 15s；Host 侧 12s 先返回
+    const AI_CATALOG_TTL_MS = 30_000; // 模块级内存缓存，不写 localStorage
+    const AI_BUDGET_MODE_DEFAULT = "auto"; // "auto" | "fixed"，缺省按 auto
+    const AI_MAX_CALLS_DEFAULT = 40; // 纯数字，仅 fixed 生效；Host 钳 5–150
+    const AI_MAX_CALLS_MIN = 5;
+    const AI_MAX_CALLS_MAX = 150;
+    const MAX_AI_CALL_OPTIONS = [20, 40, 80, 150]; // 固定档；下拉首项另加「自动」
+    const DAILY_AI_CALL_OPTIONS = [50, 150, 300, 500];
+
     /* ============================== constants ============================== */
 
     const STATUS_META = {
@@ -92,7 +104,12 @@ window.__ModuleLoader__.load({
       if (!response.ok || !payload || payload.ok === false) {
         const message =
           (payload && (payload.message || payload.error)) || `请求失败（HTTP ${response.status}）`;
-        throw new Error(message);
+        const error = new Error(message);
+        // Keep the HTTP status on the error so callers can distinguish an old
+        // Host that lacks an endpoint (404 → graceful "unavailable") from a
+        // genuine read failure.
+        error.status = response.status;
+        throw error;
       }
       return payload;
     }
@@ -254,7 +271,7 @@ window.__ModuleLoader__.load({
       return { text, status: task.status === "done" ? "done" : "active", source: "task" };
     }
 
-    /** task.ai 的防御性归一化：引擎、模型、置信度（0-100）、研判时间与理由。 */
+    /** task.ai 的防御性归一化：引擎、模型 / 提供方、置信度（0-100）、研判时间与理由。 */
     function aiInfoOf(task) {
       const raw = task && task.ai && typeof task.ai === "object" ? task.ai : null;
       if (!raw) return null;
@@ -262,6 +279,8 @@ window.__ModuleLoader__.load({
       return {
         engine: raw.engine === "llm" ? "llm" : "rules",
         model: String(raw.model || "").trim(),
+        // 旧任务没有 provider（老数据），保持空串即可，UI 降级为只显示 model。
+        provider: String(raw.provider || "").trim(),
         confidence: Number.isFinite(Number(raw.confidence)) ? Math.round(Math.max(0, Math.min(1, Number(raw.confidence))) * 100) : null,
         analyzedAt: Number.isFinite(analyzedAt) ? analyzedAt : null,
         reason: String(raw.reason || "").trim(),
@@ -312,6 +331,316 @@ window.__ModuleLoader__.load({
       if (!value) return "—";
       if (value < 1000) return value + "ms";
       return (value / 1000).toFixed(1) + "s";
+    }
+
+    /* --------------------- v0.5：AI 模型 / 预算辅助函数 --------------------- */
+
+    // /ai/models 的模块级缓存：设置弹窗打开时拉取，抽屉只读 provider 显示名映射。
+    let aiCatalogCache = null; // { at, catalogAvailable, default, providers, models, groups, failures, fetchedAt }
+    let aiCatalogProviders = []; // [{ id, name, modelCount }]
+
+    function textOf(value) {
+      return value === null || value === undefined ? "" : String(value).trim();
+    }
+
+    /** aiBudgetMode 归一化：只认 "fixed"，其余（缺失 / 脏值）一律按默认 auto；禁止用数字 0 表示自动。 */
+    function aiBudgetModeOf(mode) {
+      return mode === "fixed" ? "fixed" : AI_BUDGET_MODE_DEFAULT;
+    }
+
+    function isAutoBudgetMode(mode) {
+      return aiBudgetModeOf(mode) === "auto";
+    }
+
+    /** settings.aiProvider + aiModel 成对读取；只有一半时视为「跟随 DSH 默认」。 */
+    function aiModelRef(settings) {
+      if (!settings || typeof settings !== "object") return null;
+      const provider = textOf(settings.aiProvider);
+      const model = textOf(settings.aiModel);
+      return provider && model ? { provider, model } : null;
+    }
+
+    /** select 的 option value：""=跟随默认；具体模型用 JSON 数组编码，避免 id 里 : / @ 产生歧义。 */
+    function aiModelValue(ref) {
+      return ref && ref.provider && ref.model ? JSON.stringify([ref.provider, ref.model]) : "";
+    }
+
+    function parseAiModelValue(value) {
+      if (typeof value !== "string" || !value) return null;
+      try {
+        const parsed = JSON.parse(value);
+        if (!Array.isArray(parsed) || parsed.length !== 2) return null;
+        const provider = textOf(parsed[0]);
+        const model = textOf(parsed[1]);
+        return provider && model ? { provider, model } : null;
+      } catch {
+        return null;
+      }
+    }
+
+    /** 固定档兜底：当前值不在标准档位时补一项，旧 state / 手改值也能显示与回切。 */
+    function withAiCallOptions(value) {
+      const number = Number(value);
+      const extra =
+        Number.isFinite(number) && number >= AI_MAX_CALLS_MIN && number <= AI_MAX_CALLS_MAX ? Math.round(number) : null;
+      const options = MAX_AI_CALL_OPTIONS.slice();
+      if (extra !== null && !options.includes(extra)) {
+        options.push(extra);
+        options.sort((left, right) => left - right);
+      }
+      return options;
+    }
+
+    /** 是否第三方 provider：只按 id 前缀判断 DSH 内置 DeepSeek 官方通道（账号 / API Key）。 */
+    function isThirdPartyProvider(provider) {
+      const id = textOf(provider).toLowerCase();
+      return Boolean(id) && !id.startsWith("deepseek");
+    }
+
+    /** provider 显示名：优先用本次会话已加载的模型目录，缺失回落 id（抽屉不额外发请求）。 */
+    function providerLabel(id) {
+      const providerId = textOf(id);
+      if (!providerId) return "";
+      const hit = aiCatalogProviders.find((provider) => provider.id === providerId);
+      return (hit && hit.name) || providerId;
+    }
+
+    function modelNameOf(provider, model) {
+      const providerId = textOf(provider);
+      const modelId = textOf(model);
+      const hit =
+        aiCatalogCache && Array.isArray(aiCatalogCache.models)
+          ? aiCatalogCache.models.find((item) => item.provider === providerId && item.id === modelId)
+          : null;
+      return (hit && hit.name) || modelId;
+    }
+
+    /** 「provider 显示名 / model 显示名」；provider 缺失时只给 model（旧任务样式）。 */
+    function modelLabel(provider, model) {
+      const providerId = textOf(provider);
+      const modelText = modelNameOf(providerId, model);
+      return providerId ? `${providerLabel(providerId)} / ${modelText}` : modelText;
+    }
+
+    /**
+     * GET /ai/models 的容错归一化。契约是扁平包络（提案 §2.3-3）；
+     * payload.data ?? payload 仅作为旧实现兜底，不作为契约。
+     */
+    function normalizeAiCatalog(payload) {
+      const body = payload && payload.data && typeof payload.data === "object" ? payload.data : payload;
+      const source = body && typeof body === "object" ? body : {};
+      const providers = [];
+      const providerById = new Map();
+      for (const item of Array.isArray(source.providers) ? source.providers : []) {
+        const raw = typeof item === "string" ? { id: item } : item;
+        if (!raw || typeof raw !== "object") continue;
+        const id = textOf(raw.id);
+        if (!id || providerById.has(id)) continue;
+        const provider = { id, name: textOf(raw.name) || id, modelCount: Number(raw.modelCount) || 0 };
+        providerById.set(id, provider);
+        providers.push(provider);
+      }
+      const models = [];
+      const seenModels = new Set();
+      for (const item of Array.isArray(source.models) ? source.models : []) {
+        if (!item || typeof item !== "object") continue;
+        const provider = textOf(item.provider);
+        const id = textOf(item.id);
+        if (!provider || !id || seenModels.has(provider + "\u0000" + id)) continue;
+        seenModels.add(provider + "\u0000" + id);
+        models.push({ provider, id, name: textOf(item.name) || id });
+      }
+      // models 里出现、但 providers 没列的 provider：补一个占位，保证 optgroup 有标题。
+      for (const model of models) {
+        if (providerById.has(model.provider)) continue;
+        const provider = { id: model.provider, name: model.provider, modelCount: 0 };
+        providerById.set(provider.id, provider);
+        providers.push(provider);
+      }
+      const groups = providers
+        .map((provider) => ({ provider, models: models.filter((model) => model.provider === provider.id) }))
+        .filter((group) => group.models.length > 0);
+      const failures = (Array.isArray(source.failures) ? source.failures : [])
+        .slice(0, 8)
+        .reduce((list, item) => {
+          if (!item || typeof item !== "object") return list;
+          const providerId = textOf(item.provider);
+          const name = textOf(item.name) || providerId;
+          if (!providerId && !name) return list;
+          list.push({ provider: providerId, name, message: textOf(item.message) });
+          return list;
+        }, []);
+      const rawDefault = source.default && typeof source.default === "object" ? source.default : null;
+      const defaultRef =
+        rawDefault && textOf(rawDefault.provider) && textOf(rawDefault.model)
+          ? { provider: textOf(rawDefault.provider), model: textOf(rawDefault.model) }
+          : null;
+      return {
+        catalogAvailable: source.catalogAvailable === true,
+        default: defaultRef,
+        providers,
+        models,
+        groups,
+        failures,
+        fetchedAt: textOf(source.fetchedAt),
+      };
+    }
+
+    /**
+     * 模型目录状态机：loading / refreshing / ready / empty / unavailable / error。
+     * 打开弹窗时拉取；30s 内重开先用缓存渲染再后台刷新；失败不阻塞其它设置保存。
+     */
+    function useAiCatalog() {
+      const initialStatus = () => {
+        if (!aiCatalogCache) return { status: "loading", data: null, error: "", announce: "" };
+        const base = aiCatalogCache.catalogAvailable ? (aiCatalogCache.models.length ? "ready" : "empty") : "unavailable";
+        const fresh = Date.now() - (Number(aiCatalogCache.at) || 0) < AI_CATALOG_TTL_MS;
+        // 30s 内命中缓存直接按终态渲染；过期缓存先展示旧目录并标记 refreshing（stale-while-revalidate）。
+        return { status: fresh ? base : "refreshing", data: aiCatalogCache, error: "", announce: "" };
+      };
+      const [state, setState] = React.useState(initialStatus);
+      const mountedRef = React.useRef(true);
+      const busyRef = React.useRef(false);
+      const abortRef = React.useRef(null);
+      const requestRef = React.useRef(0);
+
+      const load = React.useCallback(async (manual) => {
+        if (busyRef.current) return;
+        busyRef.current = true;
+        const requestId = (requestRef.current += 1);
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const timer = setTimeout(() => controller.abort(), AI_CATALOG_TIMEOUT_MS);
+        setState((prev) =>
+          prev.data
+            ? { ...prev, status: "refreshing", announce: "" }
+            : { status: "loading", data: null, error: "", announce: "" },
+        );
+        try {
+          const payload = await apiRequest("/ai/models", { signal: controller.signal });
+          const catalog = normalizeAiCatalog(payload);
+          aiCatalogCache = { ...catalog, at: Date.now() };
+          aiCatalogProviders = catalog.providers;
+          if (!mountedRef.current || requestRef.current !== requestId) return;
+          const modelCount = catalog.models.length;
+          const status = catalog.catalogAvailable ? (modelCount ? "ready" : "empty") : "unavailable";
+          setState({
+            status,
+            data: catalog,
+            error: "",
+            announce: manual ? `模型目录已更新，共 ${modelCount} 个模型` : "",
+          });
+        } catch (cause) {
+          // 卸载 / 过期请求（例如 StrictMode 重挂载）一律静默，避免脏状态覆盖新请求。
+          if (!mountedRef.current || requestRef.current !== requestId) return;
+          const aborted = Boolean(cause && cause.name === "AbortError");
+          const message = aborted
+            ? `读取超时（${AI_CATALOG_TIMEOUT_MS / 1000} 秒）`
+            : String((cause && cause.message) || cause);
+          // 旧 Host 没有该端点：按「目录不可用」降级，不弹错误。
+          const status = cause?.status === 404 || /HTTP 404/.test(message) ? "unavailable" : "error";
+          setState((prev) => ({
+            status,
+            data: prev.data,
+            error: status === "unavailable" ? "" : message,
+            announce: manual && status === "error" ? `模型目录读取失败：${message}` : "",
+          }));
+        } finally {
+          clearTimeout(timer);
+          busyRef.current = false;
+          abortRef.current = null;
+        }
+      }, []);
+
+      React.useEffect(() => {
+        mountedRef.current = true;
+        load(false);
+        return () => {
+          mountedRef.current = false;
+          requestRef.current += 1;
+          const controller = abortRef.current;
+          busyRef.current = false;
+          if (controller) controller.abort();
+        };
+      }, [load]);
+
+      const refresh = React.useCallback(() => load(true), [load]);
+      return { status: state.status, data: state.data, error: state.error, announce: state.announce, refresh };
+    }
+
+    /** 模型说明行文案：状态机各态的可见文案 + 是否用琥珀强调 + 可选操作。 */
+    function catalogNote(catalog, current) {
+      const data = catalog.data;
+      const models = (data && data.models) || [];
+      const failures = (data && data.failures) || [];
+      const defaultRef = (data && data.default) || null;
+      const failText = failures.length
+        ? ` ${failures.length} 个提供方读取失败，仅显示可用模型（${failures[0].name || failures[0].provider}${failures[0].message ? "：" + failures[0].message : ""}）。`
+        : "";
+      if (catalog.status === "loading") return { text: "正在读取模型目录…", warn: false };
+      if (catalog.status === "unavailable") {
+        return current
+          ? { text: `已保存：${modelLabel(current.provider, current.model)}；当前无法读取模型目录。`, warn: true, followDefault: true }
+          : {
+              text: "当前 DSH 不支持原生模型，扫描将退回本地规则推断。可在「DSH 设置 → 模型」中配置模型提供方或自定义模型 API，或升级 DSH 后重试。",
+              warn: false,
+            };
+      }
+      if (catalog.status === "error") {
+        return {
+          text: `读取模型目录失败：${catalog.error || "未知错误"}`,
+          warn: true,
+          retry: true,
+          followDefault: Boolean(current),
+        };
+      }
+      if (catalog.status === "empty") {
+        // 三种空态文案不同：读取失败 / 已配置提供方但无模型 / 完全没有提供方。
+        if (failures.length) {
+          return {
+            text: `部分模型提供方读取失败（${failures.length} 个），暂无可用模型；可点右侧刷新重试，或稍后在「DSH 设置 → 模型」检查。`,
+            warn: true,
+          };
+        }
+        const hasProviders = Boolean(data && Array.isArray(data.providers) && data.providers.length > 0);
+        return hasProviders
+          ? {
+              text: "已添加模型提供方，但目录中没有可用模型；请在「DSH 设置 → 模型」中检查凭证或添加模型，再点右侧刷新。",
+              warn: false,
+            }
+          : {
+              text: "DSH 模型目录中没有可用模型。请先在「DSH 设置 → 模型」中添加模型提供方并配置模型，再点右侧刷新。",
+              warn: false,
+            };
+      }
+      if (current) {
+        const found = models.some((item) => item.provider === current.provider && item.id === current.model);
+        if (!found) {
+          return {
+            text: `已保存的模型不在当前目录中，扫描时会降级为规则推断。请在「DSH 设置 → 模型」中启用后点刷新，或改为跟随默认。${failText}`,
+            warn: true,
+            followDefault: true,
+          };
+        }
+        return { text: `使用 ${modelLabel(current.provider, current.model)}。${failText}`, warn: failures.length > 0 };
+      }
+      if (!defaultRef) {
+        return {
+          text: `未读取到 DSH 默认模型；扫描时会回退到模型目录中第一个有模型的 provider 的模型（没有可用模型时用规则推断）。${failText}`,
+          warn: true,
+        };
+      }
+      const defaultFound = models.some((item) => item.provider === defaultRef.provider && item.id === defaultRef.model);
+      if (!defaultFound) {
+        return {
+          text: `当前 DSH 默认：${modelLabel(defaultRef.provider, defaultRef.model)}（当前目录中不可用，扫描可能降级为规则推断；不会自动切换模型）。${failText}`,
+          warn: true,
+        };
+      }
+      return {
+        text: `当前 DSH 默认：${modelLabel(defaultRef.provider, defaultRef.model)}。${failText}`,
+        warn: failures.length > 0,
+      };
     }
 
     function statusOf(task) {
@@ -1131,6 +1460,29 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-page.is-side.sk-tier-narrow .sk-stats-v3{flex:0 0 100%;order:1;white-space:normal;flex-wrap:wrap;row-gap:2px;max-height:3.1em}
 .sk-page.is-side.sk-tier-narrow .sk-header-actions{order:2;margin-left:auto}
 
+/* ======================= v0.5：AI 模型 / 预算 / 用量 ======================= */
+/* 模型选择：全宽 block + 原生 select，420px 侧栏纵向堆叠；只用 token 与 color-mix，无彩色盒子 */
+.sk-settings-block{display:flex;flex-direction:column;gap:8px;border-top:0.5px solid var(--sk-line-soft);padding-top:12px;min-width:0}
+.sk-settings-block-head{display:flex;align-items:flex-start;gap:8px;min-width:0}
+.sk-settings-block .label{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
+.sk-settings-block .label b{font-size:13px;font-weight:500}
+.sk-settings-block .label span{font-size:12px;line-height:1.45;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
+.sk-settings-controls{display:flex;align-items:center;gap:6px;min-width:0}
+.sk-settings-controls .sk-select{flex:1;min-width:0;height:30px;font-size:12px;text-overflow:ellipsis}
+.sk-model-refresh{width:28px;height:28px;border-radius:7px}
+.sk-model-refresh:disabled{opacity:.4;cursor:not-allowed}
+.sk-model-refresh.is-busy{opacity:.55;cursor:progress}
+.sk-catalog-note{margin:0;font-size:11px;line-height:1.5;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);overflow-wrap:anywhere}
+.sk-catalog-note.is-warn{color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 80%,var(--sk-ink))}
+.sk-catalog-note .sk-text{font-size:11px;margin-left:2px}
+/* 用量行：安静文字 + 琥珀警告，不做色块 / 进度条 */
+.sk-usage-rest{font-variant-numeric:tabular-nums;white-space:nowrap}
+.sk-usage-note{margin:0;font-size:11px;line-height:1.5;color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
+/* 运行中 AI 调用进度：统计行内小字，tabular-nums 避免数字跳动 */
+.sk-scan-ai{font-variant-numeric:tabular-nums;white-space:nowrap}
+/* 抽屉 AI 研判块：provider / model 过长时省略，避免挤掉置信度与时间 */
+.sk-ai-review-model{max-width:min(280px,48vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 `;
 
     function ensureStyle() {
@@ -1850,6 +2202,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         .sort((left, right) => (severityRank[left?.severity] ?? 9) - (severityRank[right?.severity] ?? 9));
       const nextSteps = Array.isArray(task.nextSteps) ? task.nextSteps : [];
       const aiInfo = aiInfoOf(task);
+      // 新旧兼容：有 provider 时显示「provider 显示名 / model」；旧任务只有 model 时保持单模型名样式。
+      const aiModelText =
+        aiInfo && aiInfo.engine === "llm"
+          ? [aiInfo.provider ? providerLabel(aiInfo.provider) : "", aiInfo.model].filter(Boolean).join(" / ")
+          : "";
       // 「可能已过期」只在会话在研判之后又产生了活动时提示：没有新活动时，
       // 旧研判仍然有效；按扫描间隔判断会让所有旧任务都误报过期。
       const lastActivityAt = Number((task.sessionContext && task.sessionContext.lastActivityAt) || task.lastActivityAt) || 0;
@@ -2248,7 +2605,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                             { className: "sk-ai-review-head" },
                             h(Icon, { name: "spark", size: 12 }),
                             h("span", { className: "sk-ai-review-title" }, analyzeBusy ? "重新研判中…" : aiInfo.engine === "llm" ? "AI 研判" : "规则推断"),
-                            aiInfo.engine === "llm" && aiInfo.model ? h("span", { className: "sk-ai-review-meta" }, aiInfo.model) : null,
+                            aiModelText
+                              ? h("span", { className: "sk-ai-review-meta sk-ai-review-model", title: aiModelText }, aiModelText)
+                              : null,
                             aiInfo.engine === "llm" && aiInfo.confidence !== null ? h("span", { className: "sk-ai-review-meta" }, `${aiInfo.confidence}%`) : null,
                             aiInfo.analyzedAt ? h("span", { className: "sk-ai-review-meta" }, relTime(aiInfo.analyzedAt)) : null,
                             aiStale ? h("span", { className: "sk-ai-review-stale" }, "可能已过期") : null,
@@ -2663,23 +3022,153 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       );
     }
 
+    /**
+     * 设置弹窗「AI 研判模型」全宽 block：原生 select + optgroup（零依赖、键盘/读屏/420px 原生可用）。
+     * 模型目录只读 DSH；第三方模型与凭证在「DSH 设置 → 模型」配置，看板不保存凭证。
+     */
+    function AiModelBlock({ draft, set, catalog }) {
+      const data = catalog.data;
+      const models = (data && data.models) || [];
+      const groups = (data && data.groups) || [];
+      const current = aiModelRef(draft);
+      const found = current
+        ? models.some((item) => item.provider === current.provider && item.id === current.model)
+        : true;
+      const busy = catalog.status === "loading" || catalog.status === "refreshing";
+      // 刷新期间不 disabled（disabled 会让焦点掉出弹窗），用 aria-busy + 内部去重防重复请求。
+      const refreshDisabled = catalog.status === "loading";
+      const disabled = catalog.status === "loading";
+      const note = catalogNote(catalog, current);
+      const effectiveProvider = current ? current.provider : data && data.default ? data.default.provider : "";
+      const thirdParty = isThirdPartyProvider(effectiveProvider);
+      const guideText = thirdParty
+        ? `AI 研判会把会话压缩摘要发送给「${providerLabel(effectiveProvider)}」模型服务商；第三方模型与 API Key 在「DSH 设置 → 模型」中配置，看板只读取、不保存凭证。`
+        : "第三方模型与 API Key 在「DSH 设置 → 模型」中配置；看板只读取已配置的模型，不保存凭证。";
+
+      const options = [h("option", { key: "follow", value: "" }, "跟随 DSH 默认")];
+      if (current && !found) {
+        options.push(
+          h(
+            "optgroup",
+            { key: "saved", label: "已保存" },
+            h("option", { value: aiModelValue(current) }, `${modelLabel(current.provider, current.model)}（目录中未找到）`),
+          ),
+        );
+      }
+      for (const group of groups) {
+        options.push(
+          h(
+            "optgroup",
+            { key: group.provider.id, label: group.provider.name || group.provider.id },
+            group.models.map((model) =>
+              h(
+                "option",
+                { key: group.provider.id + "\u0000" + model.id, value: aiModelValue({ provider: group.provider.id, model: model.id }) },
+                model.name || model.id,
+              ),
+            ),
+          ),
+        );
+      }
+
+      return h(
+        "div",
+        { className: "sk-settings-block" },
+        h(
+          "div",
+          { className: "sk-settings-block-head" },
+          h(
+            "div",
+            { className: "label", id: "sk-ai-model-label" },
+            h("b", null, "AI 研判模型"),
+            h("span", null, "默认跟随 DSH 的默认模型；也可以指定一个已在 DSH 中配置的模型"),
+          ),
+          catalog.status === "unavailable"
+            ? null
+            : h(
+                "button",
+                {
+                  type: "button",
+                  className: cx("sk-iconbtn-v3 sk-model-refresh", catalog.status === "refreshing" && "is-busy"),
+                  title: "刷新模型目录",
+                  "aria-label": "刷新模型目录",
+                  "aria-busy": busy ? "true" : undefined,
+                  disabled: refreshDisabled,
+                  onClick: catalog.refresh,
+                },
+                h(Icon, { name: "refresh", size: 14 }),
+              ),
+        ),
+        h(
+          "div",
+          { className: "sk-settings-controls" },
+          h(
+            "select",
+            {
+              id: "sk-ai-model",
+              className: "sk-select sk-model-select",
+              "aria-labelledby": "sk-ai-model-label",
+              "aria-describedby": "sk-ai-model-desc sk-ai-model-guide sk-ai-model-status",
+              title: current ? modelLabel(current.provider, current.model) : "跟随 DSH 默认",
+              value: aiModelValue(current),
+              disabled,
+              onChange: (event) => {
+                const next = parseAiModelValue(event.target.value);
+                // 一次 set 两个字段，避免出现「只有 provider / 只有 model」的混合态。
+                set(next ? { aiProvider: next.provider, aiModel: next.model } : { aiProvider: "", aiModel: "" });
+              },
+            },
+            options,
+          ),
+        ),
+        h(
+          "p",
+          { id: "sk-ai-model-desc", className: cx("sk-catalog-note", note.warn && "is-warn") },
+          note.text,
+          note.followDefault
+            ? h("button", { type: "button", className: "sk-text", onClick: () => set({ aiProvider: "", aiModel: "" }) }, "改为跟随默认")
+            : null,
+          note.retry ? h("button", { type: "button", className: "sk-text", onClick: catalog.refresh }, "重试") : null,
+        ),
+        h("p", { id: "sk-ai-model-guide", className: cx("sk-catalog-note", thirdParty && "is-warn") }, guideText),
+        h(
+          "span",
+          { id: "sk-ai-model-status", role: "status", "aria-live": "polite", className: "sk-sr-only" },
+          catalog.announce || "",
+        ),
+      );
+    }
+
     function SettingsModal({ settings, workspaces, prefs, usage, onPrefsChange, onClose, onSave, onScan, pushToast }) {
-      const [draft, setDraft] = React.useState(() => ({
-        aiEnabled: settings.aiEnabled !== false,
-        autoScan: settings.autoScan !== false,
-        scanIntervalSeconds: settings.scanIntervalSeconds || 120,
-        initialDays: settings.initialDays || 30,
-        maxAiCallsPerScan: settings.maxAiCallsPerScan || 40,
-        dailyAiCallLimit: settings.dailyAiCallLimit || 150,
-        excludeWorkspaces: Array.isArray(settings.excludeWorkspaces) ? settings.excludeWorkspaces.slice() : [],
-      }));
+      const [draft, setDraft] = React.useState(() => {
+        // aiProvider / aiModel 必须成对：任一为空都归一为「跟随 DSH 默认」。
+        const savedModel = aiModelRef(settings);
+        return {
+          aiEnabled: settings.aiEnabled !== false,
+          autoScan: settings.autoScan !== false,
+          scanIntervalSeconds: settings.scanIntervalSeconds || 120,
+          initialDays: settings.initialDays || 30,
+          aiProvider: savedModel ? savedModel.provider : "",
+          aiModel: savedModel ? savedModel.model : "",
+          // 新字段一律用 ?? 初始化（禁止 || 回退，否则 0 / "auto" 会被误判）。
+          aiBudgetMode: settings.aiBudgetMode ?? AI_BUDGET_MODE_DEFAULT,
+          maxAiCallsPerScan: settings.maxAiCallsPerScan ?? AI_MAX_CALLS_DEFAULT,
+          dailyAiCallLimit: settings.dailyAiCallLimit || 150,
+          excludeWorkspaces: Array.isArray(settings.excludeWorkspaces) ? settings.excludeWorkspaces.slice() : [],
+        };
+      });
       const [saving, setSaving] = React.useState(false);
       // 入口偏好先暂存，取消不会写入；只有「保存设置」才真正落盘（需要刷新窗口生效）。
       const [entryDraft, setEntryDraft] = React.useState(() => prefsMode(prefs));
       const dialogRef = React.useRef(null);
       useDialogFocus(dialogRef, onClose);
       useBodyScrollLock();
+      // 模型目录只在弹窗打开时拉取；30s 内重开先用缓存渲染再后台刷新。
+      const catalog = useAiCatalog();
       const set = (patch) => setDraft((value) => ({ ...value, ...patch }));
+      const dailyLimit = Number(draft.dailyAiCallLimit) || 150;
+      const dailyRemaining = usage ? Math.max(0, dailyLimit - usage.calls) : 0;
+      const fixedLimit = Number(draft.maxAiCallsPerScan) || AI_MAX_CALLS_DEFAULT;
       const entryMode = entryDraft;
       const chooseEntry = (mode) => setEntryDraft(mode);
       const toggleWorkspace = (id) => {
@@ -2696,7 +3185,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           await command("settings.update", { patch: draft });
           const entryChanged = entryDraft !== prefsMode(prefs);
           if (entryChanged) onPrefsChange(modePrefs(entryDraft));
-          pushToast(entryChanged ? "设置已保存；入口偏好需刷新窗口（Cmd+R）生效" : "设置已保存", "info");
+          pushToast(entryChanged ? "设置已保存；入口偏好需刷新窗口（Cmd+R）生效" : "设置已保存（模型与预算在下次扫描或重新研判时生效）", "info");
           await onSave();
         } catch (cause) {
           pushToast(`保存失败：${cause.message}`, "error");
@@ -2728,9 +3217,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h(
             "div",
             { className: "sk-settings-row" },
-            h("div", { className: "label" }, h("b", null, "AI 联网研判"), h("span", null, "使用本机 DSH 账号模型额度分析会话；关闭后仅用本地规则推断")),
+            h("div", { className: "label" }, h("b", null, "AI 联网研判"), h("span", null, "使用 DSH 配置的模型（含第三方）分析会话摘要；关闭后仅用本地规则推断")),
             h("button", { type: "button", className: cx("sk-switch", draft.aiEnabled && "on"), onClick: () => set({ aiEnabled: !draft.aiEnabled }), "aria-label": "AI 联网研判", role: "switch", "aria-checked": draft.aiEnabled }, h("i")),
           ),
+          h(AiModelBlock, { draft, set, catalog }),
           h(
             "div",
             { className: "sk-settings-row" },
@@ -2760,33 +3250,72 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h(
             "div",
             { className: "sk-settings-row" },
-            h("div", { className: "label" }, h("b", null, "AI 预算 · 单次扫描上限"), h("span", null, "超出后本次扫描降级为规则推断")),
+            h(
+              "div",
+              { className: "label" },
+              h("b", null, "AI 预算 · 单次扫描上限"),
+              h(
+                "span",
+                null,
+                isAutoBudgetMode(draft.aiBudgetMode)
+                  ? "自动使用当日剩余额度，单次最多约 10 分钟；超出后剩余会话下次扫描继续"
+                  : "超出后本次其余会话用规则卡，下次扫描继续研判",
+              ),
+            ),
             h(
               "select",
-              { className: "sk-select", "aria-label": "单次扫描 AI 调用上限", value: draft.maxAiCallsPerScan, onChange: (event) => set({ maxAiCallsPerScan: Number(event.target.value) }) },
-              [10, 20, 40].map((value) => h("option", { key: value, value }, `${value} 次`)),
+              {
+                className: "sk-select",
+                "aria-label": "单次扫描 AI 调用上限",
+                // 单个下拉、内部两个字段：auto 只改 aiBudgetMode（保留数字），固定档同时写数字。
+                value: isAutoBudgetMode(draft.aiBudgetMode) ? "auto" : String(draft.maxAiCallsPerScan),
+                onChange: (event) => {
+                  if (event.target.value === "auto") set({ aiBudgetMode: "auto" });
+                  else set({ aiBudgetMode: "fixed", maxAiCallsPerScan: Number(event.target.value) });
+                },
+              },
+              h("option", { key: "auto", value: "auto" }, "自动（推荐）"),
+              withAiCallOptions(draft.maxAiCallsPerScan).map((value) => h("option", { key: String(value), value: String(value) }, `固定 ${value} 次`)),
             ),
           ),
           h(
             "div",
             { className: "sk-settings-row" },
-            h("div", { className: "label" }, h("b", null, "AI 预算 · 每日上限"), h("span", null, "超限后当日只跑规则并提示")),
+            h("div", { className: "label" }, h("b", null, "AI 预算 · 每日上限"), h("span", null, "每日 AI 研判上限，用完后当日仅规则推断；按本机日历日 0 点重置")),
             h(
               "select",
               { className: "sk-select", "aria-label": "每日 AI 调用上限", value: draft.dailyAiCallLimit, onChange: (event) => set({ dailyAiCallLimit: Number(event.target.value) }) },
-              [50, 150, 300, 500].map((value) => h("option", { key: value, value }, `${value} 次`)),
+              DAILY_AI_CALL_OPTIONS.map((value) => h("option", { key: value, value }, `${value} 次`)),
             ),
           ),
           usage
             ? h(
                 "div",
                 { className: "sk-usage" },
-                h("div", { className: "sk-usage-row" }, h("span", null, "今日 AI 调用 ", h("b", null, usage.calls), " 次 / ", usage.date || "今天"), h("span", null, "tokens ", h("b", null, fmtTokens(usage.tokens)))),
+                h(
+                  "div",
+                  { className: "sk-usage-row" },
+                  h("span", null, "今日 AI 调用 ", h("b", null, usage.calls), " / ", h("b", null, dailyLimit), " 次"),
+                  h("span", { className: "sk-usage-rest" }, "剩余 ", h("b", null, dailyRemaining), " 次"),
+                  h("span", null, "tokens ", h("b", null, fmtTokens(usage.tokens))),
+                ),
                 h(
                   "div",
                   { className: "sk-usage-row" },
                   h("span", null, "上次扫描：", h("b", null, usage.lastScan.calls), " 次调用 · ", h("b", null, fmtTokens(usage.lastScan.tokens)), " tokens · ", h("b", null, fmtDuration(usage.lastScan.durationMs))),
-                  usage.calls >= draft.dailyAiCallLimit ? h("span", { className: "sk-usage-warn" }, "已达每日上限，将降级规则") : null,
+                ),
+                // 用量不足 / 耗尽只用安静的琥珀文字，不做彩色盒子或进度条。
+                dailyRemaining === 0
+                  ? h("div", { className: "sk-usage-warn" }, "已达今日 AI 上限，剩余会话明日继续；可调高每日上限或等待 0 点重置。")
+                  : isAutoBudgetMode(draft.aiBudgetMode)
+                    ? h("div", { className: "sk-usage-note" }, `单次上限：自动（本次最多 ${dailyRemaining} 次，AI 阶段最多 10 分钟）`)
+                    : dailyRemaining < fixedLimit
+                      ? h("div", { className: "sk-usage-warn" }, `今日剩余仅 ${dailyRemaining} 次，本次最多 ${dailyRemaining} 次`)
+                      : null,
+                h(
+                  "p",
+                  { className: "sk-usage-note" },
+                  `每日上限按本机日历日 0 点重置（今日 ${usage.date || "今天"}）。首次全量扫描会话较多时可能需要几分钟；可随时取消，已完成部分会保留。`,
                 ),
               )
             : h("div", { className: "sk-usage" }, h("div", { className: "sk-usage-row" }, "今日用量：Host v2 就绪后显示")),
@@ -2847,7 +3376,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             { className: "sk-inline-actions", style: { borderTop: "0.5px solid var(--dsw-alias-border-l1)", paddingTop: 11 } },
             h(
               "button",
-              { type: "button", className: "sk-btn", onClick: () => onScan("full") },
+              { type: "button", className: "sk-btn", title: "将按当前 AI 预算研判全部会话", onClick: () => onScan("full") },
               h(Icon, { name: "refresh", size: 12 }),
               "立即全量重扫",
             ),
@@ -2856,7 +3385,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h(
             "p",
             { className: "sub" },
-            "数据只存在本机 ~/.dsh/storages/super-kanban/；AI 研判只发送压缩后的会话摘要，不发送文件内容与凭证。",
+            "数据只存在本机 ~/.dsh/storages/super-kanban/；模型与凭证由 DSH 管理。AI 研判只发送压缩后的会话摘要（不发送文件内容与凭证）；若选择第三方模型，摘要会发送给你配置的模型服务商。",
           ),
           h(
             "div",
@@ -3089,13 +3618,24 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const drawerTask = drawerId ? tasks.find((task) => task.id === drawerId) : null;
 
       const scanRunning = scan.state === "running";
+      // 运行中 AI 进度：Host 已把 aiBudgetMode 解析成 scan.aiBudget；旧 Host 无该字段时只显示已用次数。
+      const scanAiCalls = Number(scan.aiCalls) || 0;
+      const scanAiBudget = Number(scan.aiBudget) > 0 ? Math.round(Number(scan.aiBudget)) : null;
+      const scanAiSegment =
+        scanRunning && settings.aiEnabled !== false && scanAiCalls > 0
+          ? ` · AI ${scanAiCalls}${scanAiBudget ? "/" + scanAiBudget : " 次"}`
+          : "";
+      // 完成播报补「剩余 N 个下次继续」：scan.aiPending 含失败待重试（Host 可选字段）。
+      const scanPending = Number(scan.aiPending) > 0 ? Math.round(Number(scan.aiPending)) : 0;
       // 读屏播报扫描状态（可见区已有文字，这里不重复显示）。
       const scanAnnounce = scanRunning
-        ? `扫描中 ${scan.processed || 0}/${scan.total || 0}`
+        ? `扫描中 ${scan.processed || 0}/${scan.total || 0}${scanAiCalls > 0 ? `，AI ${scanAiCalls} 次` : ""}`
         : scan.state === "error"
           ? `扫描失败：${scan.error || scan.message || "未知错误"}`
           : scan.state === "done"
-            ? `扫描完成：新增 ${scan.newTasks || 0}，更新 ${scan.updatedTasks || 0}`
+            ? `扫描完成：新增 ${scan.newTasks || 0}，更新 ${scan.updatedTasks || 0}${
+                scanPending > 0 ? `，剩余 ${scanPending} 个会话下次扫描继续` : ""
+              }`
             : "";
 
       // 扫描从 running 结束时给一次结论 toast（轮询里状态会先 running 后 done/error）。
@@ -3250,6 +3790,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               null,
               h("span", { className: "sk-status-dot is-running" }),
               h("span", null, `扫描中 ${scan.processed || 0}/${scan.total || 0}`),
+              scanAiSegment ? h("span", { className: "sk-scan-ai" }, scanAiSegment) : null,
               h("button", { type: "button", className: "sk-textlink", onClick: cancelScan }, "取消"),
             )
           : scan.state === "error"

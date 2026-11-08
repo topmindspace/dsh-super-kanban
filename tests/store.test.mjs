@@ -2,7 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
-import { DEFAULT_SETTINGS, normalizeSettingsPatch, rolloverUsage, todayKey } from "../server/store.mjs";
+import {
+  AI_CALLS_PER_SCAN_MAX,
+  AI_CALLS_PER_SCAN_MIN,
+  DEFAULT_SETTINGS,
+  emptyScanState,
+  normalizeAiRoutePair,
+  normalizeSettingsPatch,
+  rolloverUsage,
+  todayKey,
+} from "../server/store.mjs";
 
 test("normalizeSettingsPatch ignores non-object input", () => {
   assert.deepEqual(normalizeSettingsPatch(null), {});
@@ -39,9 +48,17 @@ test("normalizeSettingsPatch clamps maxTasksPerSession to 1..10", () => {
 });
 
 test("normalizeSettingsPatch clamps the AI budgets", () => {
+  // v3: the fixed per-scan cap widened from 5..40 to 5..150.
+  assert.equal(AI_CALLS_PER_SCAN_MIN, 5);
+  assert.equal(AI_CALLS_PER_SCAN_MAX, 150);
   assert.equal(normalizeSettingsPatch({ maxAiCallsPerScan: 1 }).maxAiCallsPerScan, 5);
-  assert.equal(normalizeSettingsPatch({ maxAiCallsPerScan: 100 }).maxAiCallsPerScan, 40);
+  assert.equal(normalizeSettingsPatch({ maxAiCallsPerScan: 0 }).maxAiCallsPerScan, 5);
+  assert.equal(normalizeSettingsPatch({ maxAiCallsPerScan: -3 }).maxAiCallsPerScan, 5);
+  assert.equal(normalizeSettingsPatch({ maxAiCallsPerScan: 100 }).maxAiCallsPerScan, 100);
   assert.equal(normalizeSettingsPatch({ maxAiCallsPerScan: 12 }).maxAiCallsPerScan, 12);
+  assert.equal(normalizeSettingsPatch({ maxAiCallsPerScan: 9999 }).maxAiCallsPerScan, 150);
+  assert.equal(normalizeSettingsPatch({ maxAiCallsPerScan: 150 }).maxAiCallsPerScan, 150);
+  // dailyAiCallLimit is unchanged (10..500, default 150).
   assert.equal(normalizeSettingsPatch({ dailyAiCallLimit: 1 }).dailyAiCallLimit, 10);
   assert.equal(normalizeSettingsPatch({ dailyAiCallLimit: 9999 }).dailyAiCallLimit, 500);
   assert.equal(normalizeSettingsPatch({ dailyAiCallLimit: 150 }).dailyAiCallLimit, 150);
@@ -50,6 +67,53 @@ test("normalizeSettingsPatch clamps the AI budgets", () => {
 test("normalizeSettingsPatch drops non-finite numeric values", () => {
   assert.deepEqual(normalizeSettingsPatch({ scanIntervalSeconds: Infinity, initialDays: NaN }), {});
   assert.deepEqual(normalizeSettingsPatch({ maxAiCallsPerScan: Number.NaN, dailyAiCallLimit: Infinity }), {});
+});
+
+test("normalizeSettingsPatch validates the AI model route fields", () => {
+  const provider = normalizeSettingsPatch({ aiProvider: "  deepseek-account  ", aiModel: " deepseek-flash " });
+  assert.deepEqual(provider, { aiProvider: "deepseek-account", aiModel: "deepseek-flash" });
+  // Third-party ids use wide charsets: slash/colon/dot/@ are all legal.
+  assert.equal(normalizeSettingsPatch({ aiModel: "alibaba/qwen-3-14b" }).aiModel, "alibaba/qwen-3-14b");
+  assert.equal(normalizeSettingsPatch({ aiModel: "amazon.nova-2-lite-v1:0" }).aiModel, "amazon.nova-2-lite-v1:0");
+  assert.equal(normalizeSettingsPatch({ aiModel: "vendor/model@2026-11" }).aiModel, "vendor/model@2026-11");
+  // Empty strings are legal (follow the DSH default).
+  assert.deepEqual(normalizeSettingsPatch({ aiProvider: "  ", aiModel: "" }), { aiProvider: "", aiModel: "" });
+  // Illegal charsets / non-strings are dropped (never coerced).
+  assert.equal(normalizeSettingsPatch({ aiProvider: "bad provider!" }).aiProvider, undefined);
+  assert.equal(normalizeSettingsPatch({ aiModel: "bad model with spaces" }).aiModel, undefined);
+  assert.equal(normalizeSettingsPatch({ aiProvider: 42 }).aiProvider, undefined);
+  assert.equal(normalizeSettingsPatch({ aiProvider: "p".repeat(101) }).aiProvider, undefined);
+  assert.equal(normalizeSettingsPatch({ aiModel: "m".repeat(201) }).aiModel, undefined);
+});
+
+test("normalizeSettingsPatch keeps only a valid aiBudgetMode", () => {
+  assert.equal(normalizeSettingsPatch({ aiBudgetMode: "auto" }).aiBudgetMode, "auto");
+  assert.equal(normalizeSettingsPatch({ aiBudgetMode: "fixed" }).aiBudgetMode, "fixed");
+  assert.equal(normalizeSettingsPatch({ aiBudgetMode: "bogus" }).aiBudgetMode, undefined);
+  assert.equal(normalizeSettingsPatch({ aiBudgetMode: 0 }).aiBudgetMode, undefined);
+  assert.equal(normalizeSettingsPatch({ aiBudgetMode: null }).aiBudgetMode, undefined);
+});
+
+test("normalizeAiRoutePair enforces all-or-nothing model routes", () => {
+  const both = normalizeAiRoutePair({ aiProvider: "p", aiModel: "m" });
+  assert.deepEqual(both, { aiProvider: "p", aiModel: "m" });
+  const neither = normalizeAiRoutePair({ aiProvider: "", aiModel: "" });
+  assert.deepEqual(neither, { aiProvider: "", aiModel: "" });
+  assert.deepEqual(normalizeAiRoutePair({ aiProvider: "p", aiModel: "" }), { aiProvider: "", aiModel: "" });
+  assert.deepEqual(normalizeAiRoutePair({ aiProvider: "", aiModel: "m" }), { aiProvider: "", aiModel: "" });
+  // Trims whitespace-only halves and returns the same object.
+  const half = { aiProvider: "  ", aiModel: "m" };
+  assert.equal(normalizeAiRoutePair(half), half);
+  assert.deepEqual(half, { aiProvider: "", aiModel: "" });
+});
+
+test("emptyScanState exposes the additive AI budget observability fields", () => {
+  const scan = emptyScanState();
+  assert.equal(scan.aiDue, 0);
+  assert.equal(scan.aiBudget, 0);
+  assert.equal(scan.aiAttempts, 0);
+  assert.equal(scan.aiPending, 0);
+  assert.equal(scan.aiDeferredReason, null);
 });
 
 test("normalizeSettingsPatch validates model names", () => {
@@ -78,7 +142,11 @@ test("normalizeSettingsPatch ignores unknown keys and does not mutate input", ()
 test("DEFAULT_SETTINGS matches the documented contract defaults", () => {
   assert.equal(DEFAULT_SETTINGS.autoScan, true);
   assert.equal(DEFAULT_SETTINGS.aiEnabled, true);
+  // v3 model route: deprecated `model` survives for read compatibility only.
   assert.equal(DEFAULT_SETTINGS.model, "deepseek-flash");
+  assert.equal(DEFAULT_SETTINGS.aiProvider, "");
+  assert.equal(DEFAULT_SETTINGS.aiModel, "");
+  assert.equal(DEFAULT_SETTINGS.aiBudgetMode, "auto");
   assert.equal(DEFAULT_SETTINGS.maxAiCallsPerScan, 40);
   assert.equal(DEFAULT_SETTINGS.dailyAiCallLimit, 150);
   assert.deepEqual(DEFAULT_SETTINGS.excludeWorkspaces, []);
