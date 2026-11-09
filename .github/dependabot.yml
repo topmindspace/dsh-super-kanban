@@ -13,12 +13,18 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Asia/Shanghai"
+    # One grouped PR keeps review noise low; cap concurrent open PRs.
     open-pull-requests-limit: 3
+    # Auto-rebase so the grouped PR keeps tracking main without manual work.
+    rebase-strategy: auto
+    # Route the bot's PRs to the maintainer for review and merge.
+    reviewers:
+      - "topmindspace"
     commit-message:
       prefix: "chore(ci)"
     labels:
-      - "ci"
       - "dependencies"
+      - "ci"
     groups:
       github-actions:
         patterns:
