@@ -24,9 +24,9 @@
 
 All three common ways support **exact versions**; local directory / source install is covered in step 3.
 
-1. **Plugin market (recommended)**: DSH → Plugins → Discover → add the index source `https://topmindspace.github.io/dsh-super-kanban/index.json` → open **Super Kanban** → in the **version list** pick an exact version (for example `0.6.0`) → install → enable and reload the window.
-2. **npm (exact version)**: DSH → Plugins → Add plugin → enter `dsh-super-kanban@0.6.0` → install → reload the window. Command-line equivalent: `dsh plugin --profile desktop add dsh-super-kanban@0.6.0`.
-3. **Git / source (tag-pinned version)**: `git clone https://github.com/topmindspace/dsh-super-kanban.git` → `git checkout v0.6.0` → `./install.sh -y` → reload the window. `./install.sh` needs `bash` + `python3`; if you prefer no command line, pick the local directory in the DSH plugin page instead. Adding the repository directly in the plugin page pins the latest commit, so use this tag flow when you need a fixed version.
+1. **Plugin market (recommended)**: DSH → Plugins → Discover → add the index source `https://topmindspace.github.io/dsh-super-kanban/index.json` → open **Super Kanban** → in the **version list** pick an exact version (for example `0.6.1`) → install → enable and reload the window.
+2. **npm (exact version)**: DSH → Plugins → Add plugin → enter `dsh-super-kanban@0.6.1` → install → reload the window. Command-line equivalent: `dsh plugin --profile desktop add dsh-super-kanban@0.6.1`.
+3. **Git / source (tag-pinned version)**: `git clone https://github.com/topmindspace/dsh-super-kanban.git` → `git checkout v0.6.1` → `./install.sh -y` → reload the window. `./install.sh` needs `bash` + `python3`; if you prefer no command line, pick the local directory in the DSH plugin page instead. Adding the repository directly in the plugin page pins the latest commit, so use this tag flow when you need a fixed version.
 
 [Verify version](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#23-命令行查看实际安装版本) · [Upgrade](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级) · [Rollback](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#4-回滚到旧版本) · [Local directory install](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本) — full steps in the [installation guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md).
 
@@ -34,7 +34,7 @@ All three common ways support **exact versions**; local directory / source insta
 
 1. Click **任务看板** (Task board) in the left sidebar (or the board icon in a conversation header for the right-sidebar layout). The UI is currently in Chinese.
 2. In **Settings**, check the scan scope. If you enable AI, the model follows the DSH default unless you select another.
-3. Click **Scan**; the first scan takes seconds to minutes depending on session count, and the outcome stays in the stats line — you can cancel at any time.
+3. Click **Scan**. The first scan can take seconds to minutes, depending on session count. Cancel while it runs. Hover over the scan button or open **维护** (Maintenance) to see the outcome.
 4. Open **待处理** (Inbox) to jump to a session that needs you or open a card to see its acceptance criteria and main deliverable.
 5. Select **继续此任务** (Continue task) or **验收产出** (Review deliverables). Review the draft, place it in a linked or new session, and send it yourself.
 
@@ -43,15 +43,17 @@ All three common ways support **exact versions**; local directory / source insta
 - **See what needs your attention**: the inbox groups approvals, issues, dependencies and deliverables awaiting review, with links to the relevant sessions.
 - **One goal across sessions**: link progress and deliverables from several sessions. Incremental scans update existing cards.
 - **Review against criteria**: find the main deliverable, blockers and evidence by source session. Human acceptance is recorded on the card.
+- **Act on tasks and artifacts**: right-click or use **⋯** to move, pin or archive a task. Hover over an artifact to see its source and path. Its menu lets you copy the file name or path, preview it, and use DSH to open it in the default app or reveal it in the file manager.
 - **Continue with context**: local templates carry acceptance criteria, open work and artifacts into the session draft you choose.
 - **AI is optional, the model is yours**: follow the DSH default model or pick a third-party model configured in DSH; when AI is off or unavailable it falls back to local rules.
-- **Two layouts**: a full four-column board, or a compact board in the conversation's right sidebar that adapts to its width.
+- **Two layouts**: a full four-column board or a compact board in the conversation's right sidebar. Views, workspace and filters share one toolbar. Narrow panes put search in the filter popover.
+- **Browse long columns**: each column scrolls independently and shows up to 30 cards per page. The completed column still accepts drops while collapsed.
 - **Manage and recover**: pin, batch archive, lock fields or explicitly merge. Restore deleted cards and import backups from the maintenance view.
 - **Local-first**: board data is written only to `~/.dsh/storages/super-kanban/` on your machine, and the board itself has no telemetry.
 
 ## Typical scenarios
 
-- **Every morning in 30 seconds**: open the board, scan the stats line and the four columns, and you know what shipped yesterday and what is blocked.
+- **Every morning in 30 seconds**: open the inbox for sessions that need attention, then check the four columns for progress.
 - **Keep one card moving**: click "继续此任务" in the drawer and the prompt goes straight back to the original or a new session — no context rebuilding by hand.
 - **Maintain a large board manually**: create, drag and lock fields; a field you locked will not be overwritten by the next AI analysis.
 
@@ -112,7 +114,7 @@ A: Press `Cmd+R` to reload the window; if it is still missing, fully quit and re
 A: Make sure "AI 联网研判" is enabled in settings and that a model is configured in DSH Settings → Models; board Settings → "AI 研判模型" can also pin a specific model. Old DSH builds without the native model service always use the rules engine.
 
 **Q: How do I update to a specific version?**
-A: Third-party plugins have no automatic upgrade: uninstall the old version → install the exact target version (for example `dsh-super-kanban@0.6.0`, or pick it in the market version list) → reload the window. See [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级).
+A: Third-party plugins have no automatic upgrade: uninstall the old version → install the exact target version (for example `dsh-super-kanban@0.6.1`, or pick it in the market version list) → reload the window. See [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级).
 
 **Q: Where is the data? Is it lost after uninstalling?**
 A: `~/.dsh/storages/super-kanban/` (`state.json` / `sessions-cache.json` / `backups/`). Uninstalling the plugin does not delete it; to wipe it completely see the [troubleshooting guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md#卸载与数据保留).

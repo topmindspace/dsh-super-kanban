@@ -61,9 +61,9 @@
           <li><strong>待处理集中入口</strong><span>同一张卡列出需要你介入的会话，直接打开审批、提问或方案审阅。</span></li>
           <li><strong>AI 模型可选</strong><span>默认跟随 DSH 默认模型，也可在 DSH 中接入第三方模型；不可用时自动降级本地规则。</span></li>
           <li><strong>带着上下文继续</strong><span>本地模板汇总验收条件、未完成事项和交付物，草稿由你检查和发送。</span></li>
-          <li><strong>全页 / 侧栏双形态</strong><span>四列主看板用于总览规划，会话右侧栏用于边聊边看，宽度自适应。</span></li>
+          <li><strong>全页 / 侧栏双形态</strong><span>页头两行，长列独立滚动与分页。会话右侧栏在窄窗切换为单列。</span></li>
           <li><strong>本地优先，无遥测</strong><span>看板数据保存在本机。可选 AI 请求由 DSH 配置的模型服务处理。</span></li>
-          <li><strong>交付可验收</strong><span>目标、验收条件和主交付物在详情首屏，证据按来源会话查看。</span></li>
+          <li><strong>交付可验收</strong><span>详情首屏显示验收条件和主交付物。产物菜单支持复制路径、预览和用默认应用打开。</span></li>
         </ul>
       </section>
 
@@ -72,12 +72,12 @@
         <ol>
           <li><strong>插件市场（推荐）</strong>：DSH → 插件 → 发现（Discover）→ 添加索引源
             <code>https://topmindspace.github.io/dsh-super-kanban/index.json</code> → 打开 <strong>Super Kanban</strong> 详情
-            → 在<strong>版本列表</strong>选择精确版本（如 <code>0.6.0</code>）→ 安装 → 启用 → <code>Cmd+R</code> 刷新。</li>
+            → 在<strong>版本列表</strong>选择精确版本（如 <code>0.6.1</code>）→ 安装 → 启用 → <code>Cmd+R</code> 刷新。</li>
           <li><strong>npm（可安装特定版本）</strong>：DSH → 插件 → 添加插件 → 输入
             <code>dsh-super-kanban</code>（最新）或精确版本 <code>dsh-super-kanban@&lt;version&gt;</code>，例如
-            <code>dsh-super-kanban@0.6.0</code> → 安装 → 启用 → 刷新窗口。</li>
+            <code>dsh-super-kanban@0.6.1</code> → 安装 → 启用 → 刷新窗口。</li>
           <li><strong>Git / 源码（可固定 tag）</strong>：克隆仓库 → <code>git checkout v&lt;version&gt;</code>（例如
-            <code>v0.6.0</code>）→ <code>./install.sh -y</code>（需 <code>bash</code> + <code>python3</code>）；不想用命令行可在 DSH 插件页添加仓库地址或选择本地目录。</li>
+            <code>v0.6.1</code>）→ <code>./install.sh -y</code>（需 <code>bash</code> + <code>python3</code>）；不想用命令行可在 DSH 插件页添加仓库地址或选择本地目录。</li>
         </ol>
         <p class="muted">安装后可在 <strong>DSH 插件页</strong>查看版本，或按
           <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#23-命令行查看实际安装版本">安装指南 2.3 节</a>
@@ -90,7 +90,7 @@
         <ol>
           <li>左侧栏点 <strong>任务看板</strong>（或会话右上角看板图标，用右侧栏形态打开）。</li>
           <li>打开 <strong>设置</strong>确认扫描范围。启用 AI 时模型默认跟随 DSH。</li>
-          <li>点 <strong>扫描</strong>：按会话量需要几秒到几分钟，扫描结论会常驻在统计行。</li>
+          <li>点 <strong>扫描</strong>。按会话量需要几秒到几分钟，结束后悬停按钮或在「维护」查看结论。</li>
           <li>打开 <strong>待处理</strong>，查看来源会话、验收条件和主交付物。</li>
           <li>点 <strong>继续此任务</strong> 或 <strong>验收产出</strong>，检查草稿后送入会话，由你发送。</li>
         </ol>

@@ -4,8 +4,8 @@
  *
  * Run from a clean checkout on the release branch. The helper:
  *   1. refuses to run on a dirty worktree,
- *   2. runs the test suite, the repository validator and the privacy scan,
- *   3. regenerates the plugin-market index for the current commit,
+ *   2. regenerates the plugin-market index for the current commit,
+ *   3. runs the repository's full check command,
  *   4. prints the exact tag/push commands that trigger the release workflow.
  *
  * It never publishes to npm itself: `release.yml` does that from the pushed
@@ -56,11 +56,7 @@ export function checkCleanWorktree(root) {
 
 /** The steps that must pass before tagging. */
 export function runChecks(root) {
-  run("npm", ["test"], { cwd: root });
-  run("npm", ["run", "validate"], { cwd: root });
-  run("npm", ["run", "check:privacy"], { cwd: root });
-  run("npm", ["run", "check:docs"], { cwd: root });
-  run("npm", ["run", "check:version"], { cwd: root });
+  run("npm", ["run", "check"], { cwd: root });
 }
 
 function readVersion(root) {

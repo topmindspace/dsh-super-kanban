@@ -1,6 +1,6 @@
 {
   "name": "dsh-super-kanban",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Local task board for DeepSeek Harness. Triage session requests, group related sessions, review deliverables and continue work from a shared task card.",
   "type": "module",
   "main": "./index.mjs",

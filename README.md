@@ -24,9 +24,9 @@
 
 三种常用方式都支持**安装特定版本**；本地目录 / 源码安装见步骤 3。
 
-1. **插件市场（推荐）**：DSH → 插件 → 发现 → 添加索引源 `https://topmindspace.github.io/dsh-super-kanban/index.json` → 打开 **Super Kanban** 详情 → 在**版本列表**里选择精确版本（如 `0.6.0`）→ 安装 → 启用并刷新窗口。
-2. **npm（精确版本）**：DSH → 插件 → 添加插件 → 输入 `dsh-super-kanban@0.6.0` → 安装 → 刷新窗口。命令行等价：`dsh plugin --profile desktop add dsh-super-kanban@0.6.0`。
-3. **Git / 源码（tag 固定版本）**：`git clone https://github.com/topmindspace/dsh-super-kanban.git` → `git checkout v0.6.0` → `./install.sh -y` → 刷新窗口。`./install.sh` 需要 `bash` + `python3`；不想用命令行时，可在 DSH 插件页直接选择本地目录安装。在插件页添加仓库地址会 pin 到最新 commit；要固定版本请用这里的 tag。
+1. **插件市场（推荐）**：DSH → 插件 → 发现 → 添加索引源 `https://topmindspace.github.io/dsh-super-kanban/index.json` → 打开 **Super Kanban** 详情 → 在**版本列表**里选择精确版本（如 `0.6.1`）→ 安装 → 启用并刷新窗口。
+2. **npm（精确版本）**：DSH → 插件 → 添加插件 → 输入 `dsh-super-kanban@0.6.1` → 安装 → 刷新窗口。命令行等价：`dsh plugin --profile desktop add dsh-super-kanban@0.6.1`。
+3. **Git / 源码（tag 固定版本）**：`git clone https://github.com/topmindspace/dsh-super-kanban.git` → `git checkout v0.6.1` → `./install.sh -y` → 刷新窗口。`./install.sh` 需要 `bash` + `python3`；不想用命令行时，可在 DSH 插件页直接选择本地目录安装。在插件页添加仓库地址会 pin 到最新 commit；要固定版本请用这里的 tag。
 
 [验证版本](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#23-命令行查看实际安装版本) · [升级](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级) · [回滚](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#4-回滚到旧版本) · [本地目录安装](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本)——详细步骤见 [安装指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)。
 
@@ -34,7 +34,7 @@
 
 1. 左侧栏点 **任务看板**（或在会话右上角点看板图标，用右侧栏形态打开）。
 2. 在 **设置** 确认扫描范围。启用 AI 时，模型默认跟随 DSH。
-3. 点 **扫描**，首次按会话量需要几秒到几分钟；结论常驻统计行，可随时取消。
+3. 点 **扫描**。首次扫描按会话量需要几秒到几分钟，扫描中可取消。悬停扫描按钮或在「维护」查看结果。
 4. 打开 **待处理**，从卡片跳到等待操作的会话，或在详情查看验收条件和主交付物。
 5. 点 **继续此任务** 或 **验收产出**。检查草稿后放入关联会话或新会话，由你发送。
 
@@ -43,15 +43,17 @@
 - **先看需要你做什么**：待处理聚合审批、问题、依赖和待验收事项，支持直接打开相应会话。
 - **一个目标，多条会话**：关联不同会话的进展与交付物。增量扫描更新已有任务。
 - **对照验收条件交付**：详情显示主交付物、当前阻塞和按来源筛选的证据，人工验收保留确认记录。
+- **直接操作任务与产物**：右键或点「⋯」可移动、置顶和归档任务。悬停产物可看来源与路径，菜单可复制文件名或路径、预览，以及通过 DSH 用默认应用打开或在文件管理器中显示。
 - **带着上下文继续**：本地模板把验收条件、未完成事项与产物放进你选择的会话草稿。
 - **AI 可选、模型可换**：默认跟随 DSH 默认模型，也可选你在 DSH 配置的第三方模型；关闭或不可用时自动降级本地规则。
-- **两种形态**：全页四列看板，或会话右侧栏紧凑看板，宽度自适应。
+- **两种形态**：全页四列看板，或会话右侧栏紧凑看板。视图、工作区和筛选共用一条工具栏，窄栏将搜索收进筛选。
+- **长列便于浏览**：每列独立滚动，每页最多 30 张卡。「已完成」列可折叠，折叠后仍能拖入任务。
 - **手动管理与恢复**：置顶、批量归档、锁定字段和显式合并。维护视图提供回收站与备份恢复。
 - **本地优先**：数据只写本机 `~/.dsh/storages/super-kanban/`，看板自身无遥测。
 
 ## 典型场景
 
-- **每天早上 30 秒**：打开看板扫一眼统计行与四列，就知道昨天哪些会话有交付、哪些卡住了。
+- **每天早上 30 秒**：打开「待处理」找出需要介入的会话，再用看板四列浏览进度。
 - **把一张卡继续下去**：抽屉点「继续此任务」，提示词直接放回原会话或同工作区新会话，不用自己拼上下文。
 - **手动维护大看板**：新建、拖拽、锁定字段；锁过的字段不会被下一次 AI 研判覆盖。
 
@@ -112,7 +114,7 @@ A：按 `Cmd+R` 刷新窗口；仍没有就完全退出 DSH 再打开。还没�
 A：确认设置里「AI 联网研判」开启，并在 DSH 设置 → 模型中配置好模型；看板设置 →「AI 研判模型」可指定具体模型。旧 DSH 没有原生模型服务时会一直用规则引擎。
 
 **Q：怎么更新到特定版本？**
-A：第三方插件没有自动升级：卸载旧版 → 安装目标精确版本（如 `dsh-super-kanban@0.6.0`，或在市场版本列表里选择）→ 刷新窗口。步骤见 [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级)。
+A：第三方插件没有自动升级：卸载旧版 → 安装目标精确版本（如 `dsh-super-kanban@0.6.1`，或在市场版本列表里选择）→ 刷新窗口。步骤见 [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级)。
 
 **Q：数据存在哪？卸载会丢吗？**
 A：`~/.dsh/storages/super-kanban/`（`state.json` / `sessions-cache.json` / `backups/`）。卸载插件不会删除数据；彻底清空见 [排障手册](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md#卸载与数据保留)。

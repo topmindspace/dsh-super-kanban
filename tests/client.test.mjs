@@ -5,30 +5,35 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../client.js", import.meta.url), "utf8");
 
-function loadClient(services, { snapshot } = {}) {
+function loadClient(services, { snapshot, view = "attention", clipboard } = {}) {
   const registrations = new Map();
-  let initialSnapshot = snapshot;
+  let nextState = snapshot ? { initial: null, value: snapshot } : null;
+  let nextId = 0;
   const React = {
     Component: class {},
     createElement(type, props, ...children) { return { type, props, children }; },
     useState(initial) {
       // Seed the initial /state result without mounting polling or DOM effects.
-      if (initial === null && initialSnapshot) {
-        const value = initialSnapshot;
-        initialSnapshot = null;
+      if (nextState && initial === nextState.initial) {
+        const { value } = nextState;
+        nextState = null;
         return [value, () => {}];
       }
       return [typeof initial === "function" ? initial() : initial, () => {}];
     },
     useRef: (current) => ({ current }),
+    useId: () => `id-${++nextId}`,
     useEffect() {},
+    useLayoutEffect() {},
     useMemo: (calculate) => calculate(),
     useCallback: (callback) => callback,
   };
   let plugin;
   const context = {
     window: { __ModuleLoader__: { load({ factory }) { plugin = factory(() => React); } } },
-    localStorage: { getItem: (key) => snapshot && key === "dsh-super-kanban:view:page" ? "attention" : null },
+    localStorage: { getItem: (key) => snapshot && key === "dsh-super-kanban:view:page" ? view : null },
+    navigator: { clipboard },
+    AbortSignal,
     setTimeout,
   };
   vm.runInNewContext(source, context, { filename: "client.js" });
@@ -47,7 +52,7 @@ function loadClient(services, { snapshot } = {}) {
     },
   });
   const host = registrations.get("main").render({}).children[0].props.host;
-  return { registrations, host };
+  return { registrations, host, seedNextState: (value, initial = null) => { nextState = { initial, value }; } };
 }
 
 function* elements(node) {
@@ -120,6 +125,134 @@ test("artifact preview enters its source session from the global panel and prese
   assert.equal(await host.openResource("delivery", "/checkout with space/report #1.md"), true);
   assert.equal(mounted, "delivery");
   assert.deepEqual(opened, ["dsh-resource://file/session/delivery//checkout%20with%20space/report%20%231.md"]);
+});
+
+test("artifact previews wait for their own sidebar and the latest request wins", async () => {
+  const opens = [];
+  const resources = [];
+  let mounted = "unrelated";
+  const { host } = loadClient({
+    uiWorkspace: { openSession: (id) => opens.push(id) },
+    sidebarRight: {
+      screen: () => ({ sessionId: mounted }),
+      openResource: (address) => resources.push([mounted, address]),
+    },
+  });
+  const first = host.openResource("first", "first.md");
+  const second = host.openResource("second", "docs/second.md");
+  setTimeout(() => { mounted = "second"; }, 125);
+  assert.deepEqual(await Promise.all([first, second]), [false, true]);
+  assert.deepEqual(opens, ["first", "second"]);
+  assert.deepEqual(resources, [["second", "dsh-resource://file/session/second/docs/second.md"]]);
+});
+
+test("desktop file actions use DSH's verified open and reveal RPCs with a bounded signal", async () => {
+  const seen = [];
+  const { host } = loadClient({ remote: {
+    session: {
+      canOpenWorkspacePath: async (...args) => ({ ok: args.length === 0, value: true }),
+      async openWorkspacePath(request, signal) {
+        assert.ok(signal instanceof AbortSignal);
+        seen.push({ ...request });
+        return { ok: true, value: { opened: request.path !== "/missing.md" } };
+      },
+    },
+    workspaceFiles: {
+      async stat(sessionId, path, signal) {
+        assert.ok(signal instanceof AbortSignal);
+        seen.push([sessionId, path]);
+        return { ok: sessionId === "linked-source", value: { absolutePath: "/real/worktree/report #1.md" } };
+      },
+    },
+  } });
+  assert.equal(await host.canOpenNativeFile(), true);
+  assert.equal(await host.openNativeFile("C:\\docs\\report #1.md", "open"), true);
+  assert.equal(await host.openNativeFile("/checkout/report #1.md", "reveal"), true);
+  assert.equal(await host.openNativeFile("report.md", "reveal"), false);
+  assert.equal(await host.openNativeFile("/missing.md", "open"), false);
+  assert.equal(await host.openNativeFile("/alias/report #1.md", "reveal", "linked-source"), true);
+  assert.equal(await host.openNativeFile("/alias/report #1.md", "open", "invalid-source"), false);
+  assert.deepEqual(seen, [
+    { path: "C:\\docs\\report #1.md" }, { path: "/checkout/report #1.md", action: "reveal" }, { path: "/missing.md" },
+    ["linked-source", "/alias/report #1.md"], { path: "/real/worktree/report #1.md", action: "reveal" }, ["invalid-source", "/alias/report #1.md"],
+  ]);
+  assert.equal(await loadClient({}).host.canOpenNativeFile(), false);
+});
+
+test("artifact menus preserve the file name and complete host path even when a file disappears", async () => {
+  const copied = [];
+  const path = "C:\\worktree\\docs\\完整交付报告 #1.md";
+  const { registrations, seedNextState } = loadClient({}, {
+    snapshot: { tasks: [{ id: "task", title: "发布", workspaceTitle: "发布工作区", primarySessionId: "origin", status: "done",
+      artifacts: [{ id: "a1", name: "显示名称", path: "docs/完整交付报告 #1.md", absPath: path, missing: true }] }] },
+    view: "artifacts", clipboard: { async writeText(value) { copied.push(value); } },
+  });
+  const board = registrations.get("main").render({}).children[0];
+  const artifacts = [...elements(board.type(board.props))].find((node) => node.type?.name === "ArtifactsView");
+  const entry = [...elements(artifacts.type(artifacts.props))].find((node) => node.type?.name === "ArtifactEntry");
+  seedNextState({ trigger: { isConnected: false } });
+  const row = entry.type({ ...entry.props, desktopFiles: true, pushToast() {} });
+  assert.equal(row.props.title, `发布工作区\n${path}\n文件不可用`);
+  assert.equal(row.children[0].props.disabled, true);
+  const popup = row.children.find((node) => node?.type?.name === "QuickMenu");
+  const items = popup.props.items.filter((item) => item?.run);
+  assert.deepEqual(Array.from(items.filter((item) => item.disabled), (item) => item.label), ["在 DSH 中预览", "用默认应用打开", "在文件管理器中显示"]);
+  await items.find((item) => item.label === "复制文件名").run();
+  await items.find((item) => item.label === "复制完整路径").run();
+  assert.deepEqual(copied, ["完整交付报告 #1.md", path]);
+});
+
+test("the main toolbar keeps views and filters in one row and scan details in the scan tooltip", () => {
+  const { registrations } = loadClient({}, { snapshot: { tasks: [], scan: { state: "done", message: "扫描完成，低价值跳过 1" } } });
+  const board = registrations.get("main").render({}).children[0];
+  const view = board.type(board.props);
+  const toolbar = [...elements(view)].find((node) => node.props?.className === "sk-slimbar");
+  assert.ok([...elements(toolbar)].some((node) => node.props?.["aria-label"] === "任务视图"));
+  assert.ok([...elements(toolbar)].some((node) => node.props?.["aria-label"] === "按工作区筛选"));
+  const scan = [...elements(view)].find((node) => node.props?.["aria-label"] === "扫描会话");
+  assert.match(scan.props.title, /低价值跳过 1/);
+  assert.doesNotMatch(renderedText(view), /低价值跳过 1/);
+});
+
+test("a long column renders one page at a time, clamps a shortened last page, and keeps the completed count when collapsed", () => {
+  const tasks = Array.from({ length: 64 }, (_, index) => ({ id: `task-${index}`, title: `任务 ${index}`, status: "done" }));
+  const { registrations, seedNextState } = loadClient({}, { snapshot: { tasks }, view: "board" });
+  const board = registrations.get("main").render({}).children[0];
+  const column = [...elements(board.type(board.props))].find((node) => node.type?.name === "Column" && node.props.status === "done");
+  const page = [...elements(column.type(column.props))].find((node) => node.type?.name === "ColumnCards");
+  const cards = (view) => [...elements(view)].filter((node) => node.type?.name === "TaskCard");
+  assert.equal(cards(page.type(page.props)).length, 30);
+  seedNextState(2, 0);
+  assert.equal(cards(page.type(page.props)).length, 4);
+  seedNextState(2, 0);
+  const shortened = page.type({ ...page.props, tasks: page.props.tasks.slice(0, 32) });
+  assert.equal(cards(shortened).length, 2);
+  assert.match(renderedText(shortened), /31–32 \/ 32/);
+  const collapsed = column.type({ ...column.props, collapsed: true });
+  assert.equal([...elements(collapsed)].some((node) => node.type?.name === "ColumnCards"), false);
+  const toggle = [...elements(collapsed)].find((node) => node.props?.className === "sk-col-toggle");
+  assert.equal(toggle.props["aria-expanded"], false);
+  assert.match(toggle.props["aria-label"], /64 项/);
+});
+
+test("a collapsed column accepts a task dragged on the board and ignores external text drops", () => {
+  const task = { id: "dragged", title: "交付", status: "backlog" };
+  const { registrations } = loadClient({}, { snapshot: { tasks: [task] }, view: "board" });
+  const board = registrations.get("main").render({}).children[0];
+  const columns = [...elements(board.type(board.props))].filter((node) => node.type?.name === "Column");
+  const source = columns.find((node) => node.props.status === "backlog");
+  const page = [...elements(source.type(source.props))].find((node) => node.type?.name === "ColumnCards");
+  const card = [...elements(page.type(page.props))].find((node) => node.type?.name === "TaskCard");
+  const transfer = new Map([["text/plain", task.id]]);
+  const drops = [];
+  const target = columns.find((node) => node.props.status === "done");
+  const view = target.type({ ...target.props, draggingId: task.id, collapsed: true, onDropTask: (...args) => drops.push(args) });
+  const event = { preventDefault() {}, dataTransfer: { getData: (type) => transfer.get(type), setData: (type, id) => transfer.set(type, id) } };
+  view.props.onDrop(event);
+  assert.deepEqual(drops, []);
+  card.type(card.props).props.onDragStart(event);
+  view.props.onDrop(event);
+  assert.deepEqual(drops, [[task.id, "done"]]);
 });
 
 test("the conversation shortcut passes the scoped session through sidebar navigation", () => {

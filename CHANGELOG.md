@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-10
+
+### 新增
+
+- 任务卡和任务列表支持右键快捷操作。产物可复制文件名和路径，并通过 DSH 预览、用默认应用打开或在文件管理器中定位。
+- 长列每页显示 30 张卡，可在列底翻页。「已完成」列支持折叠，折叠时仍显示计数并接受拖入。
+
+### 优化与修复
+
+- 页头收为两行，视图和筛选共用工具栏，完整扫描结果移到扫描按钮提示。
+- 修复长列被撑高而无法滚动、矮窗口和窄侧栏的抽屉底栏菜单被裁切。归档成功后自动关闭详情。
+- 菜单共用方向键导航和焦点恢复。修复宽屏工作区下拉被隐藏、跨会话产物预览落到错误侧栏，以及外部文本拖入看板可能触发换列的问题。
+
 ## [0.6.0] - 2026-11-10
 
 ### 新增
@@ -383,7 +396,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.6.1
 [0.6.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.6.0
 [0.5.2]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.2
 [0.5.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.1

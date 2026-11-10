@@ -3,7 +3,7 @@
  *
  * Hand-written DSH client plugin bundle: a full-page "task command deck" that
  * turns workspace sessions into a maintainable kanban. Talks to the host half
- * exclusively through /super-kanban/api/*. No build step, no third-party deps.
+ * through /super-kanban/api/* and DSH's native client services. No build step or third-party deps.
  */
 window.__ModuleLoader__.load({
   id: "dsh-super-kanban",
@@ -44,6 +44,8 @@ window.__ModuleLoader__.load({
       done: { label: "已完成", tone: "var(--dsw-alias-state-success-primary)", desc: "已交付或已闭环" },
     };
     const STATUS_ORDER = ["backlog", "in_progress", "blocked", "done"];
+    const COLUMN_PAGE_SIZE = 30;
+    const TASK_DRAG_TYPE = "application/x-dsh-super-kanban-task";
     const VIEW_MODES = { attention: "待处理", board: "看板", list: "列表", hierarchy: "层级", artifacts: "产出", maintenance: "维护" };
     const RELATION_LABELS = { parent: "父任务", depends_on: "依赖任务", related: "相关任务" };
     const ATTENTION_LABELS = { waiting_user: "待你确认", review: "待确认进度", acceptance: "待验收", interrupted: "执行中断" };
@@ -334,11 +336,11 @@ window.__ModuleLoader__.load({
 
     function artifactsOf(task) {
       return (Array.isArray(task.artifacts) ? task.artifacts : [])
-        .filter((item) => item && (item.name || item.path))
+        .filter((item) => item && (item.name || item.path || item.absPath))
         .map((item, index) => ({
           id: item.id || `af_${index}`,
-          name: String(item.name || String(item.path).split("/").pop() || "产物"),
-          path: String(item.path || ""),
+          name: String(item.name || fileNameOf(item.path || item.absPath) || "产物"),
+          path: String(item.path || item.absPath || ""),
           absPath: String(item.absPath || ""),
           sessionId: String(item.sessionId || ""),
           seq: seqOf(item.seq),
@@ -346,6 +348,15 @@ window.__ModuleLoader__.load({
           kind: item.kind || "file",
           missing: item.missing === true,
         }));
+    }
+
+    function isHostAbsolutePath(value) {
+      return /^(?:\/|[a-z]:[/\\]|\\\\)/i.test(value);
+    }
+
+    function fileNameOf(path) {
+      const value = String(path || "");
+      return value.split(value.startsWith("/") ? "/" : /[/\\]/).pop();
     }
 
     function primaryArtifactOf(artifacts) {
@@ -885,6 +896,7 @@ window.__ModuleLoader__.load({
       tool: (p) => h(Svg, p, h("path", { d: "M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.1 2.1-2.2-2.2z" })),
       check: (p) => h(Svg, p, h("path", { d: "M20 6 9 17l-5-5" })),
       file: (p) => h(Svg, p, h("path", { d: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" }), h("path", { d: "M14 3v6h6" })),
+      folder: (p) => h(Svg, p, h("path", { d: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" })),
       send: (p) => h(Svg, p, h("path", { d: "m22 2-7 20-4-9-9-4z" }), h("path", { d: "M22 2 11 13" })),
       alert: (p) => h(Svg, p, h("path", { d: "M12 9v4M12 17h.01" }), h("path", { d: "M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" })),
       lock: (p) => h(Svg, p, h("rect", { x: 4.5, y: 10, width: 15, height: 10, rx: 2 }), h("path", { d: "M8 10V7a4 4 0 0 1 8 0v3" })),
@@ -949,7 +961,6 @@ window.__ModuleLoader__.load({
 .sk-btn.danger{color:var(--sk-red);border-color:color-mix(in srgb,var(--sk-red) 28%,transparent)}
 .sk-btn.danger:hover{background:color-mix(in srgb,var(--sk-red) 9%,transparent)}
 .sk-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
-.sk-ws-select{display:none;max-width:190px}
 
 .sk-chip{cursor:pointer;display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border:1px solid var(--sk-line);
   background:var(--sk-surface);color:var(--sk-ink-2);border-radius:8px;font-size:11.5px;font-family:inherit;line-height:1;
@@ -1075,9 +1086,6 @@ window.__ModuleLoader__.load({
 .sk-banner .grow{flex:1}
 .sk-inline-actions{display:flex;gap:8px;flex-wrap:wrap}
 /* ---------- responsive ---------- */
-@media (max-width:1500px){
-  .sk-ws-select{display:block}
-}
 @media (max-width:1360px){
   .sk-page{padding-left:20px;padding-right:20px}
 }
@@ -1096,7 +1104,6 @@ window.__ModuleLoader__.load({
   background:transparent;color:var(--sk-ink-2);cursor:pointer;transition:background .15s,color .15s,border-color .15s}
 .sk-header-btn:hover{background:var(--sk-hover);color:var(--sk-ink);border-color:var(--sk-line)}
 .sk-page.is-side{position:relative;padding:10px 12px 10px;gap:8px;height:100%}
-.sk-page.is-side .sk-ws-select{display:block;max-width:200px}
 .sk-page.is-side.sk-tier-medium .sk-col-head{padding:10px 8px 6px 12px}
 .sk-page.is-side .sk-drawer{position:absolute;top:0;right:0;bottom:0;width:100%;border-left:none;border-radius:0;box-shadow:none;z-index:61}
 .sk-page.is-side .sk-mask{position:absolute;z-index:60}
@@ -1107,7 +1114,6 @@ window.__ModuleLoader__.load({
 .sk-page.is-side .sk-toast{font-size:11px;padding:8px 11px}
 /* narrow：状态分段 + 单列 */
 .sk-page.is-side.sk-tier-narrow{padding:8px 10px 8px;gap:7px}
-.sk-page.is-side.sk-tier-narrow .sk-ws-select{max-width:132px}
 .sk-page.is-side.sk-tier-narrow .sk-narrow-add{margin-top:1px}
 .sk-status-tabs{display:flex;gap:3px;flex:none;padding:3px;border-radius:10px;background:var(--sk-surface-2);border:1px solid var(--sk-line-soft)}
 .sk-status-tab{flex:1;min-width:0;height:28px;border:none;border-radius:7px;background:transparent;color:var(--sk-ink-2);font:inherit;font-size:10.5px;
@@ -1184,16 +1190,11 @@ window.__ModuleLoader__.load({
 /* ======================= v3：DSH-native 单色重做 ======================= */
 .sk-page{padding:calc(var(--dsh-frame-top-clearance,0px) + 28px) 28px 24px;gap:0;background:var(--dsw-alias-bg-base)}
 /* header */
-.sk-header-v3{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;flex:none;padding-bottom:18px;min-width:0}
-.sk-header-main{min-width:0;display:flex;flex-direction:column;gap:6px}
-.sk-title-v3{margin:0;font-size:20px;font-weight:500;line-height:1.25;color:var(--sk-ink);letter-spacing:normal}
-.sk-stats-v3{margin:0;font-size:12px;font-weight:400;line-height:1.4;color:color-mix(in srgb,var(--sk-ink) 55%,transparent);display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.sk-stats-v3 .sk-sep{color:color-mix(in srgb,var(--sk-ink) 30%,transparent)}
-.sk-stats-v3 .sk-status-dot{width:6px;height:6px;border-radius:50%;background:var(--sk-green);opacity:.6;flex:none}
-.sk-stats-v3 .sk-status-dot.is-running{background:var(--sk-blue);opacity:.6;animation:skPulse 1.6s ease-in-out infinite}
-.sk-stats-v3 .sk-status-dot.is-error{background:var(--sk-red);opacity:.7}
-.sk-stats-v3 .sk-textlink{color:color-mix(in srgb,var(--sk-ink) 55%,transparent);font-size:12px;background:none;border:none;padding:0;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
-.sk-stats-v3 .sk-textlink:hover{color:var(--sk-ink)}
+.sk-header-v3{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:none;min-width:0;padding-bottom:6px}
+.sk-header-main{min-width:0;display:flex;align-items:center;gap:12px}
+.sk-title-v3{margin:0;font-size:20px;font-weight:500;line-height:1.25;color:var(--sk-ink);letter-spacing:normal;white-space:nowrap}
+.sk-stats-v3{margin:0;font-size:12px;font-weight:400;line-height:1.4;color:var(--sk-ink-2);display:flex;align-items:center;gap:10px;white-space:nowrap;overflow:hidden;min-width:0}
+.sk-stats-total{flex:none;font-variant-numeric:tabular-nums}
 .sk-header-actions{display:flex;align-items:center;gap:8px;flex:none}
 .sk-search-v3{display:flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:8px;border:0.5px solid var(--sk-line);background:transparent;width:200px;transition:border-color .15s,background .15s;flex:none}
 .sk-search-v3:focus-within{border-color:var(--sk-line-strong);background:color-mix(in srgb,var(--sk-ink) 3%,transparent)}
@@ -1203,26 +1204,24 @@ window.__ModuleLoader__.load({
 .sk-iconbtn-v3{display:grid;place-items:center;width:32px;height:32px;border:none;border-radius:8px;background:transparent;color:color-mix(in srgb,var(--sk-ink) 62%,transparent);cursor:pointer;flex:none;transition:background .15s,color .15s}
 .sk-iconbtn-v3:hover{background:color-mix(in srgb,var(--sk-ink) 6%,transparent);color:var(--sk-ink)}
 .sk-iconbtn-v3.is-busy{color:var(--sk-ink)}
+.sk-header-actions .sk-scan-button:is(.is-busy,.is-failed){display:inline-flex;align-items:center;gap:4px;width:auto;padding:0 5px;font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.sk-header-actions .sk-scan-button.is-failed{color:var(--sk-amber)}
 .sk-btn-primary-v3{height:32px;padding:0 14px;border-radius:8px;border:none;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);font:inherit;font-size:12px;font-weight:500;cursor:pointer;flex:none;white-space:nowrap}
 .sk-btn-primary-v3:hover{background:var(--dsw-alias-button-primary-hover)}
 .sk-btn-primary-v3:disabled{opacity:.45;cursor:not-allowed}
 /* dropdown menu */
-.sk-menu-wrap{position:relative}
-.sk-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:80;min-width:184px;padding:4px;border-radius:10px;background:var(--sk-surface);border:0.5px solid var(--sk-line-strong);box-shadow:var(--dsw-elevation-panel);display:flex;flex-direction:column;animation:skPop .14s cubic-bezier(.2,.8,.3,1)}
+.sk-menu{position:fixed;inset:auto;z-index:99;margin:0;min-width:184px;max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);overflow:auto;padding:4px;border-radius:10px;background:var(--sk-surface);color:var(--sk-ink);border:0.5px solid var(--sk-line-strong);box-shadow:var(--dsw-elevation-panel);display:flex;flex-direction:column;animation:skFade .12s var(--sk-ease)}
 .sk-menu-item{display:flex;align-items:center;gap:8px;width:100%;height:32px;padding:0 10px;border:none;border-radius:6px;background:transparent;color:var(--sk-ink);font:inherit;font-size:12px;text-align:left;cursor:pointer;white-space:nowrap}
 .sk-menu-item:hover{background:color-mix(in srgb,var(--sk-ink) 6%,transparent)}
 .sk-menu-item.is-danger{color:var(--sk-red)}
-.sk-menu-item .sk-menu-hint{margin-left:auto;font-size:11px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
 .sk-menu-sep{height:0.5px;margin:4px 6px;background:var(--sk-line-soft)}
-/* slim filter row */
-.sk-slimbar{display:flex;align-items:center;gap:6px;flex:none;min-width:0;padding:2px 0 14px;border-bottom:0.5px solid var(--sk-line-soft)}
-.sk-slimbar .sk-ws-select{display:block;max-width:220px;height:28px;border-color:transparent;background-color:transparent;font-size:12px;color:color-mix(in srgb,var(--sk-ink) 62%,transparent);padding:0 22px 0 6px;border-radius:6px}
-.sk-slimbar .sk-ws-select:hover{background-color:color-mix(in srgb,var(--sk-ink) 5%,transparent);border-color:transparent;color:var(--sk-ink)}
+/* view and filter toolbar */
+.sk-slimbar{display:flex;align-items:center;gap:6px;flex:none;min-width:0;padding:0 0 7px;margin:0 0 6px;border-bottom:0.5px solid var(--sk-line-soft)}
 .sk-slim-icon{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 8px;border:none;border-radius:6px;background:transparent;color:color-mix(in srgb,var(--sk-ink) 62%,transparent);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
 .sk-slim-icon:hover{background:color-mix(in srgb,var(--sk-ink) 5%,transparent);color:var(--sk-ink)}
 .sk-slim-icon.is-on{color:var(--sk-ink);background:color-mix(in srgb,var(--sk-ink) 7%,transparent)}
 .sk-slim-icon .sk-filter-count{font-size:11px;color:color-mix(in srgb,var(--sk-ink) 55%,transparent)}
-.sk-slimbar .sk-count{margin-left:auto;font-size:11px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);white-space:nowrap;font-variant-numeric:tabular-nums}
+.sk-slimbar .sk-count{font-size:11px;color:var(--sk-ink-3);white-space:nowrap;font-variant-numeric:tabular-nums}
 /* filter popover (DSH menu style) */
 .sk-filter-popover{width:272px;padding:10px;gap:8px;border-radius:10px}
 .sk-filter-row{gap:4px}
@@ -1272,7 +1271,7 @@ window.__ModuleLoader__.load({
 .sk-card-progress-v3 i{display:block;height:100%;border-radius:1px;background:color-mix(in srgb,var(--sk-ink) 45%,transparent);transition:width .3s var(--sk-ease)}
 .sk-card-v3.is-done .sk-card-progress-v3{display:none}
 /* side header (no brand) */
-.sk-page.is-side .sk-header-v3{padding-bottom:12px;align-items:center;gap:8px}
+.sk-page.is-side .sk-header-v3{padding-bottom:0}
 .sk-page.is-side .sk-stats-v3{font-size:11px;color:color-mix(in srgb,var(--sk-ink) 55%,transparent)}
 .sk-page.is-side .sk-header-actions{gap:4px}
 .sk-page.is-side .sk-iconbtn-v3{width:28px;height:28px}
@@ -1295,7 +1294,6 @@ window.__ModuleLoader__.load({
 .sk-drawer-head-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .sk-drawer-kicker{font-size:11px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent);line-height:1.3}
 .sk-drawer-title-v3{margin:0;font-size:15px;font-weight:600;line-height:1.35;color:var(--sk-ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
-.sk-drawer-head .sk-menu-wrap{flex:none;margin-top:1px}
 .sk-drawer-head .sk-iconbtn-v3{width:28px;height:28px}
 .sk-drawer-sec{padding:16px 0;border-bottom:0.5px solid var(--sk-line-soft);display:flex;flex-direction:column;gap:8px;min-width:0}
 .sk-drawer-sec:last-of-type{border-bottom:none}
@@ -1411,7 +1409,6 @@ window.__ModuleLoader__.load({
 /* narrow side: cards only title + progress */
 .sk-page.is-side.sk-tier-narrow .sk-card-v3{padding:10px 12px}
 .sk-page.is-side.sk-tier-narrow .sk-card-meta-v3{display:none}
-.sk-page.is-side.sk-tier-narrow .sk-header-v3{padding-bottom:10px}
 .sk-page.is-side.sk-tier-narrow .sk-narrow-list{gap:8px}
 .sk-page.is-side .sk-drawer{position:absolute;top:0;right:0;bottom:0;width:100%;border-left:none;border-radius:0;box-shadow:none;z-index:61}
 .sk-page.is-side .sk-drawer-head{padding-left:8px}
@@ -1420,8 +1417,8 @@ window.__ModuleLoader__.load({
 .sk-page.is-side .sk-modal{width:100%;max-height:calc(100% - 4px);border-radius:12px;padding:16px}
 .sk-page.is-side .sk-toasts{position:absolute;left:10px;right:10px;bottom:10px;transform:none;align-items:flex-end;max-width:none;z-index:90}
 /* board wrapper for v3 padding */
-.sk-board-v3{flex:1;min-height:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px;padding-top:14px;position:relative}
-.sk-empty-v3{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:8px;padding:40px 8px;color:color-mix(in srgb,var(--sk-ink) 55%,transparent);font-size:13px;text-align:left}
+.sk-board-v3{flex:1;min-height:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:minmax(0,1fr);gap:20px;padding-top:14px;position:relative}
+.sk-empty-v3{grid-column:1/-1;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:8px;padding:40px 8px;color:color-mix(in srgb,var(--sk-ink) 55%,transparent);font-size:13px;text-align:left}
 .sk-empty-v3 .sk-text{font-size:13px;color:var(--sk-ink);text-decoration:underline;text-underline-offset:2px}
 .sk-loading-v3{flex:1;display:flex;flex-direction:column;gap:10px;padding-top:14px}
 .sk-loading-v3 .sk-loading-line{height:12px;border-radius:6px;background:color-mix(in srgb,var(--sk-ink) 6%,transparent);animation:skPulse 1.6s ease-in-out infinite}
@@ -1432,7 +1429,7 @@ window.__ModuleLoader__.load({
 @container (max-width:1180px){.sk-page{padding-left:20px;padding-right:20px}}
 @media (max-width:1360px){.sk-page{padding-left:20px;padding-right:20px}.sk-page .sk-search-v3{width:170px}}
 @media (max-width:1180px){.sk-page .sk-search-v3{width:150px}.sk-board-v3{gap:14px}}
-@media (max-height:900px){.sk-page{padding-top:calc(var(--dsh-frame-top-clearance,0px) + 20px)}.sk-header-v3{padding-bottom:14px}.sk-board-v3{padding-top:10px}}
+@media (max-height:900px){.sk-page{padding-top:calc(var(--dsh-frame-top-clearance,0px) + 20px)}.sk-board-v3{padding-top:10px}}
 
 /* v3 fixes */
 .sk-drawer-head{flex-direction:row;align-items:flex-start}
@@ -1441,8 +1438,8 @@ window.__ModuleLoader__.load({
 .sk-card-v3.is-done{opacity:.6}
 .sk-card-v3.is-done .sk-card-metrics{display:none}
 .sk-card-v3.is-done .sk-card-meta-v3{color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
-.sk-ws-picker{position:relative;display:inline-flex;align-items:center;flex:none;min-width:0}
-.sk-ws-picker .sk-ws-select{appearance:none;background-image:none;padding-right:20px;padding-left:6px;border-color:transparent;background-color:transparent;color:color-mix(in srgb,var(--sk-ink) 62%,transparent);font-size:12px;height:28px;border-radius:6px;cursor:pointer;max-width:190px}
+.sk-ws-picker{position:relative;display:inline-flex;align-items:center;min-width:0;max-width:190px}
+.sk-ws-picker .sk-ws-select{appearance:none;background-image:none;padding:0 22px 0 7px;border-color:transparent;background-color:transparent;color:var(--sk-ink-2);font-size:12px;height:30px;border-radius:6px;cursor:pointer;max-width:100%;min-width:0;text-overflow:ellipsis}
 .sk-ws-picker:hover .sk-ws-select{background-color:color-mix(in srgb,var(--sk-ink) 5%,transparent);color:var(--sk-ink)}
 .sk-ws-picker:hover .sk-ws-caret{color:var(--sk-ink)}
 .sk-ws-picker .sk-ws-select:hover{background-color:color-mix(in srgb,var(--sk-ink) 5%,transparent);border-color:transparent;color:var(--sk-ink)}
@@ -1453,11 +1450,8 @@ body[data-ds-dark-theme] .sk-btn.primary:hover,
 body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-button-primary-hover)!important;color:var(--dsw-alias-label-primary-foreground)!important}
 .sk-btn-primary-v3:active,.sk-btn.primary:active{opacity:.82}
 .sk-btn-primary-v3:focus-visible,.sk-btn.primary:focus-visible{outline:2px solid color-mix(in srgb,var(--sk-ink) 45%,transparent);outline-offset:2px}
-.sk-page.is-side.sk-tier-narrow .sk-header-v3{padding-bottom:6px}
-.sk-page.is-side.sk-tier-narrow .sk-slimbar{padding-bottom:8px}
 .sk-page.is-side.sk-tier-narrow .sk-status-tabs{margin-top:0}
 .sk-page.is-side.sk-tier-narrow .sk-narrow-list{padding-top:10px}
-.sk-page.is-side .sk-slimbar{padding-bottom:10px}
 
 /* ======================= v0.4：克制的强调色 ======================= */
 .sk-page{--sk-brand-accent:var(--dsw-alias-state-business-primary,#4176e6)}
@@ -1562,13 +1556,8 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-ai-review-reason{margin:0;font-size:12px;line-height:1.55;color:color-mix(in srgb,var(--sk-ink) 62%,transparent);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .sk-ai-review-reason.is-open{-webkit-line-clamp:unset;display:block}
 .sk-ai-review-reason.is-empty{color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
-/* 扫描结果行 */
-.sk-scan-error{color:var(--dsw-alias-state-warn-primary,#f59e0b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}
-.sk-scan-outcome{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 /* 完成卡：去掉整条彩色进度线，只保留状态点 */
 .sk-card-v3.is-done .sk-card-progress-v3{display:none}
-/* 右侧栏任何宽度都保留工作区下拉（原 side-wide 规则会隐藏它） */
-.sk-page.is-side.sk-tier-wide .sk-ws-select{display:block}
 /* 窄侧栏：卡片保留「短工作区 · 时间 · 优先级」的紧凑巡检信息 */
 .sk-page.is-side.sk-tier-narrow .sk-card-meta-v3{display:flex;flex-wrap:nowrap;gap:5px;font-size:10.5px;line-height:1.35;margin-top:1px}
 .sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-card-ws{max-width:96px;flex:0 1 auto}
@@ -1578,10 +1567,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-card-metric{display:none}
 .sk-page.is-side.sk-tier-narrow .sk-card-meta-v3 .sk-prio-text{font-size:10.5px}
 .sk-page.is-side.sk-tier-narrow .sk-archived-mark{display:none}
-/* 窄侧栏：统计独占一行（避免裁掉状态与扫描结论），操作图标第二行右对齐 */
-.sk-page.is-side.sk-tier-narrow .sk-header-v3{flex-wrap:wrap;row-gap:6px}
-.sk-page.is-side.sk-tier-narrow .sk-stats-v3{flex:0 0 100%;order:1;white-space:normal;flex-wrap:wrap;row-gap:2px;max-height:3.1em}
-.sk-page.is-side.sk-tier-narrow .sk-header-actions{order:2;margin-left:auto}
 
 /* ======================= v0.5：AI 模型 / 预算 / 用量 ======================= */
 /* 模型选择：全宽 block + 原生 select，420px 侧栏纵向堆叠；只用 token 与 color-mix，无彩色盒子 */
@@ -1603,19 +1588,41 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-usage-rest{font-variant-numeric:tabular-nums;white-space:nowrap}
 .sk-usage-note{margin:0;font-size:11px;line-height:1.5;color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
 /* 运行中 AI 调用进度：统计行内小字，tabular-nums 避免数字跳动 */
-.sk-scan-ai{font-variant-numeric:tabular-nums;white-space:nowrap}
 /* 抽屉 AI 研判块：provider / model 过长时省略，避免挤掉置信度与时间 */
 .sk-ai-review-model{max-width:min(280px,48vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 `;
 
     const WORKFLOW_CSS = `
-.sk-viewbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 12px}
-.sk-view-switch{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;border:1px solid var(--sk-line);border-radius:10px;background:var(--sk-surface)}
-.sk-view-switch button{border:0;background:none;color:var(--sk-ink-2);font:inherit;font-size:12px;min-height:32px;padding:6px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.sk-view-switch,.sk-view-picker{margin-inline-end:auto;flex:none}
+.sk-view-switch{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--sk-line);border-radius:8px;background:var(--sk-surface)}
+.sk-view-switch button{border:0;background:none;color:var(--sk-ink-2);font:inherit;font-size:12px;min-height:28px;padding:4px 8px;border-radius:5px;cursor:pointer;white-space:nowrap}
 .sk-view-switch button[aria-pressed=true]{background:color-mix(in srgb,var(--sk-ink) 8%,transparent);color:var(--sk-ink);font-weight:500}
 .sk-view-count{margin-inline-start:4px;font-variant-numeric:tabular-nums}
 .sk-view-switch button:hover,.sk-task-row-main:hover{background:color-mix(in srgb,var(--sk-ink) 5%,transparent)}
+.sk-view-picker .sk-ws-select{background:var(--sk-surface-2);color:var(--sk-ink)}
+.sk-session-scope[aria-pressed=true]{background:var(--sk-surface-2);color:var(--sk-ink)}
+.sk-filter-popover{width:min(272px,calc(100vw - 24px))}
+.sk-filter-popover .sk-search-v3{width:100%}
+.sk-board-v3.is-done-collapsed{grid-template-columns:repeat(3,minmax(0,1fr)) max-content}
+.sk-col{min-height:0}
+.sk-col.is-collapsed{border-inline-start:1px solid var(--sk-line-soft);padding-inline-start:7px}
+.sk-col-toggle{display:inline-flex;align-items:center;gap:6px;min-height:22px;padding:0 4px;border:0;border-radius:5px;background:none;color:var(--sk-ink-2);font:inherit;cursor:pointer;white-space:nowrap}
+.sk-col-toggle:hover,.sk-column-pager button:hover:not(:disabled){background:var(--sk-hover);color:var(--sk-ink)}
+.sk-col-toggle[aria-expanded=true]>svg{transform:rotate(180deg)}
+.sk-col-body,.sk-narrow-list{overscroll-behavior-y:contain}
+.sk-col-body>.sk-card,.sk-narrow-list>.sk-card{flex:none}
+.sk-column-pager{display:flex;flex:none;align-items:center;justify-content:center;gap:8px;min-height:28px;border-top:1px solid var(--sk-line-soft);color:var(--sk-ink-2);font-size:11px;font-variant-numeric:tabular-nums}
+.sk-column-pager button{display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:5px;background:none;color:inherit;cursor:pointer}
+.sk-column-pager button:last-child>svg{transform:rotate(180deg)}
+.sk-column-pager button:disabled{opacity:.35;cursor:default}
+.sk-drawer-v3 .sk-drawer-body{min-height:0}
+.sk-compact-header .sk-header-main{gap:8px}
+.sk-tier-narrow .sk-title-v3{font-size:17px}
+.sk-tier-narrow .sk-header-actions{gap:3px}
+.sk-tier-narrow .sk-slimbar{gap:4px}
+.sk-tier-narrow .sk-ws-picker:not(.sk-view-picker){max-width:132px}
+.sk-tier-narrow .sk-slim-icon{padding-inline:5px}
 .sk-board-notice{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px 12px;border:1px solid var(--sk-line);border-radius:8px;margin-bottom:10px;font-size:13px}
 .sk-board-notice button:first-of-type{margin-inline-start:auto}
 .sk-collection{min-height:0;flex:1;overflow:auto;padding:0 2px 16px}
@@ -1636,18 +1643,29 @@ button.sk-task-row-main{cursor:pointer}
 .sk-ai-review summary{cursor:pointer}
 .sk-ai-review[open] .sk-ai-review-chevron{transform:rotate(90deg)}
 .sk-task-overview .sk-session-actions{margin:0}
-.sk-task-overview .sk-artifact-name,.sk-task-overview .sk-artifact-path{white-space:normal;overflow-wrap:anywhere}
-.sk-task-overview .sk-artifact-name{max-width:100%;font-weight:500}
+.sk-artifact-entry{display:flex;align-items:center;gap:5px;flex:1;min-width:0}
+.sk-artifact-entry .sk-artifact{width:auto;flex:1;padding:4px 6px;min-height:34px;border-radius:6px}
+.sk-artifact-entry .sk-artifact-text{gap:1px}
+.sk-artifact-entry .sk-artifact-name,.sk-artifact-entry .sk-artifact-path{max-width:100%}
+.sk-artifact-entry .sk-artifact-path:empty{display:none}
+.sk-artifact-entry .sk-artifact:disabled{cursor:default}
+.sk-artifact-entry .sk-artifact:disabled .sk-artifact-name{text-decoration:none;color:var(--sk-ink-2)}
+.sk-artifact-row .sk-btn{flex:none}
+.sk-card-open{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;width:100%;border:0;background:none;color:inherit;font:inherit;padding:0;text-align:start;cursor:pointer;overflow-wrap:anywhere}
+.sk-card-open:focus-visible{outline-offset:-2px;border-radius:3px}
+.sk-page .sk-quick-trigger{width:26px;height:26px}
+.sk-card .sk-quick-trigger{margin:-3px -5px -3px 0;color:var(--sk-ink-3)}
+.sk-quick-trigger[aria-expanded=true]{background:var(--sk-hover);color:var(--sk-ink)}
+.sk-quick-menu .sk-menu-item{flex:none}
+.sk-quick-menu .sk-menu-item:focus-visible{outline-offset:-2px;background:var(--sk-hover)}
+.sk-quick-menu .sk-menu-item:disabled{opacity:.45;cursor:default;background:transparent}
 .sk-evidence .sk-select{max-width:100%}
 .sk-ev-meta{flex-wrap:wrap}
 .sk-drawer-foot{flex-wrap:wrap}
 .sk-continue-modal{max-width:100%}
 .sk-continue-modal .sk-modal-foot{flex-wrap:wrap}
-.sk-page:not(.is-side).sk-tier-narrow .sk-header-v3{flex-direction:column;align-items:stretch;gap:10px}
-.sk-page:not(.is-side).sk-tier-narrow .sk-header-actions{flex-wrap:wrap}
-.sk-page:not(.is-side).sk-tier-narrow .sk-search-v3{flex:1 1 140px}
-.sk-page:not(.is-side).sk-tier-narrow .sk-stats-v3{flex-wrap:wrap;white-space:normal}
-.sk-task-row.has-session-actions{display:grid;grid-template-columns:minmax(0,1fr);gap:4px}
+.sk-task-row.has-session-actions{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px}
+.sk-task-row.has-session-actions .sk-session-actions{grid-column:1/-1}
 .sk-session-actions{display:grid;gap:4px;list-style:none;margin:0 6px;padding:4px 0 0;border-top:1px solid var(--sk-line)}
 .sk-session-actions li{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 12px;min-width:0;font-size:12px}
 .sk-session-actions li>span{flex:1 1 180px;color:var(--sk-ink-2);overflow-wrap:anywhere}
@@ -1673,7 +1691,6 @@ button.sk-task-row-main{cursor:pointer}
 .sk-card-meta-v3,.sk-card-metrics{color:var(--sk-ink-3)}
 .sk-drawer-sec-title{font-weight:600;color:var(--sk-ink-3);font-size:12px}
 .sk-col-add:focus-visible{opacity:1}
-.sk-tier-narrow .sk-view-switch button{padding-inline:6px}
 .sk-tier-narrow .sk-task-row{gap:5px}
 .sk-tier-narrow .sk-task-row .sk-btn{white-space:normal}
 `;
@@ -1715,7 +1732,7 @@ button.sk-task-row-main{cursor:pointer}
     function focusableIn(node) {
       if (!node) return [];
       return [...node.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
-        (element) => element.getClientRects().length > 0,
+        (element) => element.tabIndex >= 0 && element.getClientRects().length > 0,
       );
     }
 
@@ -1739,6 +1756,7 @@ button.sk-task-row-main{cursor:pointer}
         }
         const onKeyDown = (event) => {
           if (dialogStack[dialogStack.length - 1] !== token) return;
+          if (event.target?.closest?.(".sk-quick-menu")) return;
           if (event.key === "Escape") {
             event.preventDefault();
             event.stopPropagation();
@@ -1965,7 +1983,7 @@ button.sk-task-row-main{cursor:pointer}
 
     /* ================================ cards =============================== */
 
-    function TaskCard({ task, signal, onOpen, onDragStart, onDragEnd, dragging }) {
+    function TaskCard({ task, signal, onOpen, taskActions, onDragStart, onDragEnd, dragging }) {
       const progress = progressOf(task);
       const subtasks = subtasksOf(task);
       const issueList = Array.isArray(task.issues) ? task.issues : [];
@@ -1987,37 +2005,35 @@ button.sk-task-row-main{cursor:pointer}
         "article",
         {
           className: cx("sk-card", "sk-card-v3", "is-" + taskStatus, done && "is-done", dragging && "dragging"),
-          role: "button",
-          tabIndex: 0,
-          "aria-haspopup": "dialog",
           "data-task-id": task.id,
-          "aria-label": `${task.title}（${[STATUS_META[taskStatus].label, signal?.label].filter(Boolean).join(" · ")}）`,
           draggable: true,
           onDragStart: (event) => {
             event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", task.id);
+            event.dataTransfer.setData(TASK_DRAG_TYPE, task.id);
             onDragStart(task.id);
           },
           onDragEnd: () => onDragEnd(),
-          onClick: () => onOpen(task.id),
-          onKeyDown: (event) => {
-            if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
-              event.preventDefault();
-              onOpen(task.id);
-            }
+          onClick: (event) => {
+            event.currentTarget.querySelector(".sk-card-open")?.focus({ preventScroll: true });
+            onOpen(task.id);
           },
+          ...taskActions.handlers(task),
           title: task.title,
         },
         h(
           "div",
           { className: "sk-card-v3-head" },
           h("span", { className: cx("sk-dot", "is-" + taskStatus), title: STATUS_META[taskStatus].label }),
-          h("h3", { className: "sk-card-title-v3" }, task.title),
+          h("h3", { className: "sk-card-title-v3" }, h("button", {
+            type: "button", className: "sk-card-open", "aria-haspopup": "dialog",
+            "aria-label": `${task.title}（${[STATUS_META[taskStatus].label, signal?.label].filter(Boolean).join(" · ")}）`,
+          }, task.title)),
           task.pinned ? h("span", { className: "sk-archived-mark" }, "置顶") : null,
           task.archived ? h("span", { className: "sk-archived-mark", title: "已归档任务（筛选「含归档」时显示）" }, "已归档") : null,
           showEngine
             ? h("span", { className: cx("sk-ai-mark", engine === "AI" ? "is-ai" : "is-rules"), title: engine === "AI" ? "AI 研判" : "规则推断" }, engine)
             : null,
+          taskActions.button(task),
         ),
         h(
           "div",
@@ -2047,14 +2063,41 @@ button.sk-task-row-main{cursor:pointer}
       );
     }
 
-    function Column({ status, tasks, signals, onOpen, onAdd, onDropTask, draggingId, onDragStart, onDragEnd }) {
+    function ColumnCards({ id, labelledBy, label, className, tasks, signals, onOpen, taskActions, draggingId, onDragStart, onDragEnd, emptyText }) {
+      const [page, setPage] = React.useState(0);
+      const scrollRef = React.useRef(null);
+      const pageCount = Math.max(1, Math.ceil(tasks.length / COLUMN_PAGE_SIZE));
+      const currentPage = Math.min(page, pageCount - 1);
+      const start = currentPage * COLUMN_PAGE_SIZE;
+      React.useLayoutEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = 0; }, [currentPage]);
+      React.useEffect(() => { if (page !== currentPage) setPage(currentPage); }, [page, currentPage]);
+      return h(React.Fragment, null,
+        h("div", { id, ref: scrollRef, className, role: labelledBy ? "tabpanel" : "region", "aria-labelledby": labelledBy, "aria-label": labelledBy ? undefined : label },
+          tasks.length ? tasks.slice(start, start + COLUMN_PAGE_SIZE).map((task) => h(TaskCard, {
+            key: task.id, task, signal: signals.get(task.id), onOpen, taskActions, onDragStart, onDragEnd, dragging: draggingId === task.id,
+          })) : h("div", { className: labelledBy ? "sk-narrow-empty" : "sk-col-empty" }, emptyText)),
+        pageCount > 1 ? h("nav", { className: "sk-column-pager", "aria-label": `${label}分页` },
+          h("button", { type: "button", disabled: currentPage === 0, onClick: () => setPage(currentPage - 1), "aria-label": `${label}上一页` },
+            h(Icon, { name: "back", size: 13 })),
+          h("span", { "aria-live": "polite", title: `第 ${currentPage + 1} / ${pageCount} 页` }, `${start + 1}–${Math.min(start + COLUMN_PAGE_SIZE, tasks.length)} / ${tasks.length}`),
+          h("button", { type: "button", disabled: currentPage === pageCount - 1, onClick: () => setPage(currentPage + 1), "aria-label": `${label}下一页` },
+            h(Icon, { name: "back", size: 13 }))) : null);
+    }
+
+    function Column({ status, tasks, signals, onOpen, taskActions, onAdd, onDropTask, draggingId, onDragStart, onDragEnd, pageKey, collapsed, onToggle }) {
       const meta = STATUS_META[status];
       const [dragOver, setDragOver] = React.useState(false);
+      const contentId = React.useId();
+      const heading = h(React.Fragment, null,
+        h("span", { className: cx("sk-dot", "is-" + status) }),
+        h("span", { className: "sk-col-title" }, meta.label),
+        h("span", { className: "sk-col-count" }, tasks.length));
       return h(
         "section",
         {
-          className: cx("sk-col", dragOver && "dragover"),
+          className: cx("sk-col", dragOver && "dragover", collapsed && "is-collapsed"),
           onDragOver: (event) => {
+            if (!draggingId || !event.dataTransfer.types.includes(TASK_DRAG_TYPE)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "move";
             setDragOver(true);
@@ -2063,20 +2106,21 @@ button.sk-task-row-main{cursor:pointer}
             if (!event.currentTarget.contains(event.relatedTarget)) setDragOver(false);
           },
           onDrop: (event) => {
-            event.preventDefault();
             setDragOver(false);
-            const id = event.dataTransfer.getData("text/plain");
-            if (id) onDropTask(id, status);
+            const id = event.dataTransfer.getData(TASK_DRAG_TYPE);
+            if (!id || id !== draggingId) return;
+            event.preventDefault();
+            onDropTask(id, status);
           },
         },
         h(
           "header",
           { className: "sk-col-head" },
-          h("span", { className: cx("sk-dot", "is-" + status) }),
-          h("span", { className: "sk-col-title" }, meta.label),
-          h("span", { className: "sk-col-count" }, tasks.length),
-          h("span", { className: "sk-col-head-spacer" }),
-          h(
+          onToggle ? h("button", { type: "button", className: "sk-col-toggle", "aria-expanded": !collapsed, "aria-controls": contentId,
+            "aria-label": `${collapsed ? "展开" : "折叠"}已完成列，${tasks.length} 项`, onClick: onToggle },
+            heading, h(Icon, { name: "chevronDown", size: 13 })) : heading,
+          !collapsed ? h("span", { className: "sk-col-head-spacer" }) : null,
+          !collapsed ? h(
             "button",
             {
               type: "button",
@@ -2086,30 +2130,37 @@ button.sk-task-row-main{cursor:pointer}
               onClick: () => onAdd(status),
             },
             h(Icon, { name: "plus", size: 14 }),
-          ),
+          ) : null,
         ),
-        h(
-          "div",
-          { className: "sk-col-body" },
-          tasks.length === 0
-            ? h("div", { className: "sk-col-empty" }, status === "blocked" ? "暂无受阻任务" : "暂无任务，拖拽卡片到这里")
-            : tasks.map((task) => h(TaskCard, { key: task.id, task, signal: signals.get(task.id), onOpen, onDragStart, onDragEnd, dragging: draggingId === task.id })),
-        ),
+        collapsed ? h("div", { id: contentId, hidden: true }) : h(ColumnCards, {
+          key: pageKey, id: contentId, label: meta.label, className: "sk-col-body", tasks, signals, onOpen, taskActions, draggingId, onDragStart, onDragEnd,
+          emptyText: status === "blocked" ? "暂无受阻任务" : "暂无任务，拖拽卡片到这里",
+        }),
       );
     }
 
     /** 窄屏（右侧栏 <620px）：文字状态 tab + 单列卡片。 */
-    function NarrowBoard({ status, setStatus, byStatus, signals, onOpen, onAdd, draggingId, onDragStart, onDragEnd }) {
+    function NarrowBoard({ status, setStatus, byStatus, signals, onOpen, taskActions, onAdd, draggingId, onDragStart, onDragEnd, pageKey }) {
       const list = byStatus[status] || [];
       // Each mounted surface owns its own tab and panel ids.
       const panelId = React.useId();
       const tabId = (item) => `${panelId}-${item}`;
+      const changeTabByKey = (event) => {
+        const current = STATUS_ORDER.indexOf(status);
+        const last = STATUS_ORDER.length - 1;
+        const index = { ArrowLeft: current === 0 ? last : current - 1, ArrowRight: current === last ? 0 : current + 1, Home: 0, End: last }[event.key];
+        if (index === undefined) return;
+        event.preventDefault();
+        const next = STATUS_ORDER[index];
+        setStatus(next);
+        document.getElementById(tabId(next))?.focus();
+      };
       return h(
         React.Fragment,
         null,
         h(
           "div",
-          { className: "sk-status-tabs", role: "tablist", "aria-label": "任务状态" },
+          { className: "sk-status-tabs", role: "tablist", "aria-label": "任务状态", onKeyDown: changeTabByKey },
           STATUS_ORDER.map((item) =>
             h(
               "button",
@@ -2118,6 +2169,7 @@ button.sk-task-row-main{cursor:pointer}
                 id: tabId(item),
                 type: "button",
                 role: "tab",
+                tabIndex: status === item ? 0 : -1,
                 "aria-selected": status === item,
                 "aria-controls": panelId,
                 className: cx("sk-status-tab", status === item && "is-on"),
@@ -2128,23 +2180,9 @@ button.sk-task-row-main{cursor:pointer}
             ),
           ),
         ),
-        h(
-          "div",
-          { id: panelId, className: "sk-narrow-list", role: "tabpanel", "aria-labelledby": tabId(status) },
-          list.length
-            ? list.map((task) =>
-                h(TaskCard, {
-                  key: task.id,
-                  task,
-                  signal: signals.get(task.id),
-                  onOpen,
-                  onDragStart,
-                  onDragEnd,
-                  dragging: draggingId === task.id,
-                }),
-              )
-            : h("div", { className: "sk-narrow-empty" }, `「${STATUS_META[status].label}」暂无任务`),
-        ),
+        h(ColumnCards, { key: `${status}:${pageKey}`, id: panelId, labelledBy: tabId(status), label: STATUS_META[status].label,
+          className: "sk-narrow-list", tasks: list, signals, onOpen, taskActions, draggingId, onDragStart, onDragEnd,
+          emptyText: `「${STATUS_META[status].label}」暂无任务` }),
         h(
           "button",
           { type: "button", className: "sk-narrow-add", onClick: () => onAdd(status) },
@@ -2167,18 +2205,22 @@ button.sk-task-row-main{cursor:pointer}
       } catch {
         /* fall through */
       }
+      let area;
+      const previous = document.activeElement;
       try {
-        const area = document.createElement("textarea");
+        area = document.createElement("textarea");
         area.value = value;
+        area.tabIndex = -1;
         area.style.position = "fixed";
         area.style.opacity = "0";
-        document.body.appendChild(area);
+        (previous?.closest?.('[aria-modal="true"]') || document.body).appendChild(area);
         area.select();
-        const ok = document.execCommand("copy");
-        document.body.removeChild(area);
-        return ok;
+        return document.execCommand("copy");
       } catch {
         return false;
+      } finally {
+        area?.remove();
+        previous?.focus?.({ preventScroll: true });
       }
     }
 
@@ -2573,7 +2615,7 @@ button.sk-task-row-main{cursor:pointer}
           h("button", { className: "sk-btn", type: "button", "aria-label": `打开会话：${title}（${label}）`, onClick: () => openSession(id) }, "打开会话"))));
     }
 
-    function TaskDrawer({ task, signal, tasks, workspaces, onOpenTask, ctxProps, settings, onClose, onChanged, pushToast }) {
+    function TaskDrawer({ task, signal, tasks, workspaces, onOpenTask, ctxProps, settings, desktopFiles, onClose, onChanged, pushToast }) {
       const host = (ctxProps && ctxProps.host) || {};
       const goal = goalInfoOf(task);
       const session = sessionContextOf(task);
@@ -2594,8 +2636,8 @@ button.sk-task-row-main{cursor:pointer}
       const [evidenceSession, setEvidenceSession] = React.useState("");
       const [historyOpen, setHistoryOpen] = React.useState(false);
       const [expandedEvidence, setExpandedEvidence] = React.useState({});
-      const [moreOpen, setMoreOpen] = React.useState(false);
-      const [moreOpenFooter, setMoreOpenFooter] = React.useState(false);
+      const [moreAnchor, setMoreAnchor] = React.useState(null);
+      const [footerAnchor, setFooterAnchor] = React.useState(null);
       const [continueOpen, setContinueOpen] = React.useState(false);
       const [continueTarget, setContinueTarget] = React.useState("session");
       const [continuePurpose, setContinuePurpose] = React.useState("continue");
@@ -2608,6 +2650,7 @@ button.sk-task-row-main{cursor:pointer}
       const editBase = React.useRef(null);
       const [analyzeBusy, setAnalyzeBusy] = React.useState(false);
       const dialogRef = React.useRef(null);
+      const titleId = React.useId();
 
       const subtasks = optimisticSubtasks || subtasksOf(task);
       const subtaskDone = subtasks.filter((item) => item.done).length;
@@ -2678,19 +2721,19 @@ button.sk-task-row-main{cursor:pointer}
 
       // S10：菜单关闭 / 点别处时复位「确认删除」，避免下次打开菜单直接显示「确认删除任务」。
       const closeMore = () => {
-        setMoreOpen(false);
+        setMoreAnchor(null);
         setConfirmDelete(false);
       };
 
       // Esc 分层：先收起抽屉内浮层 / 退出编辑，最后才关闭抽屉；「继续此任务」弹窗自己处理 Esc。
       const handleEscape = () => {
         if (continueOpen) return;
-        if (moreOpen) {
+        if (moreAnchor) {
           closeMore();
           return;
         }
-        if (moreOpenFooter) {
-          setMoreOpenFooter(false);
+        if (footerAnchor) {
+          setFooterAnchor(null);
           return;
         }
         if (editing) {
@@ -2827,24 +2870,9 @@ button.sk-task-row-main{cursor:pointer}
       };
       const openSession = () => openSourceSession(session.sessionId);
 
-      const openArtifact = async (artifact) => {
-        const sessionId = artifact.sessionId || session.sessionId;
-        const ok = await host.openResource?.(sessionId, artifact.path);
-        if (!ok) {
-          pushToast("当前环境无法打开预览", "error");
-          return;
-        }
-        onClose();
-      };
-
-      const artifactButton = (artifact) => h("button", {
-        key: artifact.id, type: "button", className: "sk-artifact", title: artifact.path || artifact.name,
-        disabled: artifact.missing || !artifact.path, onClick: () => openArtifact(artifact),
-      },
-      h(Icon, { name: "file", size: 14, className: "sk-artifact-icon" }),
-      h("span", { className: "sk-artifact-text" },
-        h("span", { className: "sk-artifact-name" }, artifact.name, artifact.missing ? " · 文件不可用" : ""),
-        artifact.path ? h("span", { className: "sk-artifact-path" }, artifact.path) : null));
+      const artifactButton = (artifact) => h(ArtifactEntry, {
+        key: artifact.id, artifact, task, host, desktopFiles, pushToast, onPreview: onClose,
+      });
 
       const startContinue = (target, purpose) => {
         setContinueTarget(target);
@@ -2906,19 +2934,22 @@ button.sk-task-row-main{cursor:pointer}
       };
 
       const drawerMenuItems = [
-        { label: task.pinned ? "取消置顶" : "置顶任务", icon: "arrow", onClick: () => run("置顶", () => command("task.pin", { id: task.id, pinned: !task.pinned }), task.pinned ? "已取消置顶" : "已置顶") },
-        { label: "编辑任务", icon: "edit", onClick: () => { resetDraft(); setEditing(true); } },
-        { label: analyzeBusy ? "重新研判中…" : "重新研判", icon: "spark", onClick: analyzeNow },
-        { label: locked.length ? "解锁字段" : "锁定字段", icon: locked.length ? "unlock" : "lock", onClick: toggleLock },
+        { label: task.pinned ? "取消置顶" : "置顶任务", icon: "arrow", run: () => run("置顶", () => command("task.pin", { id: task.id, pinned: !task.pinned }), task.pinned ? "已取消置顶" : "已置顶") },
+        { label: "编辑任务", icon: "edit", run: () => { resetDraft(); setEditing(true); } },
+        { label: analyzeBusy ? "重新研判中…" : "重新研判", icon: "spark", disabled: analyzeBusy, run: analyzeNow },
+        { label: locked.length ? "解锁字段" : "锁定字段", icon: locked.length ? "unlock" : "lock", run: toggleLock },
         "divider",
-        { label: task.archived ? "恢复任务" : "归档任务", icon: "archive", onClick: () => run(task.archived ? "恢复" : "归档", () => command("task.archive", { id: task.id, archived: !task.archived }), task.archived ? "已恢复" : "已归档") },
+        { label: task.archived ? "恢复任务" : "归档任务", icon: "archive", run: () => run(task.archived ? "恢复" : "归档", async () => {
+          await command("task.archive", { id: task.id, archived: !task.archived });
+          if (!task.archived) onClose();
+        }, task.archived ? "已恢复" : "已归档") },
         // S10：删除二次确认在菜单内原位完成（keepOpen），菜单一关闭就复位，避免下次打开直接显示「确认删除任务」。
-        { label: confirmDelete ? "确认删除任务" : "删除任务", icon: "trash", danger: true, keepOpen: true, onClick: removeTask },
+        { id: "delete-task", label: confirmDelete ? "确认删除任务" : "删除任务", icon: "trash", danger: true, keepOpen: true, run: removeTask },
       ];
       const footerMenuItems = [
-        { label: "新会话继续", icon: "spark", onClick: () => startContinue("newSession", "continue") },
-        { label: "打开终端", icon: "tool", onClick: openTerminal },
-        { label: "复制会话 ID", icon: "copy", onClick: copySessionId },
+        { label: "新会话继续", icon: "spark", run: () => startContinue("newSession", "continue") },
+        { label: "打开终端", icon: "tool", run: openTerminal },
+        { label: "复制会话 ID", icon: "copy", disabled: !session.sessionId, run: copySessionId },
       ];
 
       const subtaskRows = (subtasksExpanded ? subtasks : subtasks.slice(0, 8)).map((item) =>
@@ -2956,7 +2987,7 @@ button.sk-task-row-main{cursor:pointer}
             ref: dialogRef,
             role: "dialog",
             "aria-modal": "true",
-            "aria-labelledby": "sk-drawer-title",
+            "aria-labelledby": titleId,
             onClick: (event) => event.stopPropagation(),
           },
           h(
@@ -2967,24 +2998,9 @@ button.sk-task-row-main{cursor:pointer}
               { type: "button", className: "sk-iconbtn-v3 sk-drawer-back", title: "返回（Esc）", "aria-label": "关闭任务详情", onClick: onClose },
               h(Icon, { name: "back", size: 16 }),
             ),
-            h("div", { className: "sk-drawer-head-text" }, h("div", { className: "sk-drawer-kicker" }, "任务"), h("h2", { className: "sk-drawer-title-v3", id: "sk-drawer-title" }, task.title)),
-            h(
-              DropMenu,
-              { open: moreOpen, onClose: closeMore, items: drawerMenuItems },
-              h(
-                "button",
-                {
-                  type: "button",
-                  className: "sk-iconbtn-v3",
-                  title: "更多",
-                  "aria-label": "更多任务操作",
-                  "aria-haspopup": "menu",
-                  "aria-expanded": moreOpen,
-                  onClick: () => (moreOpen ? closeMore() : setMoreOpen(true)),
-                },
-                h(Icon, { name: "more", size: 16 }),
-              ),
-            ),
+            h("div", { className: "sk-drawer-head-text" }, h("div", { className: "sk-drawer-kicker" }, "任务"), h("h2", { className: "sk-drawer-title-v3", id: titleId }, task.title)),
+            h(QuickMenuButton, { label: "更多任务操作", expanded: Boolean(moreAnchor), onOpen: (anchor) => anchor ? setMoreAnchor(anchor) : closeMore() }),
+            moreAnchor ? h(QuickMenu, { anchor: moreAnchor, label: "更多任务操作", items: drawerMenuItems, onClose: closeMore }) : null,
           ),
           h(
             "div",
@@ -3291,23 +3307,8 @@ button.sk-task-row-main{cursor:pointer}
                   h("button", { type: "button", className: "sk-btn primary", onClick: () => startContinue("session", ready ? "verify" : task.status === "blocked" ? "unblock" : "continue") }, ready ? "验收产出" : "继续此任务"),
                   h("button", { type: "button", className: "sk-btn ghost", onClick: openSession, disabled: !session.sessionId }, "打开会话"),
                   h("span", { className: "sk-grow" }),
-                  h(
-                    DropMenu,
-                    { open: moreOpenFooter, onClose: () => setMoreOpenFooter(false), items: footerMenuItems },
-                    h(
-                      "button",
-                      {
-                        type: "button",
-                        className: "sk-iconbtn-v3",
-                        title: "更多操作",
-                        "aria-label": "更多任务操作",
-                        "aria-haspopup": "menu",
-                        "aria-expanded": moreOpenFooter,
-                        onClick: () => setMoreOpenFooter((value) => !value),
-                      },
-                      h(Icon, { name: "more", size: 16 }),
-                    ),
-                  ),
+                  h(QuickMenuButton, { label: "更多继续操作", expanded: Boolean(footerAnchor), onOpen: setFooterAnchor }),
+                  footerAnchor ? h(QuickMenu, { anchor: footerAnchor, label: "更多继续操作", items: footerMenuItems, onClose: () => setFooterAnchor(null) }) : null,
                 ),
           ),
           continueOpen
@@ -3877,49 +3878,130 @@ button.sk-task-row-main{cursor:pointer}
       }
     }
 
-    /** DSH 菜单风格的下拉浮层：trigger + 右侧菜单。 */
-    function DropMenu({ open, onClose, items, children, alignLeft }) {
-      const wrapRef = React.useRef(null);
+    function quickMenuAnchor(event, kind, trigger = event.currentTarget) {
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = trigger.getBoundingClientRect();
+      return kind === "context" && (event.clientX || event.clientY)
+        ? { trigger, x: event.clientX, y: event.clientY, right: event.clientX, above: event.clientY }
+        : { trigger, x: rect.left, y: rect.bottom + 4, right: rect.right, above: rect.top - 4 };
+    }
+
+    function quickMenuHandlers(open, findTrigger) {
+      return {
+        onContextMenu: (event) => open(quickMenuAnchor(event, "context", findTrigger(event))),
+        onKeyDown: (event) => {
+          if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+            open(quickMenuAnchor(event, "keyboard", findTrigger(event)));
+          }
+        },
+      };
+    }
+
+    function QuickMenuButton({ label, expanded, onOpen }) {
+      return h("button", {
+        type: "button", className: "sk-iconbtn-v3 sk-quick-trigger", title: label, "aria-label": label,
+        "aria-haspopup": "menu", "aria-expanded": expanded,
+        onClick: (event) => {
+          if (expanded) {
+            event.stopPropagation();
+            onOpen(null);
+          } else onOpen(quickMenuAnchor(event, "button"));
+        },
+      }, h(Icon, { name: "more", size: 15 }));
+    }
+
+    function QuickMenu({ anchor, items, label, onClose }) {
+      const menuRef = React.useRef(null);
+      const dismiss = (returnFocus = false) => {
+        if (returnFocus && anchor.trigger.isConnected) anchor.trigger.focus({ preventScroll: true });
+        onClose();
+      };
+      React.useLayoutEffect(() => {
+        const node = menuRef.current;
+        if (!node) return undefined;
+        node.showPopover?.();
+        const width = node.offsetWidth;
+        const height = node.offsetHeight;
+        const scope = anchor.trigger.closest(".sk-drawer, .sk-page")?.getBoundingClientRect();
+        const scopeLeft = Math.max(8, (scope?.left ?? 0) + 8);
+        const scopeRight = Math.min(window.innerWidth, scope?.right ?? window.innerWidth) - width - 8;
+        const right = scopeRight >= scopeLeft ? scopeRight : window.innerWidth - width - 8;
+        const bottom = window.innerHeight - height - 8;
+        const left = anchor.x > right ? Math.min(anchor.right - width, right) : anchor.x;
+        const top = anchor.y > bottom ? Math.min(anchor.above - height, bottom) : anchor.y;
+        node.style.left = `${Math.max(scopeRight >= scopeLeft ? scopeLeft : 8, left)}px`;
+        node.style.top = `${Math.max(8, top)}px`;
+        node.querySelector("button:not([disabled])")?.focus({ preventScroll: true });
+        return () => node.hidePopover?.();
+      }, [anchor]);
       React.useEffect(() => {
-        if (!open) return undefined;
-        const onDown = (event) => {
-          if (wrapRef.current && !wrapRef.current.contains(event.target)) onClose();
+        const outside = (event) => {
+          if (!menuRef.current?.contains(event.target) && !anchor.trigger.contains(event.target)) dismiss();
         };
-        document.addEventListener("mousedown", onDown);
-        return () => document.removeEventListener("mousedown", onDown);
-      }, [open, onClose]);
-      return h(
-        "div",
-        { className: "sk-menu-wrap", ref: wrapRef },
-        children,
-        open
-          ? h(
-              "div",
-              { className: cx("sk-menu", alignLeft && "is-left"), role: "menu" },
-              items.filter(Boolean).map((item, index) =>
-                item === "divider"
-                  ? h("div", { key: "sep" + index, className: "sk-menu-sep" })
-                  : h(
-                      "button",
-                      {
-                        key: item.label + index,
-                        type: "button",
-                        role: "menuitem",
-                        className: cx("sk-menu-item", item.danger && "is-danger", item.active && "is-active"),
-                        onClick: () => {
-                          // keepOpen：二次确认类操作原地更新菜单，不关闭浮层。
-                          if (!item.keepOpen) onClose();
-                          if (item.onClick) item.onClick();
-                        },
-                      },
-                      item.icon ? h(Icon, { name: item.icon, size: 14 }) : null,
-                      item.label,
-                      item.hint ? h("span", { className: "sk-menu-hint" }, item.hint) : null,
-                    ),
-              ),
-            )
-          : null,
-      );
+        const scroll = (event) => {
+          if (!(event.target instanceof Node && menuRef.current?.contains(event.target))) dismiss();
+        };
+        document.addEventListener("pointerdown", outside, true);
+        window.addEventListener("scroll", scroll, true);
+        window.addEventListener("resize", onClose);
+        return () => {
+          document.removeEventListener("pointerdown", outside, true);
+          window.removeEventListener("scroll", scroll, true);
+          window.removeEventListener("resize", onClose);
+        };
+      }, [anchor, onClose]);
+
+      const onKeyDown = (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          dismiss(true);
+          return;
+        }
+        if (event.key === "Tab") {
+          event.stopPropagation();
+          const dialog = anchor.trigger.closest('[aria-modal="true"]');
+          if (!dialog) {
+            dismiss(true);
+            return;
+          }
+          event.preventDefault();
+          const items = focusableIn(dialog);
+          const index = items.indexOf(anchor.trigger);
+          const direction = event.shiftKey ? -1 : 1;
+          items[(index + direction + items.length) % items.length]?.focus();
+          dismiss();
+          return;
+        }
+        const buttons = [...menuRef.current.querySelectorAll("button:not([disabled])")];
+        const current = buttons.indexOf(event.target);
+        const target = {
+          ArrowDown: (current + 1) % buttons.length,
+          ArrowUp: (current + buttons.length - 1) % buttons.length,
+          Home: 0,
+          End: buttons.length - 1,
+        }[event.key];
+        if (target === undefined) return;
+        event.preventDefault();
+        buttons[target]?.focus();
+      };
+
+      return h("div", { ref: menuRef, popover: "manual", className: "sk-menu sk-quick-menu", role: "menu", "aria-label": label, onKeyDown,
+        onContextMenu: (event) => { event.preventDefault(); event.stopPropagation(); } },
+        items.filter(Boolean).map((item, index) => item === "divider"
+          ? h("div", { key: `divider${index}`, className: "sk-menu-sep", role: "separator" })
+          : h("button", { key: item.id || item.label, type: "button", role: "menuitem", tabIndex: -1, disabled: item.disabled,
+              className: cx("sk-menu-item", item.danger && "is-danger"), onClick: () => {
+                if (!item.keepOpen) dismiss(true);
+                item.run();
+              } },
+              item.icon ? h(Icon, { name: item.icon, size: 14 }) : null, item.label)));
+    }
+
+    async function copyWithToast(value, label, pushToast) {
+      const ok = await copyToClipboard(value);
+      pushToast(ok ? `${label}已复制` : "浏览器拦截了剪贴板，请手动复制", ok ? "info" : "error");
     }
 
     function taskHierarchy(tasks) {
@@ -3953,7 +4035,7 @@ button.sk-task-row-main{cursor:pointer}
       return groups;
     }
 
-    function TaskCollection({ mode, tasks, signals, onOpen, openSession, reload, pushToast, emptyText, onClear, clearLabel }) {
+    function TaskCollection({ mode, tasks, signals, onOpen, taskActions, openSession, reload, pushToast, emptyText, onClear, clearLabel }) {
       const [checked, setChecked] = React.useState([]);
       const [busy, setBusy] = React.useState(false);
       const [priority, setPriority] = React.useState("");
@@ -3984,7 +4066,8 @@ button.sk-task-row-main{cursor:pointer}
         const summary = pending.length ? null : signal
           ? [signal.label, signal.text].filter(Boolean).join(" · ")
           : task.nextSteps?.[0] || goalInfoOf(task)?.text;
-        return h("li", { key: task.id, className: cx("sk-task-row", pending.length > 0 && "has-session-actions"), style: { "--sk-depth": Math.min(depth, 5) } },
+        return h("li", { key: task.id, className: cx("sk-task-row", pending.length > 0 && "has-session-actions"),
+          style: { "--sk-depth": Math.min(depth, 5) }, ...taskActions.handlers(task) },
           mode === "list" ? h("input", {
             type: "checkbox", "aria-label": `选择 ${task.title}`, checked: checked.includes(task.id),
             disabled: busy || (active.length >= 200 && !checked.includes(task.id)),
@@ -3997,6 +4080,7 @@ button.sk-task-row-main{cursor:pointer}
               [mode === "hierarchy" ? "" : task.workspaceTitle, task.archived ? "已归档" : STATUS_META[statusOf(task)].label,
                 taskRunningLabel(task), taskProgressLabel(task), task.priority,
                 artifactsOf(task).length ? `${artifactsOf(task).length} 项产出` : ""].filter(Boolean).join(" · "))),
+          taskActions.button(task),
           renderSessionActions(pending, openSession));
       };
 
@@ -4022,22 +4106,59 @@ button.sk-task-row-main{cursor:pointer}
         h("ul", { className: "sk-task-list" }, sorted.map((task) => row(task))));
     }
 
-    function ArtifactsView({ tasks, host, pushToast, onOpen }) {
+    function ArtifactEntry({ artifact, task, host, desktopFiles, pushToast, onPreview, details }) {
+      const [anchor, setAnchor] = React.useState(null);
+      const triggerRef = React.useRef(null);
+      const fullPath = [artifact.absPath, artifact.path].find(isHostAbsolutePath);
+      const primarySession = sessionContextOf(task).sessionId;
+      const sessionId = artifact.sessionId || primarySession;
+      const canPreview = !artifact.missing && Boolean(artifact.path && sessionId);
+      const fileName = fileNameOf(fullPath || artifact.path) || artifact.name;
+      const location = fullPath || artifact.path;
+      const source = artifact.sessionId && artifact.sessionId !== primarySession
+        ? task.sessions?.find((session) => session.id === artifact.sessionId)?.title : task.workspaceTitle;
+      const tooltip = [source, location || fileName, artifact.missing ? "文件不可用" : ""].filter(Boolean).join("\n");
+      const copy = (value, label) => () => copyWithToast(value, label, pushToast);
+      const preview = async () => {
+        if (await host.openResource?.(sessionId, artifact.path)) onPreview?.();
+        else pushToast("当前环境无法打开文件预览", "error");
+      };
+      const native = async (action) => {
+        if (!(await host.openNativeFile?.(fullPath || artifact.path, action, sessionId))) {
+          pushToast(action === "reveal" ? "无法在文件管理器中定位该文件" : "无法用默认应用打开该文件", "error");
+        }
+      };
+      const items = [
+        { label: "在 DSH 中预览", icon: "file", disabled: !canPreview, run: preview },
+        desktopFiles && (fullPath || canPreview) && { label: "用默认应用打开", icon: "arrow", disabled: artifact.missing, run: () => native("open") },
+        desktopFiles && (fullPath || canPreview) && { label: "在文件管理器中显示", icon: "folder", disabled: artifact.missing, run: () => native("reveal") },
+        "divider",
+        { label: "复制文件名", icon: "copy", run: copy(fileName, "文件名") },
+        location && { label: fullPath ? "复制完整路径" : "复制相对路径", icon: "copy", run: copy(location, "路径") },
+      ];
+      const pathLabel = artifact.path !== fileName ? artifact.path : "";
+      const type = artifact.kind === "deliverable" ? "交付物" : artifact.kind === "modified" ? "修改文件" : "文件";
+      return h("div", { className: "sk-artifact-entry", title: tooltip,
+        ...quickMenuHandlers(setAnchor, (event) => event.target.closest?.("button:not([disabled])") || triggerRef.current.querySelector(".sk-quick-trigger")),
+        ref: triggerRef },
+        h("button", { type: "button", className: "sk-artifact", disabled: !canPreview, onClick: preview },
+          h(Icon, { name: "file", size: 15, className: "sk-artifact-icon" }),
+          h("span", { className: "sk-artifact-text" },
+            h("span", { className: "sk-artifact-name" }, artifact.name),
+            h("span", { className: "sk-artifact-path" }, [artifact.missing ? "文件不可用" : details ? type : "", pathLabel,
+              details && artifact.time ? relTime(artifact.time) : ""].filter(Boolean).join(" · ")))),
+        h(QuickMenuButton, { label: `文件操作：${artifact.name}`, expanded: Boolean(anchor), onOpen: setAnchor }),
+        anchor ? h(QuickMenu, { anchor, items, label: `文件操作：${artifact.name}`, onClose: () => setAnchor(null) }) : null);
+    }
+
+    function ArtifactsView({ tasks, host, desktopFiles, pushToast, onOpen }) {
       const items = tasks.flatMap((task) => artifactsOf(task).map((artifact) => ({ task, artifact })))
         .sort((a, b) => Number(b.artifact.kind === "deliverable") - Number(a.artifact.kind === "deliverable") || b.artifact.time - a.artifact.time);
       if (!items.length) return h("div", { className: "sk-empty-v3" }, "当前范围没有产出");
       return h("div", { className: "sk-collection" }, h("ul", { className: "sk-task-list" }, items.map(({ task, artifact }) =>
-        h("li", { className: "sk-task-row", key: `${task.id}:${artifact.id}` },
-          h(Icon, { name: "file", size: 16 }),
-          h("div", { className: "sk-task-row-main" },
-            h("span", { className: "sk-task-row-title" }, artifact.name),
-            h("span", { className: "sk-task-row-meta" },
-              [artifact.missing ? "文件不可用" : artifact.kind === "deliverable" ? "交付物" : artifact.kind === "modified" ? "修改文件" : "文件",
-                artifact.path, artifact.time ? relTime(artifact.time) : ""].filter(Boolean).join(" · "))),
-          h("button", { className: "sk-btn", type: "button", onClick: () => onOpen(task.id) }, "来源任务"),
-          h("button", { className: "sk-btn", type: "button", disabled: artifact.missing || !artifact.path, onClick: async () => {
-            if (!(await host.openResource?.(artifact.sessionId || task.primarySessionId, artifact.path))) pushToast("当前无法打开文件预览", "error");
-          } }, "预览")))));
+        h("li", { className: "sk-task-row sk-artifact-row", key: `${task.id}:${artifact.id}` },
+          h(ArtifactEntry, { artifact, task, host, desktopFiles, pushToast, details: true }),
+          h("button", { className: "sk-btn", type: "button", onClick: () => onOpen(task.id) }, "来源任务")))));
     }
 
     function MaintenanceView({ data, reload, pushToast, startScan }) {
@@ -4151,7 +4272,8 @@ button.sk-task-row-main{cursor:pointer}
       const tier = surface === "side" ? (rootWidth >= 980 ? "wide" : rootWidth >= 620 ? "medium" : "narrow")
         : rootWidth > 0 && rootWidth < 620 ? "narrow" : "wide";
       const isNarrow = tier === "narrow";
-      const pageClass = cx("sk-page", surface === "side" && "is-side", "sk-tier-" + tier);
+      const compactHeader = isNarrow || (rootWidth > 0 && rootWidth < 850);
+      const pageClass = cx("sk-page", surface === "side" && "is-side", "sk-tier-" + tier, compactHeader && "sk-compact-header");
 
       const [toasts, pushToast] = useToasts();
       const { data, error, loading, reload, setData } = useBoardData();
@@ -4165,6 +4287,11 @@ button.sk-task-row-main{cursor:pointer}
         return surface === "side" ? "list" : "board";
       });
       const [filters, setFilters] = React.useState(() => readFilters(surface));
+      const collapseKey = `dsh-super-kanban:done-collapsed:${surface}`;
+      const [doneCollapsed, setDoneCollapsed] = React.useState(() => {
+        try { return localStorage.getItem(collapseKey) === "true"; } catch { return false; }
+      });
+      const pageKey = JSON.stringify([filters, sessionId, currentOnly]);
       const [, setHandoffTick] = React.useState(0);
       const searchRef = React.useRef(null);
       const [drawerId, setDrawerId] = React.useState(null);
@@ -4174,11 +4301,27 @@ button.sk-task-row-main{cursor:pointer}
       const [scanBusy, setScanBusy] = React.useState(false);
       const [nowTick, setNowTick] = React.useState(0);
       const [filterOpen, setFilterOpen] = React.useState(false);
-      const [moreOpen, setMoreOpen] = React.useState(false);
+      const [moreAnchor, setMoreAnchor] = React.useState(null);
+      const [quickTask, setQuickTask] = React.useState(null);
+      const [desktopFiles, setDesktopFiles] = React.useState(false);
+      const filterRef = React.useRef(null);
+      const movingTasks = React.useRef(new Set());
+
+      React.useEffect(() => {
+        let current = true;
+        host.canOpenNativeFile?.().then((available) => { if (current) setDesktopFiles(available); });
+        return () => { current = false; };
+      }, [host]);
 
       React.useEffect(() => {
         try { localStorage.setItem(`dsh-super-kanban:view:${surface}`, mode); } catch { /* optional preference */ }
       }, [mode, surface]);
+
+      React.useEffect(() => {
+        try { localStorage.setItem(collapseKey, String(doneCollapsed)); } catch { /* optional preference */ }
+      }, [collapseKey, doneCollapsed]);
+
+      React.useEffect(() => { setQuickTask(null); }, [mode, sideStatus, filters, currentOnly]);
 
       React.useEffect(() => {
         const timer = setInterval(() => setNowTick((value) => value + 1), 30_000);
@@ -4187,7 +4330,11 @@ button.sk-task-row-main{cursor:pointer}
 
       React.useEffect(() => {
         const onKey = (event) => {
+          if (event.defaultPrevented) return;
           const target = event.target;
+          const root = rootRef.current;
+          const activeSurface = target?.closest?.(".sk-page");
+          if (!root || (activeSurface && activeSurface !== root) || (!activeSurface && surface === "side")) return;
           const typing = Boolean(
             target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable),
           );
@@ -4195,17 +4342,21 @@ button.sk-task-row-main{cursor:pointer}
             if (settingsOpen) setSettingsOpen(false);
             else if (newTaskStatus !== null) setNewTaskStatus(null);
             else if (drawerId) setDrawerId(null);
-            else if (moreOpen) setMoreOpen(false);
-            else if (filterOpen) setFilterOpen(false);
+            else if (moreAnchor) setMoreAnchor(null);
+            else if (filterOpen) {
+              filterRef.current?.querySelector("button")?.focus({ preventScroll: true });
+              setFilterOpen(false);
+            }
             return;
           }
           if (typing || event.isComposing || hasOpenDialog()) return;
-          const root = rootRef.current;
-          const activeSurface = target?.closest?.(".sk-page");
-          if (!root || (activeSurface && activeSurface !== root) || (!activeSurface && surface === "side")) return;
           if (event.key === "/") {
             event.preventDefault();
             if (searchRef.current) searchRef.current.focus();
+            else if (isNarrow) {
+              setFilterOpen(true);
+              requestAnimationFrame(() => searchRef.current?.focus());
+            }
           } else if ((event.key === "n" || event.key === "N") && !event.metaKey && !event.ctrlKey && !event.altKey) {
             event.preventDefault();
             setNewTaskStatus("backlog");
@@ -4213,7 +4364,7 @@ button.sk-task-row-main{cursor:pointer}
         };
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
-      }, [settingsOpen, newTaskStatus, drawerId, moreOpen, filterOpen, surface]);
+      }, [settingsOpen, newTaskStatus, drawerId, moreAnchor, filterOpen, surface, isNarrow]);
 
       React.useEffect(() => {
         writeFilters(filters, surface);
@@ -4221,7 +4372,7 @@ button.sk-task-row-main{cursor:pointer}
       React.useEffect(() => {
         if (!filterOpen) return undefined;
         const onMouseDown = (event) => {
-          if (event.target && event.target.closest && event.target.closest(".sk-filter-wrap")) return;
+          if (filterRef.current?.contains(event.target)) return;
           setFilterOpen(false);
         };
         document.addEventListener("mousedown", onMouseDown);
@@ -4255,7 +4406,7 @@ button.sk-task-row-main{cursor:pointer}
       const workspaces = (data && data.workspaces) || [];
       const stats = (data && data.stats) || { byStatus: {}, doneRate: 0, total: 0 };
       const usage = usageOf(data);
-      const activeFilterCount = (filters.priority ? 1 : 0) + (filters.source ? 1 : 0) + (filters.tag ? 1 : 0) + (filters.showArchived ? 1 : 0);
+      const activeFilterCount = [filters.priority, filters.source, filters.tag, filters.showArchived, isNarrow && filters.query.trim()].filter(Boolean).length;
       const clearFilters = () => setFilters({ workspace: "", priority: "", source: "", tag: "", query: "", showArchived: false });
       const tags = React.useMemo(() => allTags(tasks.filter((task) => !task.archived)), [tasks]);
       // I5：筛选下拉的「有效值」范围（与渲染的选项一致）：工作区按「未排除」、标签按当前任务集合。
@@ -4301,7 +4452,7 @@ button.sk-task-row-main{cursor:pointer}
               ...keyFactsOf(task).map((fact) => fact.text),
               ...(Array.isArray(task.issues) ? task.issues.map((issue) => issue && issue.text) : []),
               ...(Array.isArray(task.nextSteps) ? task.nextSteps : []),
-              ...artifactsOf(task).flatMap((item) => [item.name, item.path]),
+              ...artifactsOf(task).flatMap((item) => [item.name, item.path, item.absPath]),
               ...(Array.isArray(task.sessions) ? task.sessions.flatMap((session) => [session?.title, session?.id]) : []),
               ...(Array.isArray(task.evidence) ? task.evidence.map((item) => item?.text) : []),
             ];
@@ -4421,7 +4572,8 @@ button.sk-task-row-main{cursor:pointer}
 
       const moveTask = async (id, status) => {
         const before = tasks.find((task) => task.id === id);
-        if (!before || before.status === status) return;
+        if (!before || before.status === status || movingTasks.current.has(id)) return;
+        movingTasks.current.add(id);
         // 乐观更新：先落到本地，失败再回滚，避免"松手后卡片跳回去再刷新"的闪烁。
         patchTaskLocal(id, { status });
         try {
@@ -4431,7 +4583,46 @@ button.sk-task-row-main{cursor:pointer}
         } catch (cause) {
           patchTaskLocal(id, { status: before.status });
           pushToast(`移动失败：${cause.message}`, "error");
+        } finally {
+          movingTasks.current.delete(id);
         }
+      };
+
+      const openTaskMenu = (id, anchor) => {
+        setMoreAnchor(null);
+        setFilterOpen(false);
+        setQuickTask(anchor ? { id, anchor } : null);
+      };
+      const taskActions = {
+        handlers: (task) => quickMenuHandlers((anchor) => openTaskMenu(task.id, anchor), (event) =>
+          event.target.closest?.(".sk-card-open,.sk-task-row-main,.sk-quick-trigger") || event.currentTarget.querySelector(".sk-quick-trigger")),
+        button: (task) => h(QuickMenuButton, {
+          label: `任务操作：${task.title}`, expanded: quickTask?.id === task.id, onOpen: (anchor) => openTaskMenu(task.id, anchor),
+        }),
+      };
+      const menuTask = quickTask && visible.find((task) => task.id === quickTask.id);
+      const taskMenuItems = (task) => {
+        const source = sessionContextOf(task).sessionId;
+        const changeFlag = async (flag, message) => {
+          try {
+            await command(flag === "pinned" ? "task.pin" : "task.archive", { id: task.id, [flag]: !task[flag] });
+            pushToast(message, "info");
+            await reload(true);
+          } catch (cause) {
+            pushToast(cause.message, "error");
+          }
+        };
+        return [
+          { label: "查看任务详情", icon: "board", run: () => setDrawerId(task.id) },
+          source && { label: "打开来源会话", icon: "chat", run: () => openAttentionSession(source) },
+          { label: "复制任务标题", icon: "copy", run: () => copyWithToast(task.title, "任务标题", pushToast) },
+          "divider",
+          { label: task.pinned ? "取消置顶" : "置顶任务", icon: "arrow", run: () => changeFlag("pinned", task.pinned ? "已取消置顶" : "已置顶") },
+          { label: task.archived ? "恢复任务" : "归档任务", icon: "archive", run: () => changeFlag("archived", task.archived ? "已恢复" : "已归档") },
+          ...(!task.archived ? ["divider", ...STATUS_ORDER.filter((status) => status !== statusOf(task)).map((status) => ({
+            label: `移至${STATUS_META[status].label}`, icon: "arrow", run: () => moveTask(task.id, status),
+          }))] : []),
+        ];
       };
 
       if (loading && !data) {
@@ -4482,7 +4673,6 @@ button.sk-task-row-main{cursor:pointer}
         );
       }
 
-      // 统计行：总数 / 各状态 / 归档 + 上一次扫描的持久结果（完整文字放 title，避免窄栏挤压）。
       const statusCounts = (stats && stats.byStatus) || {};
       const scanLastAt = settings.lastScanAt ? Date.parse(settings.lastScanAt) : scan.finishedAt ? Date.parse(scan.finishedAt) : null;
       // Host 的 scan.message 已是完整结论（含 AI 调用 / 跳过 / 合并等信息），客户端不再拼接。
@@ -4493,63 +4683,13 @@ button.sk-task-row-main{cursor:pointer}
         scan.state === "done" && Number(scan.aiCalls) > 0 && !/tokens/.test(scanOutcomeText)
           ? `${scanOutcomeText} · ${fmtTokens(scan.tokens)} tokens`
           : scanOutcomeText || scanErrorText;
-      const archivedCount = Number(stats.archived) || 0;
-      const statsLine = h(
-        React.Fragment,
-        null,
-        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-total" }), `${stats.total || tasks.length} 项`),
-        h("span", { className: "sk-sep" }, "·"),
-        // 0 待办 / 0 已归档不再占位，避免统计行被无信息量内容挤占（列头本身已显示计数）。
-        Number(statusCounts.backlog) > 0
-          ? h(
-              React.Fragment,
-              null,
-              h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-backlog" }), `${statusCounts.backlog} 待办`),
-              h("span", { className: "sk-sep" }, "·"),
-            )
-          : null,
-        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-in_progress" }), `${Number(statusCounts.in_progress) || 0} 进行中`),
-        h("span", { className: "sk-sep" }, "·"),
-        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-blocked" }), `${Number(statusCounts.blocked) || 0} 受阻`),
-        h("span", { className: "sk-sep" }, "·"),
-        h("span", { className: "sk-stats-group" }, h("span", { className: "sk-dot is-done" }), `${Number(statusCounts.done) || 0} 完成`),
-        archivedCount > 0
-          ? h(
-              React.Fragment,
-              null,
-              h("span", { className: "sk-sep" }, "·"),
-              h("span", { className: "sk-stats-group is-archived" }, h("span", { className: "sk-dot is-total" }), `${archivedCount} 已归档`),
-            )
-          : null,
-        h("span", { className: "sk-sep" }, "·"),
-        scanRunning
-          ? h(
-              React.Fragment,
-              null,
-              h("span", { className: "sk-status-dot is-running" }),
-              h("span", null, `扫描中 ${scan.processed || 0}/${scan.total || 0}`),
-              scanAiSegment ? h("span", { className: "sk-scan-ai" }, scanAiSegment) : null,
-              h("button", { type: "button", className: "sk-textlink", onClick: cancelScan }, "取消"),
-            )
-          : scan.state === "error"
-            ? h(
-                React.Fragment,
-                null,
-                h("span", { className: "sk-status-dot is-error" }),
-                h("span", { className: "sk-scan-error", title: scanTitleText }, `上次扫描失败：${scanErrorText}`),
-                h("button", { type: "button", className: "sk-textlink", onClick: () => startScan("incremental") }, "重试"),
-              )
-            : h(
-                React.Fragment,
-                null,
-                h("span", { className: "sk-status-dot" }),
-                h(
-                  "span",
-                  { className: "sk-scan-outcome", title: scanTitleText },
-                  `上次扫描 ${relTime(scanLastAt)}${scanOutcomeText ? " · " + scanOutcomeText : ""}`,
-                ),
-              ),
-      );
+      const statusSummary = [...STATUS_ORDER.map((status) => [status, STATUS_META[status].label, Number(statusCounts[status]) || 0]),
+        ["total", "已归档", Number(stats.archived) || 0]].filter(([, , count]) => count > 0);
+      const totalLabel = `${stats.total || tasks.length} 项`;
+      const statsLine = h("p", { className: "sk-stats-v3", title: [totalLabel, ...statusSummary.map(([, label, count]) => `${count} ${label}`)].join(" · ") },
+        h("span", { className: "sk-stats-total" }, totalLabel),
+        !compactHeader && statusSummary.map(([status, label, count]) => h("span", { className: "sk-stats-group", key: status },
+          h("span", { className: cx("sk-dot", "is-" + status) }), `${count} ${label}`)));
 
       const exportJson = async () => {
         try {
@@ -4568,44 +4708,36 @@ button.sk-task-row-main{cursor:pointer}
         const ok = host.openPage ? host.openPage() : false;
         if (!ok) pushToast("当前环境无法切换到全页面板", "error");
       };
-      const exportMenuItems = [{ label: "导出 JSON", icon: "file", onClick: exportJson }];
+      const boardMenuItems = [
+        mode !== "maintenance" && { label: "查看扫描详情", icon: "refresh", run: () => setMode("maintenance") },
+        { label: "导出 JSON", icon: "file", run: exportJson },
+      ];
 
+      const scanFailed = scan.state === "error";
+      const scanProgress = `${scan.processed || 0}/${scan.total || 0}`;
+      const scanLabel = scanRunning ? "取消扫描" : scanFailed ? "重试扫描" : settings.aiEnabled === false ? "扫描（仅规则）" : "扫描会话";
+      const scanTooltip = scanRunning ? `扫描中 ${scanProgress}${scanAiSegment} · 点击取消`
+        : scanFailed ? `上次扫描失败：${scanErrorText} · 点击重试`
+        : [settings.aiEnabled === false ? scanLabel : "AI 扫描", scanLastAt ? `上次扫描 ${relTime(scanLastAt)}` : "", scanTitleText].filter(Boolean).join(" · ");
       const scanButton = h(
         "button",
         {
           type: "button",
-          className: "sk-iconbtn-v3" + (scanRunning ? " is-busy" : ""),
-          title: scanRunning ? "扫描中，点击取消" : settings.aiEnabled === false ? "扫描（仅规则）" : "AI 扫描",
-          "aria-label": scanRunning ? "取消扫描" : settings.aiEnabled === false ? "扫描（仅规则）" : "扫描会话",
+          className: cx("sk-iconbtn-v3", "sk-scan-button", scanRunning && "is-busy", scanFailed && "is-failed"),
+          title: scanTooltip,
+          "aria-label": scanLabel,
           "aria-busy": scanRunning ? "true" : undefined,
           onClick: scanRunning ? cancelScan : () => startScan("incremental"),
           disabled: !scanRunning && scanBusy,
         },
-        h(Icon, { name: scanRunning ? "stop" : "refresh", size: 15 }),
+        h(Icon, { name: scanRunning ? "stop" : scanFailed ? "alert" : "refresh", size: 15 }),
+        scanRunning ? h("span", null, scanProgress) : scanFailed ? h("span", null, "重试") : null,
       );
       const actionIcon = (name, title, onClick, extraClass) =>
         h(
           "button",
           { type: "button", className: cx("sk-iconbtn-v3", extraClass), title, "aria-label": title, onClick },
           h(Icon, { name, size: 15 }),
-        );
-      const moreButton = (items) =>
-        h(
-          DropMenu,
-          { open: moreOpen, onClose: () => setMoreOpen(false), items },
-          h(
-            "button",
-            {
-              type: "button",
-              className: "sk-iconbtn-v3",
-              title: "更多（导出）",
-              "aria-label": "更多操作（导出 JSON）",
-              "aria-haspopup": "menu",
-              "aria-expanded": moreOpen,
-              onClick: () => setMoreOpen((value) => !value),
-            },
-            h(Icon, { name: "more", size: 15 }),
-          ),
         );
       const settingsButton = actionIcon("settings", "设置", () => setSettingsOpen(true));
       const newTextButton = h(
@@ -4614,53 +4746,36 @@ button.sk-task-row-main{cursor:pointer}
         "新建",
       );
 
-      const headerNode =
-        surface === "side"
-          ? h(
-              "header",
-              { className: "sk-header-v3" },
-              h("p", { className: "sk-stats-v3" }, statsLine),
-              h(
-                "div",
-                { className: "sk-header-actions" },
-                scanButton,
-                settingsButton,
-                prefs.fullEntry ? actionIcon("layout", "在全页面板打开", openPageFromSide) : null,
-                actionIcon("plus", "新建任务", () => setNewTaskStatus("backlog"), "is-primary"),
-                moreButton(exportMenuItems),
-              ),
-            )
-          : h(
-              "header",
-              { className: "sk-header-v3" },
-              h(
-                "div",
-                { className: "sk-header-main" },
-                h("h1", { className: "sk-title-v3" }, "任务看板"),
-                h("p", { className: "sk-stats-v3" }, statsLine),
-              ),
-              h(
-                "div",
-                { className: "sk-header-actions" },
-                h(
-                  "div",
-                  { className: "sk-search-v3" },
-                  h(Icon, { name: "search", size: 14 }),
-                  h("input", {
-                    ref: searchRef,
-                    "aria-label": "搜索任务、会话或标签",
-                    value: filters.query,
-                    placeholder: "搜索任务 / 会话 / 标签",
-                    onChange: (event) => setFilters((value) => ({ ...value, query: event.target.value })),
-                  }),
-                ),
-                scanButton,
-                settingsButton,
-                prefs.sideEntry ? actionIcon("panelRight", "在右侧栏打开", openSideFromPage) : null,
-                newTextButton,
-                moreButton(exportMenuItems),
-              ),
-            );
+      const searchField = h("div", { className: "sk-search-v3" },
+        h(Icon, { name: "search", size: 14 }),
+        h("input", { ref: searchRef, "aria-label": "搜索任务、会话或标签", value: filters.query,
+          placeholder: "搜索任务 / 会话 / 标签", onChange: (event) => setFilters((value) => ({ ...value, query: event.target.value })) }));
+      const headerNode = h("header", { className: "sk-header-v3" },
+        h("div", { className: "sk-header-main" },
+          surface === "page" ? h("h1", { className: "sk-title-v3" }, "任务看板") : null,
+          statsLine),
+        h("div", { className: "sk-header-actions" },
+          !isNarrow ? searchField : null,
+          scanButton, settingsButton,
+          surface === "side"
+            ? prefs.fullEntry && actionIcon("layout", "在全页面板打开", openPageFromSide)
+            : prefs.sideEntry && actionIcon("panelRight", "在右侧栏打开", openSideFromPage),
+          surface === "side" || isNarrow
+            ? actionIcon("plus", "新建任务", () => setNewTaskStatus("backlog"), "is-primary")
+            : newTextButton,
+          h(QuickMenuButton, { label: "更多看板操作", expanded: Boolean(moreAnchor), onOpen: setMoreAnchor }),
+          moreAnchor ? h(QuickMenu, { anchor: moreAnchor, items: boardMenuItems, label: "更多看板操作", onClose: () => setMoreAnchor(null) }) : null));
+
+      const viewSwitch = isNarrow
+        ? h("span", { className: "sk-ws-picker sk-view-picker" },
+            h("select", { className: "sk-select sk-ws-select", "aria-label": "任务视图", value: mode,
+              onChange: (event) => setMode(event.target.value) },
+              Object.entries(VIEW_MODES).map(([key, label]) => h("option", { key, value: key }, key === "attention" && attentionCount ? label + " " + attentionCount : label))),
+            h(Icon, { name: "chevronDown", size: 12, className: "sk-ws-caret" }))
+        : h("div", { className: "sk-view-switch", role: "group", "aria-label": "任务视图" },
+            Object.entries(VIEW_MODES).map(([key, label]) => h("button", {
+              key, type: "button", "aria-pressed": mode === key, onClick: () => setMode(key),
+            }, label, key === "attention" && attentionCount > 0 ? h("span", { className: "sk-view-count" }, " " + attentionCount) : null)));
 
       return h(
         "div",
@@ -4679,6 +4794,7 @@ button.sk-task-row-main{cursor:pointer}
         h(
           "div",
           { className: "sk-slimbar" },
+          viewSwitch,
           h(
             "span",
             { className: "sk-ws-picker" },
@@ -4688,7 +4804,7 @@ button.sk-task-row-main{cursor:pointer}
                 className: "sk-select sk-ws-select",
                 "aria-label": "按工作区筛选",
                 value: filters.workspace,
-                title: "按工作区筛选",
+                title: workspaces.find((workspace) => workspace.id === filters.workspace)?.title || "全部工作区",
                 onChange: (event) => setFilters((value) => ({ ...value, workspace: event.target.value })),
               },
               h("option", { value: "" }, "全部工作区"),
@@ -4698,18 +4814,25 @@ button.sk-task-row-main{cursor:pointer}
             ),
             h(Icon, { name: "chevronDown", size: 12, className: "sk-ws-caret" }),
           ),
+          sessionId ? h("button", { type: "button", className: "sk-slim-icon sk-session-scope", "aria-pressed": currentOnly,
+            title: currentOnly ? "当前会话，点击查看全部会话" : "全部会话，点击仅看当前会话",
+            onClick: () => setCurrentOnly((value) => !value),
+          }, currentOnly ? "当前会话" : "全部会话") : null,
+          mode !== "maintenance" && visible.length !== tasks.length
+            ? h("span", { className: "sk-count", title: `筛选范围内 ${visible.length} 项，共 ${tasks.length} 项` }, `${visible.length} / ${tasks.length}`)
+            : null,
           h(
             "div",
-            { className: "sk-filter-wrap" },
+            { className: "sk-filter-wrap", ref: filterRef },
             h(
               "button",
               {
                 type: "button",
                 className: cx("sk-slim-icon", activeFilterCount > 0 && "is-on"),
                 "aria-expanded": filterOpen,
-                "aria-haspopup": "true",
+                "aria-label": isNarrow ? "搜索与筛选任务" : "筛选任务",
                 onClick: () => setFilterOpen((value) => !value),
-                title: "筛选任务",
+                title: isNarrow ? "搜索与筛选任务" : "筛选任务",
               },
               h(Icon, { name: "filter", size: 14 }),
               "筛选",
@@ -4719,6 +4842,7 @@ button.sk-task-row-main{cursor:pointer}
               ? h(
                   "div",
                   { className: "sk-filter-popover", role: "group", "aria-label": "筛选条件" },
+                  isNarrow ? searchField : null,
                   h(
                     "div",
                     { className: "sk-filter-row" },
@@ -4778,16 +4902,7 @@ button.sk-task-row-main{cursor:pointer}
                 )
               : null,
           ),
-          h("span", { className: "sk-count" }, `显示 ${visible.length} / ${tasks.length}`),
         ),
-        h("div", { className: "sk-viewbar" },
-          h("div", { className: "sk-view-switch", role: "group", "aria-label": "任务视图" },
-            Object.entries(VIEW_MODES).map(([key, label]) => h("button", {
-              key, type: "button", "aria-pressed": mode === key, onClick: () => setMode(key),
-            }, label, key === "attention" && attentionCount > 0 ? h("span", { className: "sk-view-count" }, ` ${attentionCount}`) : null))),
-          sessionId ? h("button", { type: "button", className: "sk-btn", "aria-pressed": currentOnly,
-            onClick: () => setCurrentOnly((value) => !value),
-          }, currentOnly ? "当前会话" : "全部会话") : null),
         data.storage?.writable === false
           ? h("div", { className: "sk-board-notice", role: "alert" }, "看板存储暂不可写",
               h("button", { type: "button", className: "sk-btn", onClick: () => setMode("maintenance") }, "查看维护"))
@@ -4800,9 +4915,9 @@ button.sk-task-row-main{cursor:pointer}
         mode === "maintenance"
           ? h(MaintenanceView, { data, reload, pushToast, startScan })
           : mode === "artifacts"
-            ? h(ArtifactsView, { tasks: visible, host, pushToast, onOpen: setDrawerId })
+            ? h(ArtifactsView, { tasks: visible, host, desktopFiles, pushToast, onOpen: setDrawerId })
             : mode !== "board"
-              ? h(TaskCollection, { key: mode, mode, tasks: visible, signals, onOpen: setDrawerId, openSession: openAttentionSession, reload, pushToast,
+              ? h(TaskCollection, { key: mode, mode, tasks: visible, signals, onOpen: setDrawerId, taskActions, openSession: openAttentionSession, reload, pushToast,
                   emptyText: sessionId && currentOnly ? "当前会话还没有关联任务" : "没有匹配的任务",
                   onClear: sessionId && currentOnly ? () => setCurrentOnly(false) : clearFilters,
                   clearLabel: sessionId && currentOnly ? "查看全部会话" : "清空筛选" })
@@ -4834,7 +4949,9 @@ button.sk-task-row-main{cursor:pointer}
                   setStatus: setSideStatus,
                   byStatus,
                   signals,
+                  pageKey,
                   onOpen: (id) => setDrawerId(id),
+                  taskActions,
                   onAdd: (targetStatus) => setNewTaskStatus(targetStatus),
                   draggingId,
                   onDragStart: setDraggingId,
@@ -4842,7 +4959,7 @@ button.sk-task-row-main{cursor:pointer}
                 })
               : h(
                   "div",
-                  { className: "sk-board-v3" },
+                  { className: cx("sk-board-v3", doneCollapsed && "is-done-collapsed") },
                   STATUS_ORDER.map((status) =>
                     h(Column, {
                       key: status,
@@ -4850,6 +4967,10 @@ button.sk-task-row-main{cursor:pointer}
                       tasks: byStatus[status] || [],
                       signals,
                       onOpen: (id) => setDrawerId(id),
+                      taskActions,
+                      pageKey,
+                      collapsed: status === "done" && doneCollapsed,
+                      onToggle: status === "done" ? () => setDoneCollapsed((value) => !value) : null,
                       onAdd: (targetStatus) => setNewTaskStatus(targetStatus),
                       onDropTask: (id, targetStatus) => moveTask(id, targetStatus),
                       draggingId,
@@ -4858,8 +4979,10 @@ button.sk-task-row-main{cursor:pointer}
                     }),
                   ),
                 ),
+        menuTask ? h(QuickMenu, { anchor: quickTask.anchor, items: taskMenuItems(menuTask), label: `任务操作：${menuTask.title}`, onClose: () => setQuickTask(null) }) : null,
         drawerTask
-          ? h(TaskDrawer, { key: drawerTask.id, task: drawerTask, signal: signals.get(drawerTask.id), tasks, workspaces, onOpenTask: setDrawerId, ctxProps, settings, onClose: () => setDrawerId(null), onChanged: () => reload(true), pushToast })
+          ? h(TaskDrawer, { key: drawerTask.id, task: drawerTask, signal: signals.get(drawerTask.id), tasks, workspaces, onOpenTask: setDrawerId, ctxProps, settings, desktopFiles,
+              onClose: () => setDrawerId((id) => id === drawerTask.id ? null : id), onChanged: () => reload(true), pushToast })
           : null,
         newTaskStatus !== null
           ? h(NewTaskModal, { defaultStatus: newTaskStatus, workspaces, sessionId: currentOnly ? sessionId : null, onClose: () => setNewTaskStatus(null), onCreate: async () => { setNewTaskStatus(null); await reload(true); }, pushToast })
@@ -4938,6 +5061,7 @@ button.sk-task-row-main{cursor:pointer}
         return () => tag.remove();
       }, "super-kanban: styles");
 
+      let resourceRequest = 0;
       const hostApi = {
         openSession(sessionId) {
           try {
@@ -5031,10 +5155,13 @@ button.sk-task-row-main{cursor:pointer}
             .map((segment, index) => index === 0 && /^[a-z]:$/i.test(segment) ? segment : encodeURIComponent(segment))
             .join("/");
           const address = "dsh-resource://file/session/" + encodeURIComponent(sid) + "/" + encodedPath;
+          const request = ++resourceRequest;
           try {
             const sidebarRight = ctx.get("sidebarRight");
             if (typeof sidebarRight?.openResource !== "function") return false;
             const tryOpen = () => {
+              const mountedId = sidebarRight.screen?.()?.sessionId;
+              if (mountedId && mountedId !== sid) return false;
               try {
                 sidebarRight.openResource(address);
                 return true;
@@ -5045,17 +5172,46 @@ button.sk-task-row-main{cursor:pointer}
             };
             if (tryOpen()) return true;
             if (!hostApi.openSession(sid)) return false;
-            // The global panel owns no right Sidebar surface. Wait for DSH to mount the source Session.
+            // Wait for DSH to mount the source Session instead of reusing another Session's pane.
             for (let attempt = 0; attempt < 20; attempt++) {
               await new Promise((resolve) => setTimeout(resolve, 100));
-              const mountedId = sidebarRight.screen?.()?.sessionId;
-              if (mountedId && mountedId !== sid) return false;
+              if (request !== resourceRequest) return false;
               if (tryOpen()) return true;
             }
           } catch {
             /* sidebar service unavailable */
           }
           return false;
+        },
+        async canOpenNativeFile() {
+          try {
+            const session = ctx.get("remote")?.session;
+            if (typeof session?.openWorkspacePath !== "function") return false;
+            const result = await session.canOpenWorkspacePath();
+            return result?.ok === true && result.value === true;
+          } catch {
+            return false;
+          }
+        },
+        async openNativeFile(path, action, sessionId) {
+          if (!path || !["open", "reveal"].includes(action)) return false;
+          try {
+            const remote = ctx.get("remote");
+            const signal = AbortSignal.timeout(10_000);
+            // DSH requires the canonical Host path. Resolve symlink aliases using the exact source Session.
+            let resolved = path;
+            if (sessionId && typeof remote?.workspaceFiles?.stat === "function") {
+              const file = await remote.workspaceFiles.stat(sessionId, path, signal);
+              if (!file?.ok) return false;
+              resolved = file.value?.absolutePath;
+            }
+            if (!isHostAbsolutePath(resolved)) return false;
+            const request = action === "reveal" ? { path: resolved, action } : { path: resolved };
+            const result = await remote?.session?.openWorkspacePath(request, signal);
+            return result?.ok === true && result.value?.opened === true;
+          } catch {
+            return false;
+          }
         },
         openTerminal() {
           try {
@@ -5202,6 +5358,9 @@ button.sk-task-row-main{cursor:pointer}
       }
     }
 
-    return { apply, inject: ["slots", "locale", "sidebarRightTabs", "sidebarRight", "layout", "sessions", "conversation", "uiWorkspace"] };
+    return { apply, inject: [
+      "slots", "locale", "sidebarRightTabs", "sidebarRight", "layout", "sessions", "conversation", "uiWorkspace",
+      "remote", "remote.session", "remote.workspaceFiles",
+    ] };
   },
 });

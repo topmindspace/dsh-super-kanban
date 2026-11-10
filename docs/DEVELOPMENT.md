@@ -140,7 +140,8 @@ CI 之外，`.github/dependabot.yml` 每周检查 GitHub Actions 的版本更新
 
 - 只改 `client.js`，不引入构建工具与第三方 UI 库；样式只用 DSH 设计 token（见 [DESIGN.md](DESIGN.md)）。
 - 打开浅色 / 深色两套主题、1680px 与 1280px 两档宽度、右侧栏 420/756 两档宽度自检。
-- wave-2 交互自检：统计行的扫描三态（运行中/完成/失败+重试）、完成卡无进度线、归档卡标记、抽屉 AI 研判块与「重新研判」、编辑草稿在后台更新后保留并提示、问题/下一步「展开全部」。
+- 交互自检覆盖扫描按钮三态、完成卡样式、抽屉重新研判、草稿冲突处理及可展开内容。
+- 在最低支持版和当前桌面版的隔离 DSH 中验证两行页头、长列分页、完成列折叠、菜单键盘焦点、归档成功与失败，以及产物复制和预览。桌面文件操作可用测试替身记录系统打开参数。
 - 维护者本地有一套零依赖的 CDP 辅助脚本（`dev/shot.mjs` 截图、`dev/design-audit.js` 注入审计、`dev/demo/` 合成演示数据），前置条件见 `dev/README.md`；它们被 git 忽略，不会出现在公开仓库中。
 - 截图可以用任意 CDP 工具（Playwright、Puppeteer、Chrome DevTools Protocol 脚本）驱动：
 
@@ -164,10 +165,10 @@ await page.screenshot({ path: "board-light.png" });
   node -p "require(require('os').homedir() + '/.dsh/profiles/desktop/node_modules/dsh-super-kanban/package.json').version"
   ```
 
-- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.4.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.6.0` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
+- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.4.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.6.1` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
 - **文档同步**：涉及安装/升级/UI 入口的改动，需同步更新 [INSTALL.md](INSTALL.md)、[TROUBLESHOOTING.md](TROUBLESHOOTING.md)、[MARKET.md](MARKET.md) 以及中英文 README 的截图与描述。
 - **文档检查（CI 强制）**：`npm run check:docs` 会校验公开文档的相对链接与锚点、README 中英结构（章节数 / 表格 / 代码块 / 截图集合）、截图引用、GitHub Pages 落地页与历史 `plugin/` 布局残留；`npm run check:version` 会校验 `package.json`、`CHANGELOG.md`、`docs/index.json`、`SECURITY.md` 与文档中兼容范围的一致性。改文档后必须跑这两项。
-- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.6.0`）只用于演示精确安装，实际以 npm latest / 插件页为准。
+- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.6.1`）只用于演示精确安装，实际以 npm latest / 插件页为准。
 
 ## 8. 代码风格
 
