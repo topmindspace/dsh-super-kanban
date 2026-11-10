@@ -38,16 +38,11 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 ### GitHub Pages 发布路径（维护者事实）
 
-落地页与索引**不是**用 GitHub Actions 部署的：仓库 Settings → Pages 使用经典模式
-**Deploy from a branch**（`main` / `/docs`），页面地址为
-`https://topmindspace.github.io/dsh-super-kanban/`。因此：
+仓库 Settings → Pages 使用 **Deploy from a branch**（`main` / `/docs`），页面地址为 `https://topmindspace.github.io/dsh-super-kanban/`。
 
 - `docs/index.html` 是真实对外落地页，`docs/index.json` 是被 Discover 拉取的索引；
 - `docs/.nojekyll` 关闭 Jekyll 处理，保证 `index.json` 与静态资源按原样发布；
-- **不需要也不应添加** `.github/workflows/pages.yml`：改为 Actions 部署会改变 Pages 的发布来源
-  （需要仓库设置切换为 GitHub Actions），与现有经典部署冲突，且对"几 KB 静态文件"没有收益；
-- Release workflow 的 `market-index` job 在发布成功后重新生成 `docs/index.json` 并提交到 `main`，
-  Pages 会随 `main` 的新 commit 自动重建；
+- 市场索引在推送 tag 前生成并与版本一起提交，Pages 随 `main` 自动更新；
 - CI 的 `npm run check:docs` 会校验落地页（`lang`、`<title>`、指向 `./index.json` 的链接、
   `.nojekyll`、无硬编码版本号、本地资源存在），防止页面提前失效。
 
@@ -155,9 +150,9 @@ npm view "dsh-super-kanban@$release_version" version
 
 发布步骤通过仓库 Secret `NPM_TOKEN` 读取有发布权限的 npm 细粒度访问令牌。重跑时若 npm 精确版本已存在，工作流先核对它的 Git commit。
 
-### 保护分支下的索引回写
+### 索引提交与校验
 
-本地推送前提交的索引已经可以从 Git 安装该版本。发布后的可选回写会把它更新为 tag 对应的提交；如果 main 已切到其他版本，或保护规则拒绝机器人推送，保留已提交的索引。若需手动回写，使用目标 tag 的提交运行 `npm run market:index -- --commit=<sha>`。
+索引可指向 tag 之前的版本代码提交。工作流检查该提交属于 tag 的历史，且包版本一致。若需更正索引，用目标版本代码的 SHA 运行 `npm run market:index -- --commit=<sha>`，按仓库保护规则更新 `main`。
 
 ### npm staged release 批准
 
