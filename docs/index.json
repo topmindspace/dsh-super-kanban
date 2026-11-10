@@ -41,7 +41,7 @@
         "zh": "Super Kanban 任务看板"
       },
       "description": {
-        "en": "AI task kanban for DeepSeek Harness: derives task goals, progress, completion and issues from DSH sessions, with key facts, subtasks, artifacts, session hand-off and a dual full-page/right-sidebar UI.",
+        "en": "Local task board for DeepSeek Harness. Triage session requests, group related sessions, review deliverables and continue work from a shared task card.",
         "zh": "面向 DeepSeek Harness 的 AI 任务看板：从会话自动研判任务目标、进度与问题，优先展示关键事实，支持子任务、产物追溯、一键继续任务，以及全页 / 右侧栏双形态界面。"
       },
       "icon": "./icon.svg",
@@ -69,6 +69,18 @@
         "sortKeys": {}
       },
       "versions": [
+        {
+          "version": "0.6.0",
+          "publishTimestamp": 1794290258,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/topmindspace/dsh-super-kanban",
+            "commit": "5ff0a97b78fed190c6422e1d036b538315bca56e"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.5 <0.3.0"
+          }
+        },
         {
           "version": "0.5.2",
           "publishTimestamp": 1794130733,
