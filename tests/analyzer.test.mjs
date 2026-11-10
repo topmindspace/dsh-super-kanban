@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeAnalysis, resolveAnalysisSeq, titleSimilarity } from "../server/analyzer-rules.mjs";
+import { analyzeSessionRules, normalizeAnalysis, resolveAnalysisSeq, titleSimilarity } from "../server/analyzer-rules.mjs";
 
 /** Synthetic parsed session shape accepted by normalizeAnalysis. */
 function parsedSession(overrides = {}) {
@@ -259,4 +259,26 @@ test("normalizeAnalysis: issues, keyFacts, subtasks and milestones share seq res
     parsed,
   );
   assert.deepEqual(again.issues, normalizeAnalysis({ title: "Board work", issues: [{ text: "please fix the login flow", seq: 0 }] }, parsed).issues);
+});
+
+test("a normally ended turn that requests a decision remains actionable", () => {
+  const now = Date.now();
+  const result = analyzeSessionRules({
+    id: "decision-fixture",
+    title: "实现登录并验证",
+    users: [{ seq: 2, text: "实现登录并通过测试" }],
+    assistants: [{ seq: 3, text: "请先确认认证方案，我再继续实现。" }],
+    todoSnapshots: [],
+    turnStarts: [{ seq: 1 }],
+    lastTurnEnd: { seq: 4, kind: "completed" },
+    lastActivityAt: now,
+    isLive: false,
+    errors: [],
+    toolCalls: [],
+    deliverables: [],
+  }).tasks[0];
+  assert.equal(result.status, "in_progress");
+  assert.equal(result.attention, "waiting_user");
+  assert.equal(result.progress, null);
+  assert.equal(result.completionBasis, null);
 });

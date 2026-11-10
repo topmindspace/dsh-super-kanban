@@ -59,7 +59,7 @@ const SYSTEM_PROMPT = [
   "1. keyFacts 只放 1-5 条最关键事实（状态/进度/问题/决策/产物/目标），不要复述全篇。",
   "2. 每任务 evidence ≤5 条，quote 只摘原文短句；seq 必须来自摘要中的 [数字]。",
   "3. 默认一个会话只建 1 张卡；只有确实无关的多件事才拆（最多 3 张）。",
-  "4. 若本次工作与「已有任务」中某项是同一工作的延续，mergeWith 填其 id，不要新建卡。",
+  "4. 只归纳当前会话的任务；任务关联由用户管理，mergeWith 填 null。",
   "5. status：进行中→in_progress；正常结束且完成→done；报错卡住→blocked；未开始/搁置→backlog。done 时 progress=100。",
   "6. 摘要里 end:completed 表示最后一轮正常结束：若最后一条助手消息表明已交付/完成，且没有更新的用户指令，应判 done；end:interrupted/aborted 且无后续活动 → in_progress 或 blocked。",
   "7. 待办快照可能是很早以前的旧计划，只作参考，不要因旧快照未完成而把已完成任务判成进行中。",

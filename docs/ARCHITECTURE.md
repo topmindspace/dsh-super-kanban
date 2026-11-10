@@ -47,8 +47,9 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `server/analyzer-llm.mjs` | 可选 LLM 引擎：经 DSH 原生 LLM 服务发起请求，流累积、usage 映射、JSON 修复、预算控制、超时与降级 |
 | `server/store.mjs` | 持久化：`state.json` / `sessions-cache.json`，原子写、裁剪、版本迁移、损坏恢复 |
 | `server/auth.mjs` | owner 鉴权决策表：归一化 `connection.admit()` 结果，异常/畸形输入一律 fail-closed 403 |
+| `server/task-relations.mjs` | 任务关系校验与环检测、问题文本标识 |
 | `server/http.mjs` | HTTP 公共设施：JSON 响应、受控请求体读取、错误分类、id / 载荷校验 |
-| `server/titles.mjs` | 标题相似度：为跨扫描合并（merge gate）提供确定性的纯字符串打分 |
+| `server/titles.mjs` | 标题相似度：为用户发起的相似任务查询提供确定性的纯字符串打分 |
 | `cordis.patch.yml` | Cordis bundle patch：只把 host 插件 insert 进 profile，**不含 `config:` 块**；看板设置来自 `state.json`（设置页） |
 | `install.sh` / `uninstall.sh` | 把仓库链接进 DSH profile / 回滚 |
 | `scripts/` | 校验、文档检查、版本一致性、隐私扫描、市场索引生成、发布辅助 |
@@ -101,13 +102,13 @@ LLM 门控（可选）                 meaningful-change 门控 + 单次/每日�
 合并进看板                     会话锚点稳定 ID；用户锁定字段不覆盖；写历史
    │
    ▼
-store.saveState()              原子写（tmp + rename）；扫描进度经轮询可见（SSE 端点供第三方使用）
+store.saveState()              原子写（tmp + rename）；经 SSE 通知刷新，并保留轮询恢复
    │                           （浏览器端用轻量 stateSignature 判断是否需要重渲染）
 ```
 
 关键行为：
 
-- **会话锚点**：自动任务以 `primarySessionId` 为种子生成稳定 ID，重复扫描不会重复建卡。
+- **会话锚点**：自动任务以来源会话为种子生成稳定 ID，显式关联优先。相似标题仅用于用户查询，扫描不自动合并任务。
 - **增量门控**：仅在「用户消息数增加、上一轮 turn 已结束、首次分析、手动重新研判」时调用模型；活跃 turn 内不重复分析；同一会话有最小间隔。
 - **模型解析**：每次扫描 / 单卡重判 / 润色前解析一次（`settings.aiProvider/aiModel` → DSH 默认模型 → 目录首模型兜底）。
 - **解析缓存**：`loadParsed` 的有界 LRU(6) 以「文件签名 + 文件 stat + 解析相关 meta 指纹」为键，抽屉轮询/重判/待办导入复用解析结果，文件或元数据变化时重新解析，失败不缓存。
@@ -139,13 +140,22 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 调用失败（网络 / 鉴权 / 限流 / 非法 JSON）会按错误码重试（≤3 attempt）后降级规则引擎并写入失败冷却。
 实际使用的 provider/model 记录到 `task.ai`。
 
+### 任务判断与写入
+
+- 规则引擎分别记录会话运行情况、任务阶段和完成依据。普通轮次正常结束时保留待确认状态，明确的 DSH 目标完成、当前轮待办完成或用户确认可提供完成依据。
+- 缓存保留静态解析与未结束轮次事实，运行情况根据当前时间和会话锁重新计算。浏览器具备 DSH `useSessionStatus` 时优先展示宿主运行与待交互状态。来源会话的新增证据可补充到同一任务，主会话提供当前状态判断。
+- 用户填写的验收条件随任务保存。主会话提供完成依据时进入待验收，人工确认记录完成依据。续做草稿按用户选择的关联会话生成，保留当前验收条件、已知交付物、未完成项和来源定位。
+- 文件证据按事件发生时的工作目录解析。扫描缓存只保留近 15 分钟、仍未结束轮次的成功写入摘要，按已核验 Git 工作树和实际文件聚合。浏览器再用 DSH 原生运行状态确认是否提示可能同时修改。
+- 用户命令通过同步候选状态提交。原子写成功后发布，失败回滚内存变更。长扫描保留可重试的保存状态。
+- 任务删除与显式合并保存恢复快照。关系校验集中在领域模块。备份恢复校验预览的文件内容与看板版本，写入恢复点后才替换现有状态。
+
 ### 持久化（`store.mjs`）
 
 - `state.json`：`version`、`tasks`、`settings`、`usage`、`ignoredSessions`、`suppressedSessions`、`deletedLog`、`workspaces`、`activity`、`scan`。
 - `sessions-cache.json`：`sessions[sessionId] = { sigKey, meta }`，用于跳过未变化会话与 AI 门控。
 - 写入是原子的（临时文件 + rename）；解析失败的文件会移动到 `backups/` 后以默认值重建。
 - `version` 变化时执行迁移（v1 → v2），迁移失败同样走备份 + 重建路径。
-- 文本与载荷上限统一由 `TEXT_LIMITS` 常量定义（title 80 / goal 280 / tags 4×12 / subtasks 12×60 /
+- 文本与载荷上限统一由 `TEXT_LIMITS` 常量定义（title 80 / goal 280 / acceptanceCriteria 600 / tags 4×12 / subtasks 12×60 /
   issues·nextSteps 5×160 / milestones 20×120 / keyFacts 6×60 / evidence 8（text 200、quote 160）/
   artifact name 80 / history 20）；加载与保存走同一个 `truncateTask`，客户端表单镜像同一组上限。
 - `seq` 由 `positiveSeqOrNull` 归一化：正整数或 `null`（永不为 0），无法定位时间线时 UI 不显示 `#N`。
@@ -161,7 +171,7 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 | `POST /command` | 任务 / 设置 / 扫描等操作（`task.*`、`settings.update`、`scan.*` 等） |
 | `GET /session/:id` | 单会话事件时间线（证据跳转用） |
 | `GET /export` | 导出完整看板 JSON |
-| `GET /events` | 可选 SSE：扫描进度与任务变化（供第三方集成；浏览器半当前不订阅） |
+| `GET /events` | 可选 SSE：扫描进度与任务变化（供第三方集成；浏览器订阅以触发刷新） |
 | `GET /ping` | 存活探测（开发脚本用，不含敏感数据） |
 
 ## 浏览器半边（`client.js`）
@@ -269,7 +279,7 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 - **profile 依赖规格决定升级行为**：
   - 插件页/npm 安装写入**精确版本**（`pnpm add --save-exact`）；
   - 源码/本地目录安装写入 `link:`；
-  - 手工写成范围时，`^0.5.0` 只覆盖 0.5.x，`^0.4.0` 永远不会到 0.5.x（跨 minor 需精确版本）。
+  - 手工写成范围时，`^0.5.0` 只覆盖 0.5.x。升级到 0.6.x 时使用目标精确版本。
 - **升级动作由 DSH 完成**：第三方插件没有自动升级，也没有官方「更新」按钮；升级 = 卸载旧版 → 安装目标版本，然后刷新窗口（客户端 bundle 有缓存，必要时完全退出 DSH）。
 - 用户侧步骤、版本验证与排障见 [INSTALL.md](INSTALL.md) 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)；插件数据（`state.json`）与插件版本解耦（存储格式版本见 `store.mjs`）。
 

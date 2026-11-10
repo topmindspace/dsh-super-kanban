@@ -53,11 +53,11 @@ function writeFileDeep(file, content) {
  */
 function seedSessionHome(
   home,
-  { sessionId = "sess-alpha", workspaceId = "ws-demo", title = "Fix login flow", todo = "freshPending" } = {},
+  { sessionId = "sess-alpha", workspaceId = "ws-demo", title = "Fix login flow", todo = "freshPending", artifactPath = "README.md" } = {},
 ) {
   const workspaceDir = path.join(home, "workspace-demo");
   fs.mkdirSync(workspaceDir, { recursive: true });
-  fs.writeFileSync(path.join(workspaceDir, "README.md"), "# demo\n");
+  writeFileDeep(path.join(workspaceDir, artifactPath), "# demo\n");
 
   const todos =
     todo === "freshDone"
@@ -79,9 +79,9 @@ function seedSessionHome(
     event("turn/start", 4, T0 + 3000, { turn: 1 }),
     event("assistant/message", 5, T0 + 4000, { message: { content: [{ type: "text", text: "已修复登录流程" }] } }),
     event("todo/write", todoSeq, todoTime, { todos }),
-    event("tool/call", 7, T0 + 6000, { name: "write", callId: "call-1", arguments: JSON.stringify({ path: "README.md" }) }),
+    event("tool/call", 7, T0 + 6000, { name: "write", callId: "call-1", arguments: JSON.stringify({ path: artifactPath }) }),
     event("tool/result", 8, T0 + 7000, { toolCallId: "call-1", message: { content: [{ type: "text", text: "written" }] } }),
-    event("deliverables/presented", 9, T0 + 8000, { files: [{ path: "README.md", description: "说明" }] }),
+    event("deliverables/presented", 9, T0 + 8000, { files: [{ path: artifactPath, description: "说明" }] }),
     event("turn/end", 10, T0 + 9000, { turn: 1, reason: { kind: "completed" } }),
   ];
   const sessionDir = path.join(home, "sessions", "escaped-demo", sessionId);
@@ -821,9 +821,7 @@ test("a user-locked status is never overridden by the trust rule", async (t) => 
   assert.equal(next.history.some((entry) => /建议完成/.test(entry.note)), false, "no downgrade note when the user locked status");
 });
 
-test("generated todo subtasks still auto-close when the verdict is done", async (t) => {
-  // stalePending: todo predates the final turn but a deliverable exists → rules
-  // verdict "done" while the todo snapshot still contains unfinished items.
+test("a deliverable and a stale checklist require review instead of auto-closing work", async (t) => {
   const { service } = await setup(t, { withSessions: true, sessionOptions: { todo: "stalePending" } });
   const task = (await command(service, "task.create", { title: "Auto close", sessionId: "sess-alpha" })).json.data;
   const imported = await command(service, "task.importTodos", { id: task.id });
@@ -833,11 +831,12 @@ test("generated todo subtasks still auto-close when the verdict is done", async 
 
   const analyzed = await command(service, "task.analyze", { id: task.id });
   const next = analyzed.json.data.task;
-  assert.equal(next.status, "done");
+  assert.equal(next.status, "in_progress");
+  assert.equal(next.attention, "review");
   assert.ok(next.subtasks.length >= 2, "imported todo subtasks must not be dropped by analysis");
-  assert.ok(next.subtasks.every((subtask) => subtask.done), "generated subtasks are closed with the task");
-  assert.equal(next.progress, 100);
-  assert.equal(next.goal.status, "done");
+  assert.ok(next.subtasks.some((subtask) => !subtask.done));
+  assert.equal(next.progress, 50);
+  assert.equal(next.goal.status, "active");
 });
 
 test("create/update/store share one set of text limits", async (t) => {
@@ -902,6 +901,110 @@ test("task.continuePrompt builds a local hand-off prompt", async (t) => {
   assert.match(result.json.data.prompt, /finish the fix/);
   assert.match(result.json.data.prompt, /补测试/);
   assert.match(result.json.data.prompt, /要求/);
+});
+
+test("three linked sessions retain one acceptance workflow across analysis, handoff and confirmation", async (t) => {
+  const { service, home } = await setup(t, { withSessions: true, sessionOptions: { todo: "freshDone" }, prepare(home) {
+    seedSessionHome(home, { sessionId: "sess-approval", title: "Review the scope" });
+    seedSessionHome(home, { sessionId: "sess-delivery", title: "Deliver the report", artifactPath: "reports/acceptance.md" });
+  } });
+  const criteria = "登录回归通过\n从交付会话打开验收报告";
+  const task = (await command(service, "task.create", { title: "One delivery", goal: "Close the login fix", sessionId: "sess-alpha",
+    acceptanceCriteria: `\n${criteria}\n` })).json.data;
+  for (const sessionId of ["sess-approval", "sess-delivery"]) {
+    assert.equal((await command(service, "task.linkSession", { id: task.id, sessionId })).status, 200);
+  }
+  const withChecklist = (await command(service, "task.addSubtask", { id: task.id, text: "确认环境" })).json.data;
+  const pendingChecklist = (await command(service, "task.analyze", { id: task.id })).json.data.task;
+  assert.equal(pendingChecklist.attention, null);
+  await command(service, "task.toggleSubtask", { id: task.id, subtaskId: withChecklist.subtasks[0].id, done: true });
+  const review = (await command(service, "task.analyze", { id: task.id })).json.data.task;
+  assert.equal(review.status, "in_progress");
+  assert.equal(review.attention, "acceptance");
+  assert.equal(review.completionBasis, null);
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const scanned = readStateFile(home).tasks;
+  assert.equal(scanned.length, 1);
+  assert.equal(scanned[0].primarySessionId, "sess-alpha");
+  assert.equal(scanned[0].acceptanceCriteria, criteria);
+  assert.ok(scanned[0].artifacts.some((item) => item.path === "reports/acceptance.md" && item.sessionId === "sess-delivery"));
+
+  const draft = (await command(service, "task.continuePrompt", { id: task.id, purpose: "verify", sessionId: "sess-delivery" })).json.data;
+  assert.equal(draft.sessionId, "sess-delivery");
+  assert.equal(draft.updatedAt, scanned[0].updatedAt);
+  assert.ok(draft.prompt.includes(criteria));
+  assert.match(draft.prompt, /交付物 reports\/acceptance\.md · 会话 sess-delivery #9/);
+  assert.match(draft.prompt, /sess-delivery · 当前续做目标/);
+  assert.match(draft.prompt, /sess-approval/);
+  assert.equal((await command(service, "task.continuePrompt", { id: task.id, sessionId: "unrelated" })).status, 400);
+
+  const stale = await command(service, "task.accept", { id: task.id, expectedUpdatedAt: task.updatedAt });
+  assert.equal(stale.status, 409);
+  const accepted = (await command(service, "task.accept", { id: task.id, expectedUpdatedAt: scanned[0].updatedAt })).json.data;
+  assert.equal(accepted.status, "done");
+  assert.equal(accepted.completionBasis, "user");
+  assert.equal(accepted.goal.status, "done");
+  assert.ok(accepted.lockedFields.includes("status"));
+  assert.equal((await command(service, "task.accept", { id: task.id })).json.data.updatedAt, accepted.updatedAt);
+  await command(service, "task.analyze", { id: task.id });
+  assert.equal(readStateFile(home).tasks[0].completionBasis, "user");
+});
+
+test("acceptance criteria are capped, recoverable from a merge and never lost on merge overflow", async (t) => {
+  const { service, home } = await setup(t);
+  const first = (await command(service, "task.create", { title: "Primary", acceptanceCriteria: "First condition" })).json.data;
+  const source = (await command(service, "task.create", { title: "Supporting", acceptanceCriteria: "Second condition" })).json.data;
+  const merged = await command(service, "task.merge", { id: first.id, sourceId: source.id });
+  assert.equal(merged.json.data.acceptanceCriteria, "First condition\n\nSecond condition");
+  assert.equal((await command(service, "task.restore", { id: source.id })).status, 200);
+  const edited = (await command(service, "task.update", { id: source.id, patch: { acceptanceCriteria: "字".repeat(800) } })).json.data;
+  assert.equal(edited.acceptanceCriteria.length, TEXT_LIMITS.acceptanceCriteria);
+  assert.equal((await command(service, "task.merge", { id: first.id, sourceId: source.id })).status, 400);
+  const persisted = readStateFile(home).tasks;
+  assert.equal(persisted.length, 2);
+  assert.equal(persisted.find((item) => item.id === first.id).acceptanceCriteria, "First condition");
+});
+
+test("write overlaps require successful recent operations in the same verified checkout", async (t) => {
+  let worktree;
+  const { service } = await setup(t, { prepare(home) {
+    const checkout = path.join(home, "project");
+    worktree = path.join(home, "linked-worktree");
+    const gitDir = path.join(checkout, ".git", "worktrees", "linked");
+    writeFileDeep(path.join(checkout, ".git", "HEAD"), "ref: refs/heads/main\n");
+    writeFileDeep(path.join(gitDir, "HEAD"), "ref: refs/heads/linked\n");
+    writeFileDeep(path.join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+    writeFileDeep(path.join(checkout, "file.md"), "original\n");
+    writeFileDeep(path.join(worktree, "file.md"), "delivery\n");
+    const now = Date.now();
+    for (const [id, cwd, age, isError] of [
+      ["write-a", worktree, 5000, false], ["write-b", worktree, 6000, false],
+      ["other-checkout", checkout, 7000, false], ["failed-write", worktree, 8000, true],
+      ["old-write", worktree, 20 * 60_000, false],
+    ]) {
+      const at = now - age;
+      writeFileDeep(path.join(home, "sessions", "project", id, SESSION_FILE_NAME), framesOf([
+        event("session", 1, at, { id, cwd: checkout }),
+        event("user/message", 2, at + 100, { content: [{ type: "text", text: "Update the report" }] }),
+        event("turn/start", 3, at + 200, { turn: 1 }),
+        event("working-directory/change", 4, at + 300, { cwd }),
+        event("tool/call", 5, at + 400, { name: "edit", callId: "edit-1", arguments: JSON.stringify({ path: "file.md" }) }),
+        event("tool/result", 6, at + 500, { toolCallId: "edit-1", message: { isError } }),
+        event("deliverables/presented", 7, at + 600, { files: [{ path: "file.md" }] }),
+      ]));
+    }
+  } });
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const state = (await request(service, { route: "/state" })).json;
+  assert.equal(state.writeOverlaps.length, 1);
+  assert.equal(state.writeOverlaps[0].path, "file.md");
+  assert.deepEqual(state.writeOverlaps[0].sessions.map((item) => item.id).sort(), ["write-a", "write-b"]);
+  assert.ok(state.writeOverlaps[0].sessions.every((item) => item.seq === 6));
+  const delivery = state.tasks.find((item) => item.primarySessionId === "write-a");
+  assert.equal(delivery.artifacts[0].absPath, path.join(worktree, "file.md"));
 });
 
 test("task.polishPrompt degrades to the original text without AI", async (t) => {
@@ -1152,4 +1255,139 @@ test("stop is idempotent, rejects further requests and flushes state", async (t)
   assert.equal((await command(service, "task.create", { title: "Nope" })).status, 503);
   const state = readStateFile(home);
   assert.equal(state.tasks.length, 1);
+});
+
+test("failed writes roll back user changes and expose storage health", async (t) => {
+  const { service, home } = await setup(t);
+  const task = (await command(service, "task.create", { title: "Saved" })).json.data;
+  const stateFile = path.join(home, "storages", "super-kanban", "state.json");
+  fs.renameSync(stateFile, stateFile + ".previous");
+  fs.mkdirSync(stateFile);
+  const failed = await command(service, "task.update", { id: task.id, patch: { title: "Not saved" } });
+  assert.equal(failed.status, 503);
+  assert.equal(failed.json.error, "storage-unavailable");
+  const state = (await request(service, { route: "/state" })).json;
+  assert.equal(state.tasks[0].title, "Saved");
+  assert.equal(state.storage.writable, false);
+  fs.rmdirSync(stateFile);
+  fs.renameSync(stateFile + ".previous", stateFile);
+  assert.equal((await command(service, "storage.retry")).status, 200);
+  assert.equal(readStateFile(home).tasks[0].title, "Saved");
+});
+
+test("manual checklist can exceed the generated summary cap and stale edits conflict", async (t) => {
+  const { service, home } = await setup(t);
+  const task = (await command(service, "task.create", { title: "Checklist" })).json.data;
+  for (let index = 1; index <= 13; index += 1) {
+    assert.equal((await command(service, "task.addSubtask", { id: task.id, text: `Manual ${index}` })).status, 200);
+  }
+  assert.equal(readStateFile(home).tasks[0].subtasks.length, 13);
+  assert.equal(readStateFile(home).tasks[0].subtasks[12].text, "Manual 13");
+  const stale = await command(service, "task.update", { id: task.id, expectedUpdatedAt: task.updatedAt, patch: { title: "Stale" } });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.json.error, "revision-conflict");
+});
+
+test("similar tasks remain separate until an explicit merge and can be restored", async (t) => {
+  const { service, home } = await setup(t, { prepare(home) {
+    const dir = path.join(home, "storages", "super-kanban");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({
+      version: 2,
+      settings: { autoScan: false, aiEnabled: false },
+      tasks: [
+        { id: "import-task", title: "实现数据导入", origin: "auto", workspaceId: "demo", status: "in_progress", issues: [] },
+        { id: "export-task", title: "实现数据导出", origin: "auto", workspaceId: "demo", status: "backlog", issues: [] },
+      ],
+    }));
+  } });
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  assert.equal(readStateFile(home).tasks.length, 2);
+  const candidates = await request(service, { route: "/merge-candidates", search: "?id=import-task" });
+  assert.equal(candidates.json.candidates[0].id, "export-task");
+  assert.equal((await command(service, "task.merge", { id: "import-task", sourceId: "export-task" })).status, 200);
+  assert.equal(readStateFile(home).tasks.length, 1);
+  assert.equal((await command(service, "task.restore", { id: "export-task" })).status, 200);
+  assert.equal(readStateFile(home).tasks.length, 2);
+});
+
+test("task relations reject dependency cycles and survive trash restore", async (t) => {
+  const { service, home } = await setup(t);
+  const first = (await command(service, "task.create", { title: "First" })).json.data;
+  const second = (await command(service, "task.create", { title: "Second" })).json.data;
+  assert.equal((await command(service, "task.relate", { id: first.id, taskId: second.id, type: "depends_on" })).status, 200);
+  assert.equal((await command(service, "task.relate", { id: second.id, taskId: first.id, type: "depends_on" })).status, 400);
+  assert.equal((await command(service, "task.delete", { id: first.id })).status, 200);
+  assert.equal((await command(service, "task.restore", { id: first.id })).status, 200);
+  const restored = readStateFile(home).tasks.find((task) => task.id === first.id);
+  assert.deepEqual(restored.relations, [{ type: "depends_on", taskId: second.id }]);
+});
+
+test("explicit continuation binds the session and protects a manually authored title in background scans", async (t) => {
+  const { service, home } = await setup(t, { withSessions: true });
+  const task = (await command(service, "task.create", { title: "Original work" })).json.data;
+  const linked = await command(service, "task.linkSession", { id: task.id, sessionId: "sess-alpha", continuation: true });
+  assert.equal(linked.status, 200);
+  assert.equal(linked.json.data.primarySessionId, "sess-alpha");
+  assert.ok(linked.json.data.sessions[0].continuedAt);
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const persisted = readStateFile(home).tasks.filter((item) => item.sessions.some((session) => session.id === "sess-alpha"));
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].id, task.id);
+  assert.equal(persisted[0].title, task.title);
+  assert.ok(persisted[0].evidence.length > 0);
+});
+
+test("backup preview is read-only and restore retains a recovery point", async (t) => {
+  const { service, home } = await setup(t);
+  await command(service, "task.create", { title: "Original" });
+  const backup = (await request(service, { route: "/export" })).json;
+  await command(service, "task.create", { title: "New task" });
+  const preview = await command(service, "backup.preview", { backup });
+  assert.equal(preview.json.data.current, 2);
+  assert.equal(preview.json.data.incoming, 1);
+  assert.equal(readStateFile(home).tasks.length, 2);
+  const confirmation = { expectedSavedAt: preview.json.data.expectedSavedAt, backupHash: preview.json.data.backupHash };
+  const changed = structuredClone(backup);
+  changed.state.tasks[0].title = "Different backup";
+  assert.equal((await command(service, "backup.restore", { backup: changed, ...confirmation })).status, 409);
+  assert.equal(readStateFile(home).tasks.length, 2);
+  const restore = await command(service, "backup.restore", { backup, ...confirmation });
+  assert.equal(restore.status, 200);
+  assert.equal(readStateFile(home).tasks.length, 1);
+  const before = JSON.parse(fs.readFileSync(path.join(home, "storages", "super-kanban", "backups", "before-restore.json"), "utf8"));
+  assert.equal(before.state.tasks.length, 2);
+});
+
+test("deleting one of several cards for the same session preserves scanning for the others", async (t) => {
+  const { service, home } = await setup(t, { withSessions: true, prepare(home) {
+    writeFileDeep(path.join(home, "storages", "super-kanban", "state.json"), JSON.stringify({
+      version: 2,
+      tasks: ["one", "two"].map((id) => ({ id, title: id, status: "backlog", origin: "auto",
+        primarySessionId: "sess-alpha", sessions: [{ id: "sess-alpha" }] })),
+    }));
+  } });
+  assert.equal((await command(service, "task.delete", { id: "one" })).status, 200);
+  assert.deepEqual(readStateFile(home).suppressedSessions, []);
+  assert.equal((await command(service, "task.delete", { id: "two" })).status, 200);
+  assert.deepEqual(readStateFile(home).suppressedSessions, ["sess-alpha"]);
+});
+
+test("unlinking a generated task does not let a rescan silently reattach it", async (t) => {
+  const { service, home } = await setup(t, { withSessions: true });
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const original = readStateFile(home).tasks.find((task) => task.primarySessionId === "sess-alpha");
+  assert.ok(original);
+  const unlinked = await command(service, "task.linkSession", { id: original.id, sessionId: "sess-alpha", remove: true });
+  assert.equal(unlinked.json.data.primarySessionId, null);
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const tasks = readStateFile(home).tasks;
+  assert.equal(tasks.find((task) => task.id === original.id).primarySessionId, null);
+  const regenerated = tasks.filter((task) => task.primarySessionId === "sess-alpha");
+  assert.equal(regenerated.length, 1);
+  assert.notEqual(regenerated[0].id, original.id);
 });

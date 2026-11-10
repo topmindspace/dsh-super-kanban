@@ -1,12 +1,35 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
 const exists = (relative) => fs.existsSync(path.join(ROOT, relative));
+
+test("source install and uninstall preserve an existing non-link package and manifest", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "sk-install-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const profile = path.join(home, "profiles", "desktop");
+  const module = path.join(profile, "node_modules", "dsh-super-kanban");
+  const manifest = path.join(profile, "package.json");
+  fs.mkdirSync(module, { recursive: true });
+  fs.writeFileSync(path.join(module, "existing.txt"), "managed package");
+  fs.writeFileSync(manifest, '{"dependencies":{"dsh-super-kanban":"1.0.0"}}\n');
+  const before = fs.readFileSync(manifest, "utf8");
+  for (const script of ["install.sh", "uninstall.sh"]) {
+    const result = spawnSync("bash", [path.join(ROOT, script), "-y"], {
+      env: { ...process.env, DSH_HOME: home, DSH_PROFILE: "desktop" }, encoding: "utf8",
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /package directory/);
+    assert.equal(fs.readFileSync(manifest, "utf8"), before);
+    assert.deepEqual(fs.readdirSync(module), ["existing.txt"]);
+  }
+});
 
 test("package.json has the expected npm and DSH identity", () => {
   assert.equal(pkg.name, "dsh-super-kanban");

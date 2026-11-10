@@ -23,10 +23,15 @@ PROFILE="${DSH_PROFILE:-desktop}"
 PROFILE_DIR="$DSH_HOME/profiles/$PROFILE"
 PKG="$PROFILE_DIR/package.json"
 BACKUP="$PROFILE_DIR/super-kanban-profile-backup.json"
+MODULE="$PROFILE_DIR/node_modules/dsh-super-kanban"
 YES=0
 [ "${1:-}" = "-y" ] || [ "${1:-}" = "--yes" ] && YES=1
 
 echo "Super Kanban uninstaller — profile: $PROFILE_DIR"
+if [ -e "$MODULE" ] && [ ! -L "$MODULE" ]; then
+  echo "ERROR: this is a package directory; uninstall it from the DSH plugin page." >&2
+  exit 1
+fi
 if [ "$YES" -ne 1 ]; then
   printf "Remove the plugin from this profile? [y/N] "
   read -r answer
@@ -63,7 +68,7 @@ fi
 
 # The bundle is linked into the profile's node_modules; drop only that entry
 # (never the whole node_modules tree).
-rm -rf -- "$PROFILE_DIR/node_modules/dsh-super-kanban"
+rm -f -- "$MODULE"
 
 if [ -f "$BACKUP" ]; then
   echo "  backup  : kept at $BACKUP (pre-install snapshot, NOT auto-restored)"

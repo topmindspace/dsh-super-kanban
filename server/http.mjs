@@ -112,8 +112,8 @@ export function classifyError(error) {
   const code = error?.code || "internal";
   if (code === "invalid-input") return 400;
   if (code === "not-found") return 404;
-  if (code === "busy") return 409;
-  if (code === "stopped") return 503;
+  if (code === "busy" || code === "revision-conflict") return 409;
+  if (code === "stopped" || code === "storage-unavailable") return 503;
   return 500;
 }
 

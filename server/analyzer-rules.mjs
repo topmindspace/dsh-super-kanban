@@ -130,25 +130,9 @@ function deriveTags(parsed, workspaceTitle) {
 }
 
 function inferProgress(parsed, decision) {
-  const { status, todoCounts, todoFresh, lastTurnStartSeq } = decision;
+  const { status, todoCounts, todoFresh } = decision;
   if (status === "done") return 100;
-  const rate =
-    todoCounts && todoCounts.total > 0 ? Math.round((todoCounts.completed / todoCounts.total) * 100) : null;
-
-  if (status === "blocked") return rate === null ? 20 : clamp(Math.min(rate, 70), 5, 90);
-  if (status === "backlog") return rate === null ? 0 : clamp(Math.min(rate, 25), 0, 25);
-  if (status === "in_progress") {
-    if (todoFresh && rate !== null) return clamp(rate, 5, 95);
-    if (parsed.isLive) {
-      // Live turn: progress is unknown, estimate from work volume so far.
-      const volume = parsed.toolCalls.length + parsed.assistants.length * 2;
-      return clamp(30 + Math.min(30, volume / 6), 30, 65);
-    }
-    if (parsed.deliverables.length > 0) return 70;
-    const volume = parsed.toolCalls.length + parsed.assistants.length * 2;
-    return clamp(25 + Math.min(45, volume / 4), 25, 80);
-  }
-  return null;
+  return todoFresh && todoCounts.total > 0 ? Math.round((todoCounts.completed / todoCounts.total) * 100) : null;
 }
 
 /**
@@ -178,6 +162,10 @@ function inferStatus(parsed) {
 
   let status;
   let reason;
+  let attention = null;
+  let completionBasis = null;
+  const latestReply = parsed.assistants.at(-1)?.text || "";
+  const requestsDecision = /(?:请(?:先)?(?:确认|选择|提供|告知|决定)|等待(?:你|用户)(?:确认|选择|回复)|(?:please|could you) (?:confirm|choose|provide|clarify))/i.test(latestReply.slice(-600));
   if (parsed.isLive) {
     status = "in_progress";
     reason = "会话仍在进行中（最后一轮尚未结束）";
@@ -190,22 +178,32 @@ function inferStatus(parsed) {
   } else if (lastTurnEnd.kind === "aborted" || lastTurnEnd.kind === "interrupted") {
     status = daysIdle > 7 ? "backlog" : "in_progress";
     reason = daysIdle > 7 ? "最后一轮被中止且已多日无活动" : "最后一轮被中止";
+    attention = "interrupted";
+  } else if (requestsDecision) {
+    status = "in_progress";
+    attention = "waiting_user";
+    reason = "最近回复请求用户确认或提供信息";
   } else if (todoFresh && pendingTodos > 0) {
     status = "in_progress";
     reason = `最新待办仍有 ${pendingTodos} 项未完成`;
-  } else if (todoFresh && todoCounts.total > 0 && pendingTodos === 0) {
+  } else if (lastTurnEnd.kind === "completed" && parsed.goal?.status === "done") {
     status = "done";
+    completionBasis = "session_goal";
+    reason = "DSH 会话目标已标记完成";
+  } else if (lastTurnEnd.kind === "completed" && todoFresh && todoCounts.total > 0 && pendingTodos === 0) {
+    status = "done";
+    completionBasis = "session_todos";
     reason = "最新待办全部完成且本轮正常结束";
-  } else if (parsed.deliverables.length > 0) {
-    status = "done";
-    reason = "已产生交付物且最后一轮正常结束";
   } else {
-    status = "done";
-    reason = "最后一轮正常结束";
+    status = "in_progress";
+    attention = "review";
+    reason = parsed.deliverables.length ? "已有交付物，等待验收" : "本轮已结束，任务完成情况待确认";
   }
   return {
     status,
     reason,
+    attention,
+    completionBasis,
     todoCounts,
     todoFresh,
     lastTurnStartSeq,
@@ -435,6 +433,8 @@ export function analyzeSessionRules(parsed, { workspaceTitle = null, workspacePa
       evidence,
       confidence,
       reason,
+      attention: decision.attention,
+      completionBasis: decision.completionBasis,
       mergeWith: null,
     },
   ].slice(0, Math.max(1, maxTasks));

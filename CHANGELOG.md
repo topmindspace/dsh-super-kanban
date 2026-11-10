@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-10
+
+### 新增
+
+- **待处理**汇总同一任务下等待审批、回答或审阅的 DSH 会话，直接打开对应来源。新增列表、层级、产出和维护视图，侧栏支持当前会话范围。
+- **任务概览**集中展示目标、验收条件、当前阻塞与主交付物。人工验收记录完成依据，活动与证据可按来源会话筛选。
+- **续做草稿**包含验收条件、关键决策、未完成项与产物，支持放入关联会话或新会话。确认放入后记录新会话关联。
+- 两个运行中的会话近期在同一 Git 工作树成功写入同一文件时提示可能同时修改。
+- 增加任务依赖、显式关联与合并、问题管理、批量操作、置顶、回收站和备份恢复。
+
+### 修复
+
+- 保存失败时回滚内存修改，编辑与验收检查任务版本。普通轮次结束需补充完成依据，相似标题仅提示用户检查，手动子任务独立保留。
+- 备份恢复校验预览的文件内容与看板版本。删除共享会话的一张卡时，其他卡继续扫描。
+- 全页预览先定位产物来源会话，窄屏保留任务操作和单列看板。
+
 ## [0.5.2] - 2026-11-08
 
 Documentation-only patch release: no runtime code changes. It publishes the
@@ -367,7 +383,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.6.0
 [0.5.2]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.2
 [0.5.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.1
 [0.3.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.3.0

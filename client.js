@@ -33,6 +33,7 @@ window.__ModuleLoader__.load({
     const AI_MAX_CALLS_MAX = 150;
     const MAX_AI_CALL_OPTIONS = [20, 40, 80, 150]; // 固定档；下拉首项另加「自动」
     const DAILY_AI_CALL_OPTIONS = [50, 150, 300, 500];
+    const PROMPT_POLISH_LIMIT = 3000;
 
     /* ============================== constants ============================== */
 
@@ -43,6 +44,86 @@ window.__ModuleLoader__.load({
       done: { label: "已完成", tone: "var(--dsw-alias-state-success-primary)", desc: "已交付或已闭环" },
     };
     const STATUS_ORDER = ["backlog", "in_progress", "blocked", "done"];
+    const VIEW_MODES = { attention: "待处理", board: "看板", list: "列表", hierarchy: "层级", artifacts: "产出", maintenance: "维护" };
+    const RELATION_LABELS = { parent: "父任务", depends_on: "依赖任务", related: "相关任务" };
+    const ATTENTION_LABELS = { waiting_user: "待你确认", review: "待确认进度", acceptance: "待验收", interrupted: "执行中断" };
+    const INTERACTION_LABELS = { approval: "待审批", question: "待回答", "plan-review": "待审阅方案" };
+    const COMPLETION_LABELS = { user: "人工确认", session_goal: "DSH 目标完成", session_todos: "本轮待办已完成" };
+    let pendingHandoff = null;
+
+    function withSessionStatus(task, statuses) {
+      if (typeof statuses?.get !== "function") return task;
+      const primaryId = task.primarySessionId;
+      const sessions = new Map((task.sessions || []).filter((session) => session?.id).map((session) => [session.id, session.title]));
+      if (primaryId && !sessions.has(primaryId)) sessions.set(primaryId, task.sessionContext?.title);
+      const primary = primaryId ? statuses.get(primaryId) : null;
+      const pendingSessions = [];
+      let runningSessions = 0;
+      for (const [id, title] of sessions) {
+        const native = statuses.get(id);
+        const pending = native?.pendingInteraction;
+        if (pending) {
+          const kind = typeof pending === "string" ? pending : pending.kind;
+          const label = Object.hasOwn(INTERACTION_LABELS, kind) ? INTERACTION_LABELS[kind] : "待处理请求";
+          pendingSessions.push({ id, title: title || "来源会话", label });
+        } else if (native?.running ?? (id === primaryId && task.sessionContext?.isLive)) {
+          runningSessions++;
+        }
+      }
+      return {
+        ...task,
+        pendingSessions,
+        runningSessions,
+        sessionContext: typeof primary?.running === "boolean"
+          ? { ...task.sessionContext, isLive: primary.running }
+          : task.sessionContext,
+      };
+    }
+
+    function taskSignal(task, index, now) {
+      if (task.archived) return null;
+      const pending = task.pendingSessions || [];
+      if (pending.length === 1) return { label: pending[0].label, text: pending[0].title, rank: 0 };
+      if (pending.length > 1) return { label: `${pending.length} 个会话待处理`, rank: 0 };
+      if (task.writeOverlap) return { label: "可能同时修改", text: task.writeOverlap.path, rank: 1 };
+      if (task.status === "done") return null;
+      const dependency = task.relations?.find((link) => link.type === "depends_on" && index.get(link.taskId)?.status !== "done");
+      if (dependency) return { label: "等待依赖", text: index.get(dependency.taskId)?.title || "关联任务不可用", taskId: dependency.taskId, rank: 1 };
+      const issue = task.issues?.find((item) => item.severity === "high") || task.issues?.[0];
+      if (!task.sessionContext?.isLive && task.sessionContext?.lastTurnEnd === "error") {
+        const sessionId = task.sessionContext.sessionId || task.primarySessionId;
+        const failure = task.issues?.find((item) => item.sessionId === sessionId) || (issue?.sessionId ? null : issue);
+        return { label: "执行失败", text: failure?.text || task.ai?.reason, sessionId, rank: 1 };
+      }
+      if (task.status === "blocked" || issue) return { label: "待处理问题", text: issue?.text || task.nextSteps?.[0], rank: 1 };
+      if (!task.sessionContext?.isLive && ["review", "acceptance"].includes(task.attention)) {
+        const delivery = primaryArtifactOf(artifactsOf(task));
+        const deliverable = delivery?.kind === "deliverable" ? delivery : null;
+        const ready = deliverable || task.attention === "acceptance";
+        return { label: ready ? "待验收" : ATTENTION_LABELS.review, text: deliverable?.name || task.ai?.reason, rank: 2 };
+      }
+      if (!task.sessionContext?.isLive && Object.hasOwn(ATTENTION_LABELS, task.attention)) {
+        return { label: ATTENTION_LABELS[task.attention], text: task.nextSteps?.[0] || task.ai?.reason, rank: task.attention === "waiting_user" ? 1 : 2 };
+      }
+      if (!(task.runningSessions ?? task.sessionContext?.isLive) && task.status === "in_progress" && task.lastActivityAt > 0 && now - task.lastActivityAt > 7 * 86400000) {
+        return { label: "久未更新", text: task.nextSteps?.[0], rank: 3 };
+      }
+      return null;
+    }
+
+    function taskProgressLabel(task) {
+      if (task.lockedFields?.includes("progress") && pct(task.progress) !== null) return `手动 ${pct(task.progress)}%`;
+      const items = subtasksOf(task);
+      if (items.length) return `${items.filter((item) => item.done).length}/${items.length} 项`;
+      if (task.status === "done") return COMPLETION_LABELS[task.completionBasis] || "已完成";
+      const value = pct(task.progress);
+      return value === null ? "进度未知" : task.ai?.engine === "llm" ? `估计 ${value}%` : `${value}%`;
+    }
+
+    function taskRunningLabel(task) {
+      const running = task.runningSessions ?? (task.sessionContext?.isLive ? 1 : 0);
+      return running > 1 ? `${running} 个会话运行中` : running ? "会话运行中" : "";
+    }
     /** 用户可锁定、避免被 AI 研判覆盖的任务字段（与 Host task.update 的 lockFields 对齐）。 */
     const EDITABLE_FIELDS = Object.freeze(["title", "goal", "status", "priority", "progress"]);
     /**
@@ -54,6 +135,7 @@ window.__ModuleLoader__.load({
     const TEXT_LIMITS = Object.freeze({
       title: 80,
       goal: 280,
+      acceptanceCriteria: 600,
       tagText: 12,
       tags: 4,
       subtaskText: 60,
@@ -115,7 +197,7 @@ window.__ModuleLoader__.load({
     }
 
     function command(op, payload) {
-      return apiRequest("/command", {
+      return apiRequest(op === "backup.preview" || op === "backup.restore" ? "/backup" : "/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ op, payload: payload || {} }),
@@ -185,6 +267,7 @@ window.__ModuleLoader__.load({
     }
 
     function progressOf(task) {
+      if (task.lockedFields?.includes("progress") && pct(task.progress) !== null) return pct(task.progress);
       const subtasks = subtasksOf(task);
       if (subtasks.length) return Math.round((subtasks.filter((item) => item.done).length / subtasks.length) * 100);
       const value = pct(task.progress);
@@ -229,7 +312,6 @@ window.__ModuleLoader__.load({
       if (raw) {
         return raw
           .filter((item) => item && typeof item.text === "string" && item.text.trim())
-          .slice(0, 12)
           .map((item, index) => ({
             id: item.id || `st_${index}`,
             text: clip(item.text.trim(), TEXT_LIMITS.subtaskText),
@@ -253,7 +335,6 @@ window.__ModuleLoader__.load({
     function artifactsOf(task) {
       return (Array.isArray(task.artifacts) ? task.artifacts : [])
         .filter((item) => item && (item.name || item.path))
-        .slice(0, 6)
         .map((item, index) => ({
           id: item.id || `af_${index}`,
           name: String(item.name || String(item.path).split("/").pop() || "产物"),
@@ -262,7 +343,15 @@ window.__ModuleLoader__.load({
           sessionId: String(item.sessionId || ""),
           seq: seqOf(item.seq),
           time: Number(item.time) || 0,
+          kind: item.kind || "file",
+          missing: item.missing === true,
         }));
+    }
+
+    function primaryArtifactOf(artifacts) {
+      return artifacts.filter((item) => item.path && !item.missing).sort((left, right) =>
+        Number(right.kind === "deliverable") - Number(left.kind === "deliverable") || right.time - left.time,
+      )[0];
     }
 
     function goalInfoOf(task) {
@@ -297,9 +386,9 @@ window.__ModuleLoader__.load({
     function sessionContextOf(task) {
       const ctx = task.sessionContext && typeof task.sessionContext === "object" ? task.sessionContext : null;
       const sessions = Array.isArray(task.sessions) ? task.sessions : [];
-      const first = sessions[0] || {};
+      const first = sessions.find((item) => item.id === task.primarySessionId) || sessions[0] || {};
       const base = {
-        sessionId: String((ctx && ctx.sessionId) || task.primarySessionId || first.id || ""),
+        sessionId: String(task.primarySessionId || (ctx && ctx.sessionId) || first.id || ""),
         title: String((ctx && ctx.title) || first.title || "来源会话"),
         isLive: !!(ctx && ctx.isLive),
         turnCount: Number(ctx && ctx.turnCount) || 0,
@@ -691,6 +780,8 @@ window.__ModuleLoader__.load({
     }
 
     function compareTasks(a, b) {
+      const pinned = Number(b.pinned === true) - Number(a.pinned === true);
+      if (pinned) return pinned;
       const pa = PRIORITY_ORDER.indexOf(a.priority || "P3");
       const pb = PRIORITY_ORDER.indexOf(b.priority || "P3");
       const p = (pa < 0 ? 9 : pa) - (pb < 0 ? 9 : pb);
@@ -1044,8 +1135,6 @@ window.__ModuleLoader__.load({
 .sk-filter-label{font-size:10px;color:var(--sk-ink-4);letter-spacing:.04em}
 .sk-filter-chips{display:flex;flex-wrap:wrap;gap:5px}
 .sk-filter-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--sk-line-soft);padding-top:8px}
-.sk-goal-text{flex:1;min-width:0;font-size:11.5px;line-height:1.55;color:var(--sk-ink-2);overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.sk-goal-text.is-open{-webkit-line-clamp:unset;display:block}
 .sk-facts{display:flex;flex-direction:column;gap:6px}
 .sk-fact{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;line-height:1.5;color:var(--sk-ink-2);min-width:0}
 .sk-fact-icon{flex:none;width:18px;height:18px;border-radius:5px;display:grid;place-items:center;background:color-mix(in srgb,var(--fact-tone,var(--sk-ink-3)) 12%,transparent);color:var(--fact-tone,var(--sk-ink-3));margin-top:1px}
@@ -1062,10 +1151,6 @@ window.__ModuleLoader__.load({
 .sk-subtask-del:hover{color:var(--sk-red);background:var(--sk-hover)}
 .sk-subtask-add{display:flex;gap:6px;align-items:center;margin-top:3px}
 .sk-subtask-add .sk-input{height:30px;font-size:11.5px}
-.sk-duo{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.sk-duo-col{min-width:0;display:flex;flex-direction:column;gap:4px}
-.sk-duo-item{font-size:11.5px;line-height:1.5;color:var(--sk-ink-2);padding-left:9px;position:relative;overflow-wrap:anywhere}
-.sk-duo-item::before{content:"";position:absolute;left:0;top:7px;width:3px;height:3px;border-radius:50%;background:var(--sk-ink-4)}
 .sk-live-dot{width:5px;height:5px;border-radius:50%;background:var(--sk-green);flex:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--sk-green) 16%,transparent)}
 .sk-live-dot.off{background:var(--sk-ink-4);box-shadow:none}
 .sk-artifacts{display:flex;flex-direction:column;gap:4px}
@@ -1090,7 +1175,6 @@ window.__ModuleLoader__.load({
 .sk-usage b{color:var(--sk-ink-2)}
 .sk-usage-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
 .sk-usage-warn{color:var(--sk-amber)}
-.sk-page.is-side .sk-duo{grid-template-columns:1fr}
 .sk-page.is-side .sk-continue-textarea{min-height:150px}
 
 @media (prefers-reduced-motion:reduce){
@@ -1223,7 +1307,6 @@ window.__ModuleLoader__.load({
 .sk-summary-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;color:var(--sk-ink);min-width:0}
 .sk-summary-line .sk-sep{color:color-mix(in srgb,var(--sk-ink) 30%,transparent)}
 .sk-summary-line .sk-muted{color:color-mix(in srgb,var(--sk-ink) 55%,transparent);font-size:12px}
-.sk-summary-line .sk-goal-text{color:color-mix(in srgb,var(--sk-ink) 62%,transparent);font-size:12px;line-height:1.5;flex-basis:100%;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sk-edit-fields{display:flex;flex-direction:column;gap:10px;padding-top:4px}
 .sk-edit-row{display:flex;align-items:center;gap:8px;min-width:0}
 .sk-edit-label{flex:none;width:56px;font-size:12px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
@@ -1245,12 +1328,6 @@ window.__ModuleLoader__.load({
 .sk-subtask-del:hover{color:var(--sk-ink);background:color-mix(in srgb,var(--sk-ink) 6%,transparent)}
 .sk-subtask-add{display:flex;gap:6px;align-items:center;margin-top:2px}
 .sk-subtask-add .sk-input{height:32px;font-size:12px;border-radius:8px}
-.sk-duo{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.sk-duo-col{display:flex;flex-direction:column;gap:2px;min-width:0}
-.sk-duo-item{font-size:12px;line-height:1.55;color:color-mix(in srgb,var(--sk-ink) 78%,transparent);padding-left:0;position:static;overflow-wrap:anywhere}
-.sk-duo-item::before{display:none}
-.sk-duo-item.is-issue{color:color-mix(in srgb,var(--sk-ink) 62%,transparent)}
-.sk-duo-item.is-error{color:var(--sk-red)}
 .sk-session-line{display:flex;align-items:center;gap:8px;min-width:0;font-size:13px;color:var(--sk-ink)}
 .sk-session-line .sk-live-dot{width:6px;height:6px;border-radius:50%;background:var(--sk-green);opacity:.6;flex:none}
 .sk-session-line .sk-live-dot.off{background:color-mix(in srgb,var(--sk-ink) 35%,transparent);opacity:1}
@@ -1437,9 +1514,6 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-link-text{color:var(--sk-brand-accent)!important;text-decoration:none}
 .sk-link-text:hover{color:var(--sk-brand-accent);text-decoration:underline;text-underline-offset:2px}
 .sk-session-line .sk-session-icon{flex:none;color:color-mix(in srgb,var(--sk-ink) 55%,transparent);margin-top:1px}
-.sk-duo-item{display:flex;align-items:flex-start;gap:5px;font-size:12px;line-height:1.55;color:color-mix(in srgb,var(--sk-ink) 78%,transparent);overflow-wrap:anywhere}
-.sk-duo-item.is-warn{color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 85%,var(--sk-ink))}
-.sk-duo-item.is-error{color:var(--sk-red)}
 .sk-page.is-side.sk-tier-narrow .sk-card-v3-head .sk-dot{margin-top:5px}
 .sk-page.is-side.sk-tier-narrow .sk-ai-mark{display:none}
 
@@ -1535,6 +1609,75 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 
 `;
 
+    const WORKFLOW_CSS = `
+.sk-viewbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+.sk-view-switch{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;border:1px solid var(--sk-line);border-radius:10px;background:var(--sk-surface)}
+.sk-view-switch button{border:0;background:none;color:var(--sk-ink-2);font:inherit;font-size:12px;min-height:32px;padding:6px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.sk-view-switch button[aria-pressed=true]{background:color-mix(in srgb,var(--sk-ink) 8%,transparent);color:var(--sk-ink);font-weight:500}
+.sk-view-count{margin-inline-start:4px;font-variant-numeric:tabular-nums}
+.sk-view-switch button:hover,.sk-task-row-main:hover{background:color-mix(in srgb,var(--sk-ink) 5%,transparent)}
+.sk-board-notice{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px 12px;border:1px solid var(--sk-line);border-radius:8px;margin-bottom:10px;font-size:13px}
+.sk-board-notice button:first-of-type{margin-inline-start:auto}
+.sk-collection{min-height:0;flex:1;overflow:auto;padding:0 2px 16px}
+.sk-task-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.sk-task-row{display:flex;align-items:center;gap:8px;padding:5px 8px 5px calc(8px + var(--sk-depth,0) * 13px);border:1px solid var(--sk-line);border-radius:8px;background:var(--sk-surface)}
+.sk-task-row-main{flex:1;min-width:0;display:grid;gap:4px;padding:6px;text-align:start;background:none;border:0;border-radius:6px;color:var(--sk-ink);font:inherit}
+button.sk-task-row-main{cursor:pointer}
+.sk-task-row-title{display:flex;gap:7px;align-items:center;font-size:13px;font-weight:500;overflow-wrap:anywhere}
+.sk-task-row-summary,.sk-task-row-meta{font-size:12px;color:var(--sk-ink-3);overflow-wrap:anywhere}
+.sk-task-row-summary{color:var(--sk-ink-2)}
+.sk-task-overview{display:grid;gap:10px}
+.sk-overview-item{display:grid;gap:3px;min-width:0}
+.sk-overview-item h3{margin:0;font-size:12px;font-weight:500;color:var(--sk-ink-2)}
+.sk-overview-item p{margin:0;font-size:13px;line-height:1.5;color:var(--sk-ink);white-space:pre-wrap;overflow-wrap:anywhere}
+.sk-overview-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sk-overview-actions .sk-btn[aria-disabled=true]{color:var(--sk-ink-2);cursor:default}
+.sk-overview-steps{margin:6px 0 0;padding-inline-start:18px;color:var(--sk-ink-2);font-size:13px;line-height:1.55;overflow-wrap:anywhere}
+.sk-ai-review summary{cursor:pointer}
+.sk-ai-review[open] .sk-ai-review-chevron{transform:rotate(90deg)}
+.sk-task-overview .sk-session-actions{margin:0}
+.sk-task-overview .sk-artifact-name,.sk-task-overview .sk-artifact-path{white-space:normal;overflow-wrap:anywhere}
+.sk-task-overview .sk-artifact-name{max-width:100%;font-weight:500}
+.sk-evidence .sk-select{max-width:100%}
+.sk-ev-meta{flex-wrap:wrap}
+.sk-drawer-foot{flex-wrap:wrap}
+.sk-continue-modal{max-width:100%}
+.sk-continue-modal .sk-modal-foot{flex-wrap:wrap}
+.sk-page:not(.is-side).sk-tier-narrow .sk-header-v3{flex-direction:column;align-items:stretch;gap:10px}
+.sk-page:not(.is-side).sk-tier-narrow .sk-header-actions{flex-wrap:wrap}
+.sk-page:not(.is-side).sk-tier-narrow .sk-search-v3{flex:1 1 140px}
+.sk-page:not(.is-side).sk-tier-narrow .sk-stats-v3{flex-wrap:wrap;white-space:normal}
+.sk-task-row.has-session-actions{display:grid;grid-template-columns:minmax(0,1fr);gap:4px}
+.sk-session-actions{display:grid;gap:4px;list-style:none;margin:0 6px;padding:4px 0 0;border-top:1px solid var(--sk-line)}
+.sk-session-actions li{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 12px;min-width:0;font-size:12px}
+.sk-session-actions li>span{flex:1 1 180px;color:var(--sk-ink-2);overflow-wrap:anywhere}
+.sk-session-actions li>.sk-btn{flex:none}
+.sk-batchbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 8px}
+.sk-workspace-group{margin-bottom:10px}
+.sk-workspace-group summary{cursor:pointer;font-weight:600;font-size:13px;padding:8px 2px}
+.sk-workspace-group summary span{font-size:12px;color:var(--sk-ink-3);margin-inline-start:8px}
+.sk-maintenance{display:grid;align-content:start;gap:10px}
+.sk-management-card{border:1px solid var(--sk-line);border-radius:10px;padding:12px;background:var(--sk-surface);min-width:0}
+.sk-management-card h3{font-size:14px;margin:0 0 8px}
+.sk-management-card p{color:var(--sk-ink-3);font-size:12px;margin:6px 0 10px}
+.sk-management-row{display:flex;gap:8px;align-items:center;border-top:1px solid var(--sk-line);padding:6px 0;min-width:0;font-size:12px}
+.sk-management-row>span:first-child{flex:1;overflow-wrap:anywhere}
+.sk-relation-editor{display:grid;gap:8px;margin-top:5px}
+.sk-relation-editor .sk-select,.sk-relation-editor .sk-input{max-width:100%;min-width:0}
+.sk-relation-editor .sk-management-row{flex-wrap:wrap}
+.sk-relation-editor .sk-management-row>span:first-child{flex:1 1 120px}
+.sk-relation-editor summary{cursor:pointer;color:var(--sk-ink);font-size:13px}
+.sk-card-summary{font-size:12px;line-height:1.35;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--sk-ink-2)}
+.sk-card-v3.is-done{opacity:1}
+.sk-card-v3.is-done .sk-card-title-v3{color:var(--sk-ink)}
+.sk-card-meta-v3,.sk-card-metrics{color:var(--sk-ink-3)}
+.sk-drawer-sec-title{font-weight:600;color:var(--sk-ink-3);font-size:12px}
+.sk-col-add:focus-visible{opacity:1}
+.sk-tier-narrow .sk-view-switch button{padding-inline:6px}
+.sk-tier-narrow .sk-task-row{gap:5px}
+.sk-tier-narrow .sk-task-row .sk-btn{white-space:normal}
+`;
+
     function ensureStyle() {
       const tagId = "dsh-super-kanban/style.css";
       let tag = document.querySelector(`style[data-plugin-css="${tagId}"]`);
@@ -1542,7 +1685,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         tag = document.createElement("style");
         tag.dataset.plugin = "dsh-super-kanban";
         tag.dataset.pluginCss = tagId;
-        tag.textContent = CSS;
+        tag.textContent = CSS + WORKFLOW_CSS;
         document.head.appendChild(tag);
       }
       return tag;
@@ -1702,6 +1845,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         return JSON.stringify({
           tasks: tasks.map((task) => (task ? [task.id, task.updatedAt, task.status, task.archived === true] : null)),
           scan: payload.scan || null,
+          storage: payload.storage || null,
+          maintenance: payload.maintenance || null,
+          writeOverlaps: payload.writeOverlaps || null,
           settings: payload.settings || null,
           usage: payload.usage || null,
           stats: payload.stats || null,
@@ -1711,6 +1857,14 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       } catch {
         return "";
       }
+    }
+
+    let sharedStateRequest = null;
+    function requestBoardState() {
+      if (!sharedStateRequest) {
+        sharedStateRequest = apiRequest("/state").finally(() => { sharedStateRequest = null; });
+      }
+      return sharedStateRequest;
     }
 
     function useBoardData() {
@@ -1731,7 +1885,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const load = React.useCallback(async (silent) => {
         if (inflight.current) return inflight.current;
         if (!silent) setLoading(true);
-        const task = apiRequest("/state")
+        const task = requestBoardState()
           .then((payload) => {
             if (!mounted.current) return null;
             const next = stateSignature(payload);
@@ -1790,12 +1944,28 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         };
       }, [data && data.scan && data.scan.state, load]);
 
+      React.useEffect(() => {
+        if (typeof EventSource !== "function") return undefined;
+        const stream = new EventSource(new URL(`${API}/events`, document.baseURI));
+        let timer;
+        const invalidate = () => {
+          if (document.hidden || timer) return;
+          timer = setTimeout(() => { timer = null; load(true); }, 180);
+        };
+        stream.addEventListener("changed", invalidate);
+        stream.addEventListener("scan", invalidate);
+        return () => {
+          clearTimeout(timer);
+          stream.close();
+        };
+      }, [load]);
+
       return { data, error, loading, reload: load, setData };
     }
 
     /* ================================ cards =============================== */
 
-    function TaskCard({ task, onOpen, onDragStart, onDragEnd, dragging }) {
+    function TaskCard({ task, signal, onOpen, onDragStart, onDragEnd, dragging }) {
       const progress = progressOf(task);
       const subtasks = subtasksOf(task);
       const issueList = Array.isArray(task.issues) ? task.issues : [];
@@ -1810,6 +1980,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const engine = task.ai && task.ai.engine === "llm" ? "AI" : "规则";
       const showEngine = Boolean(task.ai) || task.origin === "auto" || task.origin === "auto+edited";
       const prioClass = priority === "P0" ? "is-p0" : priority === "P1" ? "is-p1" : "is-rest";
+      const summary = signal
+        ? [signal.label, signal.text].filter(Boolean).join(" · ")
+        : [taskRunningLabel(task), !done ? task.nextSteps?.[0] : null].filter(Boolean).join(" · ");
       return h(
         "article",
         {
@@ -1818,7 +1991,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           tabIndex: 0,
           "aria-haspopup": "dialog",
           "data-task-id": task.id,
-          "aria-label": `${task.title}（${STATUS_META[taskStatus].label}）`,
+          "aria-label": `${task.title}（${[STATUS_META[taskStatus].label, signal?.label].filter(Boolean).join(" · ")}）`,
           draggable: true,
           onDragStart: (event) => {
             event.dataTransfer.effectAllowed = "move";
@@ -1840,6 +2013,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           { className: "sk-card-v3-head" },
           h("span", { className: cx("sk-dot", "is-" + taskStatus), title: STATUS_META[taskStatus].label }),
           h("h3", { className: "sk-card-title-v3" }, task.title),
+          task.pinned ? h("span", { className: "sk-archived-mark" }, "置顶") : null,
           task.archived ? h("span", { className: "sk-archived-mark", title: "已归档任务（筛选「含归档」时显示）" }, "已归档") : null,
           showEngine
             ? h("span", { className: cx("sk-ai-mark", engine === "AI" ? "is-ai" : "is-rules"), title: engine === "AI" ? "AI 研判" : "规则推断" }, engine)
@@ -1866,11 +2040,14 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               : null,
           ),
         ),
-        h("div", { className: "sk-card-progress-v3" }, h("i", { style: { width: `${progress}%` } })),
+        summary ? h("div", { className: "sk-card-summary", title: summary }, summary) : null,
+        task.progress !== null || subtasks.length
+          ? h("div", { className: "sk-card-progress-v3", title: taskProgressLabel(task) }, h("i", { style: { width: `${progress}%` } }))
+          : null,
       );
     }
 
-    function Column({ status, tasks, onOpen, onAdd, onDropTask, draggingId, onDragStart, onDragEnd }) {
+    function Column({ status, tasks, signals, onOpen, onAdd, onDropTask, draggingId, onDragStart, onDragEnd }) {
       const meta = STATUS_META[status];
       const [dragOver, setDragOver] = React.useState(false);
       return h(
@@ -1916,17 +2093,17 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           { className: "sk-col-body" },
           tasks.length === 0
             ? h("div", { className: "sk-col-empty" }, status === "blocked" ? "暂无受阻任务" : "暂无任务，拖拽卡片到这里")
-            : tasks.map((task) => h(TaskCard, { key: task.id, task, onOpen, onDragStart, onDragEnd, dragging: draggingId === task.id })),
+            : tasks.map((task) => h(TaskCard, { key: task.id, task, signal: signals.get(task.id), onOpen, onDragStart, onDragEnd, dragging: draggingId === task.id })),
         ),
       );
     }
 
     /** 窄屏（右侧栏 <620px）：文字状态 tab + 单列卡片。 */
-    function NarrowBoard({ status, setStatus, byStatus, onOpen, onAdd, draggingId, onDragStart, onDragEnd }) {
+    function NarrowBoard({ status, setStatus, byStatus, signals, onOpen, onAdd, draggingId, onDragStart, onDragEnd }) {
       const list = byStatus[status] || [];
-      // v0.5.1 无障碍（审计 S7）：tab ↔ tabpanel 关联；方向键导航留待 v0.5.2。
-      const panelId = "sk-narrow-panel";
-      const tabId = (item) => `sk-narrow-tab-${item}`;
+      // Each mounted surface owns its own tab and panel ids.
+      const panelId = React.useId();
+      const tabId = (item) => `${panelId}-${item}`;
       return h(
         React.Fragment,
         null,
@@ -1959,6 +2136,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                 h(TaskCard, {
                   key: task.id,
                   task,
+                  signal: signals.get(task.id),
                   onOpen,
                   onDragStart,
                   onDragEnd,
@@ -2004,10 +2182,15 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       }
     }
 
-    const CONTINUE_REQUIREMENT = "要求：先复述你的理解与计划，再按步骤执行；最后汇报产出与结论。遇到阻塞或不确定的地方要明确指出，不要静默跳过。";
+    const CONTINUE_PURPOSES = {
+      continue: ["继续执行", "推进未完成项，验证变更并汇报结果。"],
+      unblock: ["排查阻塞", "定位首要阻塞并验证修复。需要用户决定时列出具体选择。"],
+      verify: ["验收产出", "按验收条件检查现有产物，逐项说明通过、失败或无法验证的依据。"],
+      handoff: ["整理交接", "整理已完成工作、约束、剩余事项和可复用产物，供下一会话接手。"],
+    };
 
     /** Host 未就绪时的本地模板（0 token），保证「继续任务」可用。 */
-    function localContinuePrompt(task) {
+    function localContinuePrompt(task, purpose, sessionId) {
       const goal = goalInfoOf(task);
       const facts = keyFactsOf(task);
       const issues = Array.isArray(task.issues) ? task.issues : [];
@@ -2015,14 +2198,15 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const session = sessionContextOf(task);
       const subtasks = subtasksOf(task);
       const done = subtasks.filter((item) => item.done).length;
-      const lines = [];
+      const lines = [CONTINUE_PURPOSES[purpose][1], ""];
       lines.push("继续任务：" + (task.title || "未命名任务"));
-      if (goal && goal.text) lines.push("目标 / 完成标准：" + goal.text);
+      if (goal && goal.text) lines.push("目标：" + goal.text);
+      if (task.acceptanceCriteria) lines.push("", "## 验收条件", task.acceptanceCriteria);
       if (subtasks.length) lines.push("当前进度：" + done + "/" + subtasks.length + " 个子任务完成（" + progressOf(task) + "%）");
-      else lines.push("当前进度：" + progressOf(task) + "%");
+      else lines.push("当前进度：" + taskProgressLabel(task));
       if (facts.length) {
         lines.push("关键事实：");
-        for (const fact of facts.slice(0, 5)) lines.push("- " + fact.text);
+        for (const fact of facts.slice(0, 5)) lines.push(`- ${fact.text}${fact.sessionId && fact.seq ? `（会话 ${fact.sessionId} #${fact.seq}）` : ""}`);
       }
       if (issues.length) {
         lines.push("待解决问题：");
@@ -2032,51 +2216,65 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         lines.push("下一步：");
         for (const step of nextSteps.slice(0, 3)) lines.push("- " + step);
       }
-      if (session.title) {
-        lines.push("来源会话：" + session.title + (session.isLive ? "（进行中）" : ""));
-        if (session.turnCount) lines.push("已进行 " + session.turnCount + " 轮对话；最近一次轮次状态：" + (session.lastTurnEnd || "未知"));
+      const pending = subtasks.filter((item) => !item.done);
+      if (pending.length) {
+        lines.push("", `## 未完成子任务（${pending.length} 项）`, ...pending.slice(0, 8).map((item) => `- ${item.text}`));
       }
-      lines.push(CONTINUE_REQUIREMENT);
+      const artifacts = artifactsOf(task);
+      const main = primaryArtifactOf(artifacts);
+      const related = [main, ...artifacts.filter((item) => item !== main)].filter((item) => item?.path).slice(0, 4);
+      if (related.length) {
+        lines.push("", "## 交付物与修改记录");
+        for (const item of related) lines.push(`- ${item.path}${item.missing ? "（当前不可用）" : ""}${item.sessionId ? ` · 会话 ${item.sessionId}${item.seq ? ` #${item.seq}` : ""}` : ""}`);
+      }
+      if (sessionId) lines.push("来源会话：" + (task.sessions?.find((item) => item.id === sessionId)?.title || session.title) + `（${sessionId}）`);
+      lines.push("", "保留现有约束。完成后说明实际产出、验收结果和仍需处理的事项。");
       return lines.join("\n");
     }
 
     /** 「继续此任务」弹窗：模板提示词可编辑 → 放入会话 / 新会话 / 复制。 */
-    function ContinueTaskModal({ task, initialTarget, ctxProps, pushToast, onClose, onDone }) {
+    function ContinueTaskModal({ task, initialTarget, initialPurpose, initialSessionId, ctxProps, workspaces, pushToast, onClose, onDone }) {
       const host = (ctxProps && ctxProps.host) || {};
-      const [target, setTarget] = React.useState(initialTarget === "newSession" ? "newSession" : "session");
+      const session = sessionContextOf(task);
+      const [target, setTarget] = React.useState(initialTarget === "newSession" || !session.sessionId ? "newSession" : "session");
+      const [purpose, setPurpose] = React.useState(initialPurpose || "continue");
+      const [selectedId, setSelectedId] = React.useState(initialSessionId || session.sessionId);
+      const [workspaceId, setWorkspaceId] = React.useState(task.workspaceId || "");
       const [prompt, setPrompt] = React.useState("");
       const [loading, setLoading] = React.useState(true);
       const [busy, setBusy] = React.useState("");
       const [note, setNote] = React.useState("");
-      const session = sessionContextOf(task);
+      const sessions = task.sessions?.length ? task.sessions : session.sessionId ? [{ id: session.sessionId, title: session.title }] : [];
+      const sessionId = sessions.some((item) => item.id === selectedId) ? selectedId : session.sessionId;
       // 用户改过 textarea 后，切换「原会话 / 新会话」不能丢编辑内容；提示词模板本身与 target 无关。
       const dirtyRef = React.useRef(false);
       const promptKeyRef = React.useRef("");
 
       React.useEffect(() => {
-        const key = `${task.id}:${target}`;
+        const key = `${task.id}:${task.updatedAt}:${target}:${purpose}:${sessionId}`;
         if (dirtyRef.current) {
-          setNote("已保留你编辑的提示词；切换目标不会重新生成");
+          setLoading(false);
+          setNote("已保留你编辑的提示词，请核对内容与当前任务及放入位置是否一致。");
           return undefined;
         }
         if (promptKeyRef.current === key) return undefined;
         let cancelled = false;
         setLoading(true);
         setNote("");
-        command("task.continuePrompt", { id: task.id, target })
+        command("task.continuePrompt", { id: task.id, target, purpose, sessionId })
           .then((res) => {
             if (cancelled) return;
             const data = (res && res.data) || res || {};
             const text = typeof data.prompt === "string" ? data.prompt : "";
             promptKeyRef.current = key;
             if (dirtyRef.current) return;
-            setPrompt(text || localContinuePrompt(task));
+            setPrompt(text || localContinuePrompt(task, purpose, sessionId));
             if (!text) setNote("Host 模板接口未就绪，已使用本地模板");
           })
           .catch(() => {
             if (cancelled || dirtyRef.current) return;
             promptKeyRef.current = key;
-            setPrompt(localContinuePrompt(task));
+            setPrompt(localContinuePrompt(task, purpose, sessionId));
             setNote("Host 模板接口不可用，已使用本地模板（仍然可用）");
           })
           .finally(() => {
@@ -2085,7 +2283,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         return () => {
           cancelled = true;
         };
-      }, [target, task.id]);
+      }, [target, purpose, task.id, task.updatedAt, sessionId]);
 
       const copy = async () => {
         const ok = await copyToClipboard(prompt);
@@ -2093,7 +2291,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         return ok;
       };
       const toastCopiedOrManual = async (text) => {
-        const copied = await copy();
+        const copied = await copyToClipboard(prompt);
         pushToast(copied ? text + "，提示词已复制" : text + "，请手动复制提示词", copied ? "info" : "error");
         return copied;
       };
@@ -2125,17 +2323,23 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         setBusy("place");
         try {
           if (target === "newSession") {
-            const ok = host.startSession ? host.startSession(task.workspaceId, prompt) : false;
-            if (ok) {
-              pushToast("已在新会话中预置提示词，确认后发送", "info");
-              onClose();
-              if (onDone) onDone();
+            const placement = await host.prepareSession?.(workspaceId, prompt);
+            if (!placement?.sessionId || placement.result !== "applied") {
+              await toastCopiedOrManual(placement?.result === "preserved" ? "新会话已有草稿" : "未能确认草稿放置");
               return;
             }
-            await toastCopiedOrManual("当前环境无法新建会话");
+            try {
+              await command("task.linkSession", { id: task.id, sessionId: placement.sessionId, continuation: true });
+              pushToast("草稿已放入，续做会话已关联", "info");
+            } catch (cause) {
+              pendingHandoff = { id: task.id, title: task.title, targetId: placement.sessionId, expires: Date.now() + 15 * 60_000 };
+              pushToast("草稿已放入。打开新会话的看板可重试关联：" + cause.message, "error");
+            }
+            onClose();
+            onDone?.();
             return;
           }
-          const result = host.placeDraft ? await host.placeDraft(session.sessionId, prompt) : { ok: false, reason: "missing" };
+          const result = host.placeDraft ? await host.placeDraft(sessionId, prompt) : { ok: false, reason: "missing" };
           if (result && result.ok) {
             const state = result.result;
             if (state === "applied") {
@@ -2144,10 +2348,8 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               if (onDone) onDone();
             } else if (state === "preserved") {
               await toastCopiedOrManual("输入框已有草稿，已保留原草稿");
-              onClose();
             } else {
               await toastCopiedOrManual("会话输入框未就绪");
-              onClose();
             }
             return;
           }
@@ -2159,7 +2361,8 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         }
       };
 
-      const disabled = loading || !!busy || !prompt.trim();
+      const disabled = loading || !!busy || !prompt.trim() || (target === "newSession" ? !workspaceId : !sessionId);
+      const polishTooLong = prompt.trim().length > PROMPT_POLISH_LIMIT;
       const dialogRef = React.useRef(null);
       useDialogFocus(dialogRef, onClose);
       useBodyScrollLock();
@@ -2180,21 +2383,32 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           h(
             "div",
             { className: "sk-modal-body" },
-            h("p", { className: "sub" }, "提示词只放入输入框、不会自动发送；确认无误后再发送给 DSH。"),
+            h("p", { className: "sub" }, "检查草稿后由你发送。新会话草稿放入后会关联到当前任务。"),
+            h("label", { className: "sk-field" }, "工作目的",
+              h("select", { className: "sk-select", value: purpose, disabled: !!busy, onChange: (event) => setPurpose(event.target.value) },
+                Object.entries(CONTINUE_PURPOSES).map(([value, [label]]) => h("option", { key: value, value }, label)))),
+            target === "newSession" ? h("label", { className: "sk-field" }, "目标工作区",
+              h("select", { className: "sk-select", value: workspaceId, disabled: !!busy, onChange: (event) => setWorkspaceId(event.target.value) },
+                h("option", { value: "" }, "选择工作区"),
+                (workspaces || []).filter((item) => !item.synthetic || item.id === task.workspaceId)
+                  .map((item) => h("option", { key: item.id, value: item.id }, item.title)))) : sessions.length > 1
+              ? h("label", { className: "sk-field" }, "目标会话",
+                  h("select", { className: "sk-select", value: sessionId, disabled: !!busy, onChange: (event) => setSelectedId(event.target.value) },
+                    sessions.map((item) => h("option", { key: item.id, value: item.id }, item.title || item.id)))) : null,
             h(
               "div",
               { className: "sk-continue-target", role: "group", "aria-label": "提示词放入位置" },
               h(
                 "button",
-                { type: "button", "aria-pressed": target === "session", className: target === "session" ? "is-on" : "", onClick: () => setTarget("session") },
-                "原会话继续",
-                h("small", null, session.title || "来源会话"),
+                { type: "button", "aria-pressed": target === "session", disabled: !!busy || !sessionId, className: target === "session" ? "is-on" : "", onClick: () => setTarget("session") },
+                "关联会话",
+                h("small", null, sessions.find((item) => item.id === sessionId)?.title || "来源会话"),
               ),
               h(
                 "button",
-                { type: "button", "aria-pressed": target === "newSession", className: target === "newSession" ? "is-on" : "", onClick: () => setTarget("newSession") },
-                "同工作区新会话",
-                h("small", null, task.workspaceTitle || "未关联工作区"),
+                { type: "button", "aria-pressed": target === "newSession", disabled: !!busy, className: target === "newSession" ? "is-on" : "", onClick: () => setTarget("newSession") },
+                "新会话",
+                h("small", null, workspaces?.find((item) => item.id === workspaceId)?.title || "选择工作区"),
               ),
             ),
             loading
@@ -2210,15 +2424,16 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   },
                 }),
             note ? h("div", { className: "sk-note-tiny", role: "status", "aria-live": "polite" }, note) : null,
+            polishTooLong ? h("div", { className: "sk-note-tiny" }, "超过 3000 字的草稿可直接放入会话。精简后可使用 AI 润色。") : null,
           ),
           h(
             "div",
             { className: "sk-modal-foot" },
             h("button", { type: "button", className: "sk-btn ghost", onClick: onClose }, "取消"),
-            h("button", { type: "button", className: "sk-btn", onClick: copy, disabled: disabled && !prompt }, "仅复制"),
+            h("button", { type: "button", className: "sk-btn", onClick: copy, disabled: !prompt.trim() }, "仅复制"),
             h(
               "button",
-              { type: "button", className: "sk-btn", onClick: polish, disabled: loading || !!busy || !prompt.trim(), title: "消耗 1 次 AI 调用" },
+              { type: "button", className: "sk-btn", onClick: polish, disabled: loading || !!busy || !prompt.trim() || polishTooLong, title: "消耗 1 次 AI 调用" },
               busy === "polish" ? "润色中…" : "AI 润色",
             ),
             h(
@@ -2231,7 +2446,134 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       );
     }
 
-    function TaskDrawer({ task, ctxProps, settings, onClose, onChanged, pushToast }) {
+    function TaskIssues({ task, run, openSourceSession }) {
+      const [text, setText] = React.useState("");
+      const [busy, setBusy] = React.useState(false);
+      const severity = { high: 0, medium: 1, low: 2 };
+      const issues = [...(task.issues || [])].sort((a, b) => (severity[a.severity] ?? 9) - (severity[b.severity] ?? 9));
+      const submit = async (value, resolve) => {
+        if (!value.trim() || busy) return;
+        setBusy(true);
+        try {
+          await run("更新问题", async () => {
+            await command("task.issue", { id: task.id, text: value, resolve });
+            if (!resolve) setText("");
+          }, resolve ? "问题已解决" : "已记录问题");
+        } finally {
+          setBusy(false);
+        }
+      };
+      return h("details", { className: "sk-drawer-sec sk-relation-editor" },
+        h("summary", null, `问题管理 · ${issues.length} 待处理`),
+        issues.map((issue, index) => h("div", { className: "sk-management-row", key: issue.id || index },
+          h("span", null, issue.text),
+          issue.sessionId ? h("button", { className: "sk-text", type: "button", onClick: () => openSourceSession(issue.sessionId) },
+            issue.seq ? `来源 #${issue.seq}` : "打开来源") : null,
+          h("button", { type: "button", className: "sk-btn", disabled: busy, onClick: () => submit(issue.text, true) }, "标记解决"))),
+        h("form", { className: "sk-batchbar", onSubmit: (event) => { event.preventDefault(); submit(text, false); } },
+          h("input", { className: "sk-input", "aria-label": "新增问题", placeholder: "记录需要处理的问题", maxLength: TEXT_LIMITS.issueText,
+            value: text, onChange: (event) => setText(event.target.value) }),
+          h("button", { type: "submit", className: "sk-btn", disabled: busy || !text.trim() }, "添加")),
+        task.resolvedIssues?.length ? h("details", null, h("summary", null, `已解决 ${task.resolvedIssues.length} 项`),
+          h("ul", null, task.resolvedIssues.map((issue) => h("li", { key: issue }, issue)))) : null);
+    }
+
+    function TaskLinks({ task, tasks, host, run, onOpenTask, pushToast }) {
+      const [type, setType] = React.useState("parent");
+      const [other, setOther] = React.useState("");
+      const [query, setQuery] = React.useState("");
+      const [catalog, setCatalog] = React.useState(null);
+      const [candidates, setCandidates] = React.useState(null);
+      const [mergeId, setMergeId] = React.useState("");
+      const [busy, setBusy] = React.useState(false);
+      const index = React.useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks]);
+      const incoming = tasks.flatMap((item) => (item.relations || [])
+        .filter((link) => link.taskId === task.id)
+        .map((link) => ({ taskId: item.id, type: link.type })));
+      const call = async (op, payload, message) => {
+        if (busy) return;
+        setBusy(true);
+        try { await run("更新关系", () => command(op, { id: task.id, ...payload }), message); }
+        finally { setBusy(false); }
+      };
+      const lookup = async (filter) => {
+        setBusy(true);
+        try { setCatalog(await apiRequest("/sessions?q=" + encodeURIComponent(filter))); }
+        catch (cause) { pushToast(cause.message, "error"); }
+        finally { setBusy(false); }
+      };
+      const suggest = async () => {
+        setBusy(true);
+        try {
+          const result = await apiRequest("/merge-candidates?id=" + encodeURIComponent(task.id));
+          setCandidates(result.candidates);
+        } catch (cause) { pushToast(cause.message, "error"); }
+        finally { setBusy(false); }
+      };
+      return h("details", { className: "sk-drawer-sec sk-relation-editor" },
+        h("summary", null, "会话与任务关系"),
+        (task.sessions || []).map((entry) => h("div", { className: "sk-management-row", key: entry.id },
+          h("span", null, entry.title || entry.id, entry.id === task.primarySessionId ? " · 主会话" : "", entry.continuedAt ? " · 续做" : ""),
+          h("button", { className: "sk-btn", type: "button", onClick: () => {
+            if (!host.openSession?.(entry.id)) pushToast("当前无法打开会话", "error");
+          } }, "打开"),
+          entry.id !== task.primarySessionId ? h("button", { className: "sk-btn", type: "button", disabled: busy,
+            onClick: () => call("task.linkSession", { sessionId: entry.id, primary: true }, "主会话已更新") }, "设为主会话") : null,
+          h("button", { className: "sk-btn", type: "button", disabled: busy,
+            onClick: () => call("task.linkSession", { sessionId: entry.id, remove: true }, "已解除关联") }, "解绑"))),
+        h("form", { className: "sk-batchbar", onSubmit: (event) => { event.preventDefault(); lookup(query); } },
+          h("input", { className: "sk-input", value: query, placeholder: "搜索会话名称、工作区或 ID", maxLength: 100,
+            "aria-label": "搜索会话", onChange: (event) => setQuery(event.target.value) }),
+          h("button", { className: "sk-btn", type: "submit", disabled: busy }, "查找会话"),
+          task.primarySessionId ? h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => lookup(task.primarySessionId) }, "查看子代理") : null),
+        catalog ? h("div", { className: "sk-management-card" },
+          h("p", null, catalog.total ? `显示 ${catalog.sessions.length} / ${catalog.total} 个会话` : "没有匹配的会话"),
+          catalog.sessions.map((entry) => h("div", { className: "sk-management-row", key: entry.id },
+            h("span", null, entry.title || entry.id, entry.parentId ? " · 子代理" : "", entry.isLive ? " · 运行中" : entry.lastTurnEnd === "error" ? " · 出错" : ""),
+            h("button", { className: "sk-btn", type: "button", disabled: busy || task.sessions?.some((item) => item.id === entry.id),
+              onClick: () => call("task.linkSession", { sessionId: entry.id }, "已关联会话") }, "关联"),
+            h("button", { className: "sk-btn", type: "button", disabled: busy || entry.ignored, onClick: async () => {
+              await call("session.ignore", { sessionId: entry.id }, "此会话将跳过自动建卡");
+              await lookup(query);
+            } }, entry.ignored ? "已忽略" : "忽略扫描")))) : null,
+        (task.relations || []).map((link) => h("div", { className: "sk-management-row", key: link.type + link.taskId },
+          h("span", null, RELATION_LABELS[link.type]),
+          h("button", { className: "sk-text", type: "button", disabled: !index.has(link.taskId),
+            onClick: () => onOpenTask(link.taskId) }, index.get(link.taskId)?.title || "关联任务不可用"),
+          h("button", { className: "sk-btn", type: "button", disabled: busy,
+            onClick: () => call("task.relate", { ...link, remove: true }, "已移除任务关系") }, "移除"))),
+        incoming.map((link) => h("div", { className: "sk-management-row", key: "in:" + link.type + link.taskId },
+          h("span", null, link.type === "parent" ? "子任务卡" : link.type === "depends_on" ? "依赖此任务" : "相关任务"),
+          h("button", { className: "sk-text", type: "button", onClick: () => onOpenTask(link.taskId) }, index.get(link.taskId)?.title))),
+        h("div", { className: "sk-batchbar" },
+          h("select", { className: "sk-select", "aria-label": "任务关系类型", value: type, onChange: (event) => setType(event.target.value) },
+            Object.entries(RELATION_LABELS).map(([value, label]) => h("option", { key: value, value }, label))),
+          h("select", { className: "sk-select", "aria-label": "关系目标任务", value: other, onChange: (event) => setOther(event.target.value) },
+            h("option", { value: "" }, "选择任务"),
+            tasks.filter((item) => item.id !== task.id).map((item) => h("option", { key: item.id, value: item.id }, item.title))),
+          h("button", { className: "sk-btn", type: "button", disabled: busy || !other,
+            onClick: () => call("task.relate", { taskId: other, type }, "已更新任务关系") }, "添加关系")),
+        h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: suggest }, "查找相似任务"),
+        candidates ? candidates.length ? candidates.map((candidate) => h("div", { className: "sk-management-row", key: candidate.id },
+          h("span", null, candidate.title),
+          h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => {
+            if (mergeId !== candidate.id) { setMergeId(candidate.id); return; }
+            call("task.merge", { sourceId: candidate.id }, "已合并，可在维护中撤销");
+            setCandidates(null);
+            setMergeId("");
+          } }, mergeId === candidate.id ? "确认合并到此任务" : "合并"),
+          mergeId === candidate.id ? h("button", { className: "sk-text", type: "button", onClick: () => setMergeId("") }, "取消") : null))
+          : h("p", { className: "sk-note-tiny" }, "没有发现相似任务") : null);
+    }
+
+    function renderSessionActions(sessions, openSession, label = "待处理会话") {
+      if (!sessions.length) return null;
+      return h("ul", { className: "sk-session-actions", "aria-label": label }, sessions.map(({ id, title, label }) =>
+        h("li", { key: id }, h("span", null, `${label} · ${title}`),
+          h("button", { className: "sk-btn", type: "button", "aria-label": `打开会话：${title}（${label}）`, onClick: () => openSession(id) }, "打开会话"))));
+    }
+
+    function TaskDrawer({ task, signal, tasks, workspaces, onOpenTask, ctxProps, settings, onClose, onChanged, pushToast }) {
       const host = (ctxProps && ctxProps.host) || {};
       const goal = goalInfoOf(task);
       const session = sessionContextOf(task);
@@ -2239,6 +2581,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const [draft, setDraft] = React.useState(() => ({
         title: task.title || "",
         goal: (goal && goal.text) || "",
+        acceptanceCriteria: task.acceptanceCriteria || "",
         status: task.status || "backlog",
         priority: task.priority || "P2",
         progress: pct(task.progress),
@@ -2248,33 +2591,35 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const [factsExpanded, setFactsExpanded] = React.useState(false);
       const [subtasksExpanded, setSubtasksExpanded] = React.useState(false);
       const [evidenceOpen, setEvidenceOpen] = React.useState(false);
+      const [evidenceSession, setEvidenceSession] = React.useState("");
       const [historyOpen, setHistoryOpen] = React.useState(false);
       const [expandedEvidence, setExpandedEvidence] = React.useState({});
       const [moreOpen, setMoreOpen] = React.useState(false);
       const [moreOpenFooter, setMoreOpenFooter] = React.useState(false);
       const [continueOpen, setContinueOpen] = React.useState(false);
       const [continueTarget, setContinueTarget] = React.useState("session");
+      const [continuePurpose, setContinuePurpose] = React.useState("continue");
+      const [acceptBusy, setAcceptBusy] = React.useState(false);
       const [newSubtask, setNewSubtask] = React.useState("");
       const [subtaskBusy, setSubtaskBusy] = React.useState("");
       const [optimisticSubtasks, setOptimisticSubtasks] = React.useState(null);
       const [confirmDelete, setConfirmDelete] = React.useState(false);
-      const [issuesExpanded, setIssuesExpanded] = React.useState(false);
-      const [nextStepsExpanded, setNextStepsExpanded] = React.useState(false);
-      const [reasonExpanded, setReasonExpanded] = React.useState(false);
-      const [reasonOverflow, setReasonOverflow] = React.useState(false);
       const [staleNotice, setStaleNotice] = React.useState(false);
+      const editBase = React.useRef(null);
       const [analyzeBusy, setAnalyzeBusy] = React.useState(false);
-      const reasonRef = React.useRef(null);
       const dialogRef = React.useRef(null);
 
       const subtasks = optimisticSubtasks || subtasksOf(task);
       const subtaskDone = subtasks.filter((item) => item.done).length;
       const facts = keyFactsOf(task);
       const artifacts = artifactsOf(task);
-      const severityRank = { high: 0, medium: 1, low: 2 };
-      const issues = (Array.isArray(task.issues) ? task.issues : [])
-        .slice()
-        .sort((left, right) => (severityRank[left?.severity] ?? 9) - (severityRank[right?.severity] ?? 9));
+      const primaryArtifact = primaryArtifactOf(artifacts);
+      const otherArtifacts = artifacts.filter((item) => item !== primaryArtifact);
+      const pending = task.pendingSessions || [];
+      const ready = signal?.label === "待验收";
+      const accepted = task.status === "done" && task.completionBasis === "user";
+      const canAccept = !task.archived && (accepted || (!pending.length && !taskRunningLabel(task) &&
+        (task.acceptanceCriteria || primaryArtifact?.kind === "deliverable" || task.status === "done")));
       const nextSteps = Array.isArray(task.nextSteps) ? task.nextSteps : [];
       const aiInfo = aiInfoOf(task);
       // 新旧兼容：有 provider 时显示「provider 显示名 / model」；旧任务只有 model 时保持单模型名样式。
@@ -2285,20 +2630,36 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       // 「可能已过期」只在会话在研判之后又产生了活动时提示：没有新活动时，
       // 旧研判仍然有效；按扫描间隔判断会让所有旧任务都误报过期。
       const lastActivityAt = Number((task.sessionContext && task.sessionContext.lastActivityAt) || task.lastActivityAt) || 0;
-      const aiStale = Boolean(aiInfo && aiInfo.analyzedAt && lastActivityAt > aiInfo.analyzedAt + 5 * 60_000);
-      const evidence = Array.isArray(task.evidence) ? task.evidence.slice(0, 8) : [];
+      const aiStale = Boolean(aiInfo && aiInfo.analyzedAt && lastActivityAt > aiInfo.analyzedAt);
+      const evidence = (task.evidence || []).slice(0, 8).sort((a, b) => (b.time || 0) - (a.time || 0) || (b.seq || 0) - (a.seq || 0));
+      const evidenceSources = new Map(evidence.filter((item) => item.sessionId).map((item) => [item.sessionId, item.sessionTitle || item.sessionId]));
+      const evidenceScope = evidenceSources.has(evidenceSession) ? evidenceSession : "";
+      const visibleEvidence = evidenceScope ? evidence.filter((item) => item.sessionId === evidenceScope) : evidence;
       const history = Array.isArray(task.history) ? task.history.slice().reverse().slice(0, 20) : [];
-      const progress = subtasks.length ? Math.round((subtaskDone / Math.max(1, subtasks.length)) * 100) : pct(task.progress) || 0;
+
+      const currentEditValues = () => ({
+        title: task.title || "",
+        goal: goalInfoOf(task)?.text || "",
+        acceptanceCriteria: task.acceptanceCriteria || "",
+        status: task.status || "backlog",
+        priority: task.priority || "P2",
+        progress: pct(task.progress),
+      });
 
       const resetDraft = () => {
-        const currentGoal = goalInfoOf(task);
-        setDraft({
-          title: task.title || "",
-          goal: (currentGoal && currentGoal.text) || "",
-          status: task.status || "backlog",
-          priority: task.priority || "P2",
-          progress: pct(task.progress),
-        });
+        const values = currentEditValues();
+        editBase.current = { values, updatedAt: task.updatedAt };
+        setDraft(values);
+      };
+
+      const changedFields = () => Object.keys(draft).filter((field) =>
+        String(draft[field] ?? "") !== String(editBase.current?.values[field] ?? ""));
+      const rebaseDraft = () => {
+        const edited = Object.fromEntries(changedFields().map((field) => [field, draft[field]]));
+        const values = currentEditValues();
+        editBase.current = { values, updatedAt: task.updatedAt };
+        setDraft({ ...values, ...edited });
+        setStaleNotice(false);
       };
 
       // 只在切换到另一张任务卡时重置编辑态；轮询/扫描导致 updatedAt 变化不能吞掉用户草稿。
@@ -2312,15 +2673,8 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       // 后台（轮询 / 扫描 / 重新研判）覆盖了任务时：保留草稿，只给一句安静的提示。
       React.useEffect(() => {
         setOptimisticSubtasks(null);
-        if (editing) setStaleNotice(true);
+        if (editing && editBase.current?.updatedAt !== task.updatedAt) setStaleNotice(true);
       }, [task.updatedAt]);
-
-      // 研判理由超过 2 行才显示「展开理由」；展开后保留按钮以便收起。
-      React.useEffect(() => {
-        const node = reasonRef.current;
-        if (!node || reasonExpanded) return;
-        setReasonOverflow(node.scrollHeight > node.clientHeight + 1);
-      }, [aiInfo && aiInfo.reason, reasonExpanded]);
 
       // S10：菜单关闭 / 点别处时复位「确认删除」，避免下次打开菜单直接显示「确认删除任务」。
       const closeMore = () => {
@@ -2358,23 +2712,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const save = async () => {
         setSaving(true);
         try {
-          const patch = {
-            title: draft.title.trim(),
-            goal: draft.goal.trim(),
-            status: draft.status,
-            priority: draft.priority,
-            progress: draft.progress === null ? null : Number(draft.progress),
-          };
-          const changed = ["title", "goal", "status", "priority", "progress"].filter((field) => {
-            const before =
-              field === "goal"
-                ? (goalInfoOf(task) && goalInfoOf(task).text) || ""
-                : field === "progress"
-                  ? pct(task.progress)
-                  : task[field] || "";
-            return String(patch[field] ?? "") !== String(before ?? "");
-          });
-          await command("task.update", { id: task.id, patch, lockFields: changed });
+          const changed = changedFields();
+          const patch = Object.fromEntries(changed.map((field) => [field, typeof draft[field] === "string" ? draft[field].trim() : draft[field]]));
+          if (changed.length) await command("task.update", { id: task.id, patch, lockFields: changed, expectedUpdatedAt: editBase.current?.updatedAt });
           pushToast("已保存", "info");
           setEditing(false);
           setStaleNotice(false);
@@ -2382,6 +2722,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           await onChanged();
         } catch (cause) {
           pushToast("保存失败：" + cause.message, "error");
+          if (cause.status === 409) await onChanged();
         } finally {
           setSaving(false);
         }
@@ -2394,6 +2735,21 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           await onChanged();
         } catch (cause) {
           pushToast(label + "失败：" + cause.message, "error");
+        }
+      };
+
+      const acceptTask = async () => {
+        if (acceptBusy || accepted) return;
+        setAcceptBusy(true);
+        try {
+          await command("task.accept", { id: task.id, expectedUpdatedAt: task.updatedAt });
+          await onChanged();
+          pushToast("已确认验收", "info");
+        } catch (cause) {
+          pushToast("验收失败：" + cause.message, "error");
+          if (cause.status === 409) await onChanged();
+        } finally {
+          setAcceptBusy(false);
         }
       };
 
@@ -2461,23 +2817,39 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         }
       };
 
-      const openSession = () => {
+      const openSourceSession = (id) => {
         const fn = ctxProps && ctxProps.openSession;
-        if (typeof fn === "function" && fn(session.sessionId)) {
+        if (typeof fn === "function" && fn(id)) {
           onClose();
           return;
         }
         pushToast("当前环境不支持跳转会话", "error");
       };
+      const openSession = () => openSourceSession(session.sessionId);
 
-      const openArtifact = (artifact) => {
+      const openArtifact = async (artifact) => {
         const sessionId = artifact.sessionId || session.sessionId;
-        const ok = host.openResource ? host.openResource(sessionId, artifact.path) : false;
+        const ok = await host.openResource?.(sessionId, artifact.path);
         if (!ok) {
           pushToast("当前环境无法打开预览", "error");
           return;
         }
         onClose();
+      };
+
+      const artifactButton = (artifact) => h("button", {
+        key: artifact.id, type: "button", className: "sk-artifact", title: artifact.path || artifact.name,
+        disabled: artifact.missing || !artifact.path, onClick: () => openArtifact(artifact),
+      },
+      h(Icon, { name: "file", size: 14, className: "sk-artifact-icon" }),
+      h("span", { className: "sk-artifact-text" },
+        h("span", { className: "sk-artifact-name" }, artifact.name, artifact.missing ? " · 文件不可用" : ""),
+        artifact.path ? h("span", { className: "sk-artifact-path" }, artifact.path) : null));
+
+      const startContinue = (target, purpose) => {
+        setContinueTarget(target);
+        setContinuePurpose(purpose);
+        setContinueOpen(true);
       };
 
       const openTerminal = () => {
@@ -2502,7 +2874,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         }
         try {
           await command("task.delete", { id: task.id });
-          pushToast("任务已删除", "info");
+          pushToast("任务已移到回收站", "info");
           onClose();
           await onChanged();
         } catch (cause) {
@@ -2534,6 +2906,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       };
 
       const drawerMenuItems = [
+        { label: task.pinned ? "取消置顶" : "置顶任务", icon: "arrow", onClick: () => run("置顶", () => command("task.pin", { id: task.id, pinned: !task.pinned }), task.pinned ? "已取消置顶" : "已置顶") },
         { label: "编辑任务", icon: "edit", onClick: () => { resetDraft(); setEditing(true); } },
         { label: analyzeBusy ? "重新研判中…" : "重新研判", icon: "spark", onClick: analyzeNow },
         { label: locked.length ? "解锁字段" : "锁定字段", icon: locked.length ? "unlock" : "lock", onClick: toggleLock },
@@ -2543,7 +2916,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         { label: confirmDelete ? "确认删除任务" : "删除任务", icon: "trash", danger: true, keepOpen: true, onClick: removeTask },
       ];
       const footerMenuItems = [
-        { label: "新会话继续", icon: "spark", onClick: () => { setContinueTarget("newSession"); setContinueOpen(true); } },
+        { label: "新会话继续", icon: "spark", onClick: () => startContinue("newSession", "continue") },
         { label: "打开终端", icon: "tool", onClick: openTerminal },
         { label: "复制会话 ID", icon: "copy", onClick: copySessionId },
       ];
@@ -2622,7 +2995,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               h(
                 "div",
                 { className: "sk-drawer-sec-head" },
-                h("span", { className: "sk-drawer-sec-title" }, "状态"),
+                h("span", { className: "sk-drawer-sec-title" }, "任务概览"),
                 h("span", { className: "sk-grow" }),
                 h(
                   "button",
@@ -2648,6 +3021,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                     { className: "sk-edit-fields" },
                     h("div", { className: "sk-edit-row" }, h("span", { className: "sk-edit-label" }, "标题"), h("input", { className: "sk-input", "aria-label": "标题", value: draft.title, maxLength: TEXT_LIMITS.title, onChange: (event) => update({ title: event.target.value }) })),
                     h("div", { className: "sk-edit-row" }, h("span", { className: "sk-edit-label" }, "目标"), h("textarea", { className: "sk-textarea", "aria-label": "目标", value: draft.goal, maxLength: TEXT_LIMITS.goal, rows: 3, onChange: (event) => update({ goal: event.target.value }) })),
+                    h("label", { className: "sk-field" }, "验收条件",
+                      h("textarea", { className: "sk-textarea", value: draft.acceptanceCriteria, maxLength: TEXT_LIMITS.acceptanceCriteria,
+                        rows: 3, placeholder: "写下可检查的结果或验证步骤", onChange: (event) => update({ acceptanceCriteria: event.target.value }) })),
                     h(
                       "div",
                       { className: "sk-edit-row" },
@@ -2684,17 +3060,39 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                       h("span", { className: "sk-sep" }, "·"),
                       h("span", { className: cx("sk-summary-prio", task.priority === "P0" ? "is-p0" : task.priority === "P1" ? "is-p1" : "is-rest") }, task.priority || "P2"),
                       h("span", { className: "sk-sep" }, "·"),
-                      h("span", { className: "sk-muted" }, subtasks.length ? `${subtaskDone}/${subtasks.length} 子任务` : `进度 ${progress}%`),
-                      goal && goal.text ? h("span", { className: "sk-goal-text" }, goal.text) : null,
+                      h("span", { className: "sk-muted" }, taskProgressLabel(task)),
+                      task.completionBasis && task.status === "done" && subtasks.length ? h("span", { className: "sk-muted" }, COMPLETION_LABELS[task.completionBasis]) : null,
                     ),
+                    h("div", { className: "sk-task-overview" },
+                      h("div", { className: "sk-overview-item" }, h("h3", null, "目标"), h("p", null, goal?.text || "待补充")),
+                      h("div", { className: "sk-overview-item" }, h("h3", null, "验收条件"), h("p", null, task.acceptanceCriteria || "待补充")),
+                      pending.length ? renderSessionActions(pending, openSourceSession) :
+                        !task.writeOverlap && (signal || nextSteps[0]) ? h("div", { className: "sk-overview-item" },
+                          h("h3", null, signal?.label || "下一步"),
+                          signal?.taskId && tasks.some((item) => item.id === signal.taskId)
+                            ? h("div", null, h("button", { type: "button", className: "sk-text sk-link-text", onClick: () => onOpenTask(signal.taskId) }, signal.text))
+                            : h("p", null, signal?.text || nextSteps[0] || "查看任务详情"),
+                          signal?.sessionId ? h("div", null, h("button", { type: "button", className: "sk-text sk-link-text", onClick: () => openSourceSession(signal.sessionId) }, "打开失败会话")) : null) : null,
+                      task.writeOverlap ? h("div", { className: "sk-overview-item" },
+                        h("h3", null, "可能同时修改"), h("p", null, task.writeOverlap.path),
+                        renderSessionActions(task.writeOverlap.sessions.map((item) => ({
+                          ...item, label: `写入 ${relTime(item.at)}${item.seq ? ` · #${item.seq}` : ""}`,
+                        })), openSourceSession, "近期写入的会话")) : null,
+                      primaryArtifact ? h("div", { className: "sk-overview-item" },
+                        h("h3", null, primaryArtifact.kind === "deliverable" ? "主交付物" : "最近修改文件"), artifactButton(primaryArtifact),
+                        task.sessions?.some((item) => item.id === primaryArtifact.sessionId) ? h("span", { className: "sk-note-tiny" },
+                          `来源 · ${task.sessions.find((item) => item.id === primaryArtifact.sessionId).title || "关联会话"}`) : null) : null,
+                      canAccept ? h("div", { className: "sk-overview-actions" },
+                        h("button", { type: "button", className: "sk-btn", onClick: acceptTask, "aria-disabled": accepted || acceptBusy,
+                          "aria-busy": acceptBusy || undefined }, accepted ? "已人工验收" : acceptBusy ? "正在确认…" : "验收通过")) : null),
                     aiInfo
                       ? h(
-                          "div",
+                          "details",
                           { className: "sk-ai-review" },
                           h(
-                            "div",
+                            "summary",
                             { className: "sk-ai-review-head" },
-                            h(Icon, { name: "spark", size: 12 }),
+                            h(Icon, { name: "chevron", size: 12, className: "sk-ai-review-chevron" }),
                             h("span", { className: "sk-ai-review-title" }, analyzeBusy ? "重新研判中…" : aiInfo.engine === "llm" ? "AI 研判" : "规则推断"),
                             aiModelText
                               ? h("span", { className: "sk-ai-review-meta sk-ai-review-model", title: aiModelText }, aiModelText)
@@ -2703,21 +3101,12 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                             aiInfo.analyzedAt ? h("span", { className: "sk-ai-review-meta" }, relTime(aiInfo.analyzedAt)) : null,
                             aiStale ? h("span", { className: "sk-ai-review-stale" }, "可能已过期") : null,
                           ),
-                          aiInfo.reason
-                            ? h(
-                                React.Fragment,
-                                null,
-                                h("p", { ref: reasonRef, className: cx("sk-ai-review-reason", reasonExpanded && "is-open") }, aiInfo.reason),
-                                reasonOverflow || reasonExpanded
-                                  ? h("button", { type: "button", className: "sk-text", style: { alignSelf: "flex-start" }, onClick: () => setReasonExpanded((value) => !value) }, reasonExpanded ? "收起" : "展开理由")
-                                  : null,
-                              )
-                            : h("p", { className: "sk-ai-review-reason is-empty" }, "本次未给出研判理由"),
+                          h("p", { className: "sk-ai-review-reason is-open" }, aiInfo.reason || "本次未给出研判理由"),
                         )
                       : null,
                   ),
               staleNotice
-                ? h("div", { className: "sk-inline-note", role: "status", "aria-live": "polite" }, "后台已更新；保存将覆盖 AI 的新结果")
+                ? h("div", { className: "sk-inline-note", role: "status", "aria-live": "polite" }, "后台已更新，当前草稿已保留。", h("button", { type: "button", className: "sk-text", onClick: rebaseDraft }, "保留修改并同步"))
                 : null,
             ),
             h(
@@ -2754,6 +3143,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   )
                 : h("div", { className: "sk-note-tiny" }, "暂无关键事实"),
             ),
+            h(TaskIssues, { task, run, openSourceSession }),
             h(
               "div",
               { className: "sk-drawer-sec" },
@@ -2786,80 +3176,17 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   placeholder: "新增子任务…",
                   onChange: (event) => setNewSubtask(event.target.value),
                   onKeyDown: (event) => {
-                    if (event.key === "Enter") addSubtask();
+                    if (event.key === "Enter" && !event.isComposing && subtaskBusy !== "add") addSubtask();
                   },
                 }),
                 h("button", { type: "button", className: "sk-text", onClick: addSubtask, disabled: !newSubtask.trim() || subtaskBusy === "add" }, "添加"),
               ),
             ),
-            issues.length || nextSteps.length
-              ? h(
-                  "div",
-                  { className: "sk-drawer-sec" },
-                  h("div", { className: "sk-drawer-sec-head" }, h("span", { className: "sk-drawer-sec-title" }, "问题 / 下一步")),
-                  h(
-                    "div",
-                    { className: "sk-duo" },
-                    h(
-                      "div",
-                      { className: "sk-duo-col" },
-                      issues.length
-                        ? (issuesExpanded ? issues : issues.slice(0, 3)).map((issue, index) =>
-                            h(
-                              "div",
-                              {
-                                key: issue.id || index,
-                                className: cx("sk-duo-item", issue.severity === "high" ? "is-error" : issue.severity === "medium" ? "is-warn" : ""),
-                                title: issue.text,
-                              },
-                              h(Icon, { name: "alert", size: 11 }),
-                              h("span", null, issue.text),
-                            ),
-                          )
-                        : h("div", { className: "sk-note-tiny" }, "暂无"),
-                      issues.length > 3
-                        ? h(
-                            "button",
-                            {
-                              type: "button",
-                              className: "sk-text",
-                              style: { alignSelf: "flex-start", paddingTop: 2 },
-                              "aria-label": issuesExpanded ? "收起问题列表" : `展开全部 ${issues.length} 个问题`,
-                              onClick: () => setIssuesExpanded((value) => !value),
-                            },
-                            issuesExpanded ? "收起" : `展开全部 ${issues.length}`,
-                          )
-                        : null,
-                    ),
-                    h(
-                      "div",
-                      { className: "sk-duo-col" },
-                      nextSteps.length
-                        ? (nextStepsExpanded ? nextSteps : nextSteps.slice(0, 3)).map((step, index) =>
-                            h(
-                              "div",
-                              { key: index, className: "sk-duo-item", title: step },
-                              h(Icon, { name: "arrow", size: 11 }),
-                              h("span", null, step),
-                            ),
-                          )
-                        : h("div", { className: "sk-note-tiny" }, "暂无"),
-                      nextSteps.length > 3
-                        ? h(
-                            "button",
-                            {
-                              type: "button",
-                              className: "sk-text",
-                              style: { alignSelf: "flex-start", paddingTop: 2 },
-                              "aria-label": nextStepsExpanded ? "收起下一步列表" : `展开全部 ${nextSteps.length} 个下一步`,
-                              onClick: () => setNextStepsExpanded((value) => !value),
-                            },
-                            nextStepsExpanded ? "收起" : `展开全部 ${nextSteps.length}`,
-                          )
-                        : null,
-                    ),
-                  ),
-                )
+            nextSteps.length
+              ? h("details", { className: "sk-drawer-sec sk-relation-editor" },
+                  h("summary", null, `建议下一步 · ${nextSteps.length} 项`),
+                  h("ul", { className: "sk-overview-steps" },
+                    nextSteps.map((step, index) => h("li", { key: index }, step))))
               : null,
             h(
               "div",
@@ -2881,41 +3208,34 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               h(
                 "div",
                 { className: "sk-session-meta" },
-                session.isLive ? h("span", null, "进行中") : h("span", null, "已结束"),
+                h("span", null, session.isLive ? "会话运行中" : session.lastTurnEnd === "error" ? "会话出错" : session.lastTurnEnd === "interrupted" ? "会话中断" : session.sessionId ? "会话空闲" : "未关联"),
                 session.turnCount ? h("span", null, `第 ${session.turnCount} 轮`) : null,
                 session.todoTotal ? h("span", null, `待办 ${session.todoDone}/${session.todoTotal}`) : null,
                 goal && goal.text ? h("span", null, "目标：" + clip(goal.text, 48)) : null,
               ),
             ),
-            artifacts.length
+            h(TaskLinks, { task, tasks, host, run, onOpenTask, pushToast }),
+            otherArtifacts.length
               ? h(
-                  "div",
+                  "details",
                   { className: "sk-drawer-sec" },
-                  h("div", { className: "sk-drawer-sec-head" }, h("span", { className: "sk-drawer-sec-title" }, "产物"), h("span", { className: "sk-note-tiny" }, `${artifacts.length}`)),
-                  h(
-                    "div",
-                    { className: "sk-artifacts" },
-                    artifacts.map((artifact) =>
-                      h(
-                        "button",
-                        { key: artifact.id, type: "button", className: "sk-artifact", title: artifact.path || artifact.name, onClick: () => openArtifact(artifact) },
-                        h(Icon, { name: "file", size: 14, className: "sk-artifact-icon" }),
-                        h("span", { className: "sk-artifact-text" }, h("span", { className: "sk-artifact-name" }, artifact.name), artifact.path ? h("span", { className: "sk-artifact-path" }, artifact.path) : null),
-                      ),
-                    ),
-                  ),
+                  h("summary", { className: "sk-drawer-sec-title" }, `${primaryArtifact ? "其他文件" : "产物记录"} · ${otherArtifacts.length} 项`),
+                  h("div", { className: "sk-artifacts" }, otherArtifacts.map(artifactButton)),
                 )
               : null,
             evidence.length
               ? h(
                   "div",
                   { className: "sk-fold" },
-                  h("button", { type: "button", className: "sk-fold-head", onClick: () => setEvidenceOpen((value) => !value) }, h(Icon, { name: evidenceOpen ? "chevronDown" : "chevron", size: 12 }), "证据", h("span", { className: "sk-fold-count" }, `${evidence.length} 条`)),
+                  h("button", { type: "button", className: "sk-fold-head", "aria-expanded": evidenceOpen, onClick: () => setEvidenceOpen((value) => !value) }, h(Icon, { name: evidenceOpen ? "chevronDown" : "chevron", size: 12 }), "活动与证据", h("span", { className: "sk-fold-count" }, `${evidence.length} 条`)),
                   evidenceOpen
                     ? h(
                         "div",
                         { className: "sk-evidence" },
-                        evidence.map((item, index) => {
+                        evidenceSources.size > 1 ? h("select", { className: "sk-select", "aria-label": "按来源会话筛选证据", value: evidenceScope, onChange: (event) => setEvidenceSession(event.target.value) },
+                          h("option", { value: "" }, "全部来源"),
+                          [...evidenceSources].map(([id, title]) => h("option", { key: id, value: id }, title))) : null,
+                        visibleEvidence.map((item, index) => {
                           const key = item.id || String(index);
                           const meta = KIND_META[item.kind] || KIND_META.assistant;
                           const text = item.quote || item.text || "";
@@ -2933,6 +3253,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                                 h("span", { className: "kind" }, meta.label),
                                 item.time ? h("span", null, shortTime(item.time)) : null,
                                 seqOf(item.seq) ? h("span", null, "#" + seqOf(item.seq)) : null,
+                                item.sessionId ? h("button", { className: "sk-text", type: "button", onClick: () => openSourceSession(item.sessionId) }, "打开来源会话") : null,
                               ),
                               h("p", { className: cx("sk-ev-quote", open && "open") }, text),
                               text.length > 140 ? h("button", { type: "button", className: "sk-ev-more", onClick: () => setExpandedEvidence((value) => ({ ...value, [key]: !open })) }, open ? "收起" : "展开全文") : null,
@@ -2967,7 +3288,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               : h(
                   React.Fragment,
                   null,
-                  h("button", { type: "button", className: "sk-btn primary", onClick: () => { setContinueTarget("session"); setContinueOpen(true); }, disabled: !session.sessionId }, "继续此任务"),
+                  h("button", { type: "button", className: "sk-btn primary", onClick: () => startContinue("session", ready ? "verify" : task.status === "blocked" ? "unblock" : "continue") }, ready ? "验收产出" : "继续此任务"),
                   h("button", { type: "button", className: "sk-btn ghost", onClick: openSession, disabled: !session.sessionId }, "打开会话"),
                   h("span", { className: "sk-grow" }),
                   h(
@@ -2993,7 +3314,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             ? h(ContinueTaskModal, {
                 task,
                 initialTarget: continueTarget,
+                initialPurpose: continuePurpose,
+                initialSessionId: continuePurpose === "verify" ? primaryArtifact?.sessionId : undefined,
                 ctxProps,
+                workspaces,
                 pushToast,
                 onDone: onClose,
                 onClose: () => setContinueOpen(false),
@@ -3004,9 +3328,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
     }
     /* ============================== overlays ============================== */
 
-    function NewTaskModal({ defaultStatus, workspaces, onClose, onCreate, pushToast }) {
+    function NewTaskModal({ defaultStatus, workspaces, sessionId, onClose, onCreate, pushToast }) {
       const [title, setTitle] = React.useState("");
       const [goal, setGoal] = React.useState("");
+      const [acceptanceCriteria, setAcceptanceCriteria] = React.useState("");
       const [status, setStatus] = React.useState(defaultStatus || "backlog");
       const [priority, setPriority] = React.useState("P2");
       const [workspaceId, setWorkspaceId] = React.useState("");
@@ -3020,7 +3345,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         if (!title.trim()) return;
         setSaving(true);
         try {
-          await command("task.create", { title: title.trim(), goal: goal.trim(), status, priority, workspaceId: workspaceId || undefined });
+          await command("task.create", { title: title.trim(), goal: goal.trim(), acceptanceCriteria: acceptanceCriteria.trim(), status, priority, workspaceId: workspaceId || undefined, sessionId: sessionId || undefined });
           pushToast("任务已创建", "info");
           await onCreate();
         } catch (cause) {
@@ -3051,14 +3376,17 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
               "div",
               { className: "sk-field" },
               h("label", { htmlFor: "sk-newtask-title-input" }, "标题"),
-              h("input", { ref: inputRef, id: "sk-newtask-title-input", className: "sk-input", value: title, maxLength: TEXT_LIMITS.title, placeholder: "要做什么？", onChange: (event) => setTitle(event.target.value), onKeyDown: (event) => event.key === "Enter" && create() }),
+              h("input", { ref: inputRef, id: "sk-newtask-title-input", className: "sk-input", value: title, maxLength: TEXT_LIMITS.title, placeholder: "要做什么？", onChange: (event) => setTitle(event.target.value), onKeyDown: (event) => event.key === "Enter" && !event.isComposing && !saving && create() }),
             ),
             h(
               "div",
               { className: "sk-field" },
               h("label", { htmlFor: "sk-newtask-goal-input" }, "目标 / 说明（可选）"),
-              h("textarea", { id: "sk-newtask-goal-input", className: "sk-textarea", value: goal, maxLength: TEXT_LIMITS.goal, rows: 2, placeholder: "一句话说明完成标准", onChange: (event) => setGoal(event.target.value) }),
+              h("textarea", { id: "sk-newtask-goal-input", className: "sk-textarea", value: goal, maxLength: TEXT_LIMITS.goal, rows: 2, placeholder: "这项任务要实现什么？", onChange: (event) => setGoal(event.target.value) }),
             ),
+            h("label", { className: "sk-field" }, "验收条件（可选）",
+              h("textarea", { className: "sk-textarea", value: acceptanceCriteria, maxLength: TEXT_LIMITS.acceptanceCriteria, rows: 2,
+                placeholder: "写下可检查的结果或验证步骤", onChange: (event) => setAcceptanceCriteria(event.target.value) })),
             h(
               "div",
               { className: "sk-field" },
@@ -3137,7 +3465,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const effectiveProvider = current ? current.provider : data && data.default ? data.default.provider : "";
       const thirdParty = isThirdPartyProvider(effectiveProvider);
       const guideText = thirdParty
-        ? `AI 研判会把会话压缩摘要发送给「${providerLabel(effectiveProvider)}」模型服务商；第三方模型与 API Key 在「DSH 设置 → 模型」中配置，看板只读取、不保存凭证。`
+        ? `AI 请求会发给「${providerLabel(effectiveProvider)}」模型服务商。模型与凭证在「DSH 设置 → 模型」中管理。`
         : "第三方模型与 API Key 在「DSH 设置 → 模型」中配置；看板只读取已配置的模型，不保存凭证。";
 
       const options = [h("option", { key: "follow", value: "" }, "跟随 DSH 默认")];
@@ -3505,7 +3833,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             h(
               "p",
               { className: "sub" },
-              "数据只存在本机 ~/.dsh/storages/super-kanban/；模型与凭证由 DSH 管理。AI 研判只发送压缩后的会话摘要（不发送文件内容与凭证）；若选择第三方模型，摘要会发送给你配置的模型服务商。",
+              "看板数据保存在本机，模型和凭证由 DSH 管理。AI 研判发送压缩摘要及少量相关任务信息。点击「AI 润色」时会发送当前草稿。",
             ),
           ),
           h(
@@ -3523,9 +3851,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
     const FILTERS_KEY = "dsh-super-kanban:filters";
     const EMPTY_FILTERS = { workspace: "", priority: "", source: "", tag: "", query: "", showArchived: false };
 
-    function readFilters() {
+    function readFilters(surface) {
       try {
-        const raw = localStorage.getItem(FILTERS_KEY);
+        const raw = localStorage.getItem(surface === "side" ? FILTERS_KEY + ":side" : FILTERS_KEY);
         if (!raw) return { ...EMPTY_FILTERS };
         const parsed = JSON.parse(raw);
         return {
@@ -3541,9 +3869,9 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       }
     }
 
-    function writeFilters(filters) {
+    function writeFilters(filters, surface) {
       try {
-        localStorage.setItem(FILTERS_KEY, JSON.stringify(filters));
+        localStorage.setItem(surface === "side" ? FILTERS_KEY + ":side" : FILTERS_KEY, JSON.stringify(filters));
       } catch {
         /* storage unavailable */
       }
@@ -3594,18 +3922,206 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       );
     }
 
+    function taskHierarchy(tasks) {
+      const present = new Set(tasks.map((task) => task.id));
+      const children = new Map();
+      const roots = [];
+      for (const task of tasks) {
+        const parentId = task.relations?.find((link) => link.type === "parent")?.taskId;
+        if (present.has(parentId)) {
+          if (!children.has(parentId)) children.set(parentId, []);
+          children.get(parentId).push(task);
+        } else {
+          roots.push(task);
+        }
+      }
+      const groups = new Map();
+      const seen = new Set();
+      for (const root of [...roots, ...tasks]) {
+        if (seen.has(root.id)) continue;
+        const workspaceId = root.workspaceId || "";
+        if (!groups.has(workspaceId)) groups.set(workspaceId, { title: root.workspaceTitle || "未分组", rows: [] });
+        const stack = [[root, 0]];
+        while (stack.length) {
+          const [task, depth] = stack.pop();
+          if (seen.has(task.id)) continue;
+          seen.add(task.id);
+          groups.get(workspaceId).rows.push({ task, depth });
+          for (const child of (children.get(task.id) || []).slice().reverse()) stack.push([child, depth + 1]);
+        }
+      }
+      return groups;
+    }
+
+    function TaskCollection({ mode, tasks, signals, onOpen, openSession, reload, pushToast, emptyText, onClear, clearLabel }) {
+      const [checked, setChecked] = React.useState([]);
+      const [busy, setBusy] = React.useState(false);
+      const [priority, setPriority] = React.useState("");
+      const sorted = React.useMemo(() => {
+        if (mode !== "attention") return tasks.slice().sort(compareTasks);
+        return tasks.filter((task) => signals.has(task.id))
+          .sort((a, b) => signals.get(a.id).rank - signals.get(b.id).rank || compareTasks(a, b));
+      }, [tasks, mode, signals]);
+      const active = sorted.filter((task) => checked.includes(task.id)).map((task) => task.id);
+      const batch = async (patch) => {
+        setBusy(true);
+        try {
+          const result = await command("task.batch", { ids: active, ...patch });
+          pushToast(`已更新 ${result.data.count} 项任务`, "info");
+          setChecked([]);
+          setPriority("");
+          await reload(true);
+        } catch (cause) {
+          pushToast(cause.message, "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const row = (task, depth = 0) => {
+        const signal = signals.get(task.id);
+        const pending = mode === "attention" ? task.pendingSessions || [] : [];
+        const summary = pending.length ? null : signal
+          ? [signal.label, signal.text].filter(Boolean).join(" · ")
+          : task.nextSteps?.[0] || goalInfoOf(task)?.text;
+        return h("li", { key: task.id, className: cx("sk-task-row", pending.length > 0 && "has-session-actions"), style: { "--sk-depth": Math.min(depth, 5) } },
+          mode === "list" ? h("input", {
+            type: "checkbox", "aria-label": `选择 ${task.title}`, checked: checked.includes(task.id),
+            disabled: busy || (active.length >= 200 && !checked.includes(task.id)),
+            onChange: (event) => setChecked(event.target.checked ? [...checked, task.id] : checked.filter((id) => id !== task.id)),
+          }) : null,
+          h("button", { className: "sk-task-row-main", type: "button", "aria-haspopup": "dialog", onClick: () => onOpen(task.id) },
+            h("span", { className: "sk-task-row-title" }, h("span", { className: cx("sk-dot", "is-" + statusOf(task)) }), task.title),
+            summary ? h("span", { className: "sk-task-row-summary" }, summary) : null,
+            h("span", { className: "sk-task-row-meta" },
+              [mode === "hierarchy" ? "" : task.workspaceTitle, task.archived ? "已归档" : STATUS_META[statusOf(task)].label,
+                taskRunningLabel(task), taskProgressLabel(task), task.priority,
+                artifactsOf(task).length ? `${artifactsOf(task).length} 项产出` : ""].filter(Boolean).join(" · "))),
+          renderSessionActions(pending, openSession));
+      };
+
+      if (!sorted.length) return h("div", { className: "sk-empty-v3" },
+        mode === "attention" && tasks.length ? "当前没有待处理事项" : emptyText,
+        mode !== "attention" || !tasks.length ? h("button", { className: "sk-text", type: "button", onClick: onClear }, clearLabel) : null);
+      if (mode === "hierarchy") {
+        return h("div", { className: "sk-collection" }, [...taskHierarchy(sorted)].map(([workspaceId, { title, rows }]) =>
+          h("details", { key: workspaceId, className: "sk-workspace-group", open: true },
+            h("summary", null, title, h("span", null, rows.length)),
+            h("ul", { className: "sk-task-list" }, rows.map(({ task, depth }) => row(task, depth))))));
+      }
+      return h("div", { className: "sk-collection" },
+        mode === "list" ? h("div", { className: "sk-batchbar" },
+          h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => setChecked(active.length ? [] : sorted.slice(0, 200).map((task) => task.id)) },
+            active.length ? `取消选择 ${active.length} 项` : sorted.length > 200 ? "选择前 200 项" : "全选"),
+          active.length ? h(React.Fragment, null,
+            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => batch({ archived: true }) }, "归档"),
+            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => batch({ archived: false }) }, "恢复"),
+            h("select", { className: "sk-select", "aria-label": "批量优先级", value: priority, onChange: (event) => setPriority(event.target.value) },
+              h("option", { value: "" }, "优先级"), PRIORITY_ORDER.map((value) => h("option", { key: value }, value))),
+            h("button", { className: "sk-btn", type: "button", disabled: busy || !priority, onClick: () => batch({ priority }) }, "应用")) : null) : null,
+        h("ul", { className: "sk-task-list" }, sorted.map((task) => row(task))));
+    }
+
+    function ArtifactsView({ tasks, host, pushToast, onOpen }) {
+      const items = tasks.flatMap((task) => artifactsOf(task).map((artifact) => ({ task, artifact })))
+        .sort((a, b) => Number(b.artifact.kind === "deliverable") - Number(a.artifact.kind === "deliverable") || b.artifact.time - a.artifact.time);
+      if (!items.length) return h("div", { className: "sk-empty-v3" }, "当前范围没有产出");
+      return h("div", { className: "sk-collection" }, h("ul", { className: "sk-task-list" }, items.map(({ task, artifact }) =>
+        h("li", { className: "sk-task-row", key: `${task.id}:${artifact.id}` },
+          h(Icon, { name: "file", size: 16 }),
+          h("div", { className: "sk-task-row-main" },
+            h("span", { className: "sk-task-row-title" }, artifact.name),
+            h("span", { className: "sk-task-row-meta" },
+              [artifact.missing ? "文件不可用" : artifact.kind === "deliverable" ? "交付物" : artifact.kind === "modified" ? "修改文件" : "文件",
+                artifact.path, artifact.time ? relTime(artifact.time) : ""].filter(Boolean).join(" · "))),
+          h("button", { className: "sk-btn", type: "button", onClick: () => onOpen(task.id) }, "来源任务"),
+          h("button", { className: "sk-btn", type: "button", disabled: artifact.missing || !artifact.path, onClick: async () => {
+            if (!(await host.openResource?.(artifact.sessionId || task.primarySessionId, artifact.path))) pushToast("当前无法打开文件预览", "error");
+          } }, "预览")))));
+    }
+
+    function MaintenanceView({ data, reload, pushToast, startScan }) {
+      const maintenance = data.maintenance || {};
+      const [busy, setBusy] = React.useState(false);
+      const [backup, setBackup] = React.useState(null);
+      const [preview, setPreview] = React.useState(null);
+      const run = async (action, message) => {
+        setBusy(true);
+        try {
+          await action();
+          if (message) pushToast(message, "info");
+          await reload(true);
+        } catch (cause) {
+          pushToast(cause.message, "error");
+        } finally {
+          setBusy(false);
+        }
+      };
+      const previewBackup = async (file) => {
+        setBackup(null);
+        setPreview(null);
+        if (!file) return;
+        await run(async () => {
+          if (file.size > 15 * 1024 * 1024) throw new Error("备份文件超过 15 MiB，请先缩小备份范围");
+          const parsed = JSON.parse(await file.text());
+          const result = await command("backup.preview", { backup: parsed });
+          setBackup(parsed);
+          setPreview({ ...result.data, filename: file.name });
+        });
+      };
+
+      return h("div", { className: "sk-collection sk-maintenance" },
+        h("section", { className: "sk-management-card" },
+          h("h3", null, "扫描与存储"),
+          h("p", null, data.scan?.message || "尚未扫描", maintenance.parseFailures ? ` · ${maintenance.parseFailures} 个会话读取失败` : ""),
+          h("p", null, data.storage?.writable === false ? "存储暂不可写" : "存储可用",
+            data.storage?.savedAt ? ` · 最近保存 ${relTimeValue(data.storage.savedAt)}` : ""),
+          h("div", { className: "sk-batchbar" },
+            h("button", { className: "sk-btn", type: "button", onClick: () => startScan("full"), disabled: data.scan?.state === "running" }, "全量重扫"),
+            data.storage?.writable === false ? h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => run(() => command("storage.retry"), "看板已保存") }, "重试保存") : null,
+            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => run(downloadExport, "已导出看板备份") }, "导出备份")),
+          h("label", { className: "sk-field" }, "选择备份以预览",
+            h("input", { type: "file", accept: ".json,application/json", disabled: busy,
+              onChange: (event) => { const file = event.target.files?.[0]; event.target.value = ""; previewBackup(file); } })),
+          preview ? h("div", { className: "sk-board-notice" },
+            h("span", null, `${preview.filename} · 将以 ${preview.incoming} 项替换当前 ${preview.current} 项`),
+            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => run(async () => {
+              await command("backup.restore", { backup, expectedSavedAt: preview.expectedSavedAt, backupHash: preview.backupHash });
+              setBackup(null);
+              setPreview(null);
+            }, "备份已恢复，已保留恢复前的快照") }, "确认恢复"),
+            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => { setBackup(null); setPreview(null); } }, "取消")) : null),
+        h("section", { className: "sk-management-card" },
+          h("h3", null, "回收站与合并记录"),
+          (maintenance.recovery || []).length ? maintenance.recovery.slice().reverse().map((entry) =>
+            h("div", { className: "sk-management-row", key: entry.id },
+              h("span", null, entry.title),
+              h("button", { type: "button", className: "sk-btn", disabled: busy,
+                onClick: () => run(() => command("task.restore", { id: entry.id }), "任务已恢复"),
+              }, entry.kind === "merge" ? "撤销合并" : "恢复"))) : h("p", null, "暂无可恢复任务")),
+        h("section", { className: "sk-management-card" },
+          h("h3", null, "忽略的会话"),
+          (maintenance.ignoredSessions || []).length ? maintenance.ignoredSessions.map((entry) =>
+            h("div", { className: "sk-management-row", key: entry.id },
+              h("span", null, entry.title),
+              h("button", { className: "sk-btn", type: "button", disabled: busy,
+                onClick: () => run(() => command("session.unignore", { sessionId: entry.id }), "已恢复扫描"),
+              }, "恢复扫描"))) : h("p", null, "暂无忽略会话")));
+    }
+
     function BoardPage(props) {
       const ctxProps = props || {};
       const surface = ctxProps.surface === "side" ? "side" : "page";
       const host = ctxProps.host || {};
       const [prefs, setPrefs] = React.useState(readPrefs);
       const rootRef = React.useRef(null);
+      const observerRef = React.useRef(null);
       const [rootWidth, setRootWidth] = React.useState(0);
       const [sideStatus, setSideStatus] = React.useState("in_progress");
 
-      // 双形态三档布局：以根容器自身宽度为准（右侧栏可被拖宽 / 全屏）。
-      // 量当前挂载的根节点宽度（loading→正文会换节点，因此用 ref + 低频轮询，避免错过重挂载）。
+      // Measure the pane itself, including sidebar drags that do not resize the window.
       React.useEffect(() => {
+        if (typeof ResizeObserver === "function") return undefined;
         const measure = () => {
           const node = rootRef.current;
           if (!node) return;
@@ -3613,26 +4129,43 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           setRootWidth((current) => (current === width ? current : width));
         };
         measure();
-        const timer = setInterval(measure, 300);
         window.addEventListener("resize", measure);
         return () => {
-          clearInterval(timer);
           window.removeEventListener("resize", measure);
         };
       }, []);
 
       const attachRoot = React.useCallback((node) => {
+        observerRef.current?.disconnect();
+        observerRef.current = null;
         rootRef.current = node;
-        if (node) setRootWidth(node.clientWidth || 0);
+        if (!node) return;
+        const measure = () => setRootWidth(node.clientWidth || 0);
+        measure();
+        if (typeof ResizeObserver === "function") {
+          observerRef.current = new ResizeObserver(measure);
+          observerRef.current.observe(node);
+        }
       }, []);
 
-      const tier = surface === "side" ? (rootWidth >= 980 ? "wide" : rootWidth >= 620 ? "medium" : "narrow") : "wide";
-      const isNarrow = surface === "side" && tier === "narrow";
+      const tier = surface === "side" ? (rootWidth >= 980 ? "wide" : rootWidth >= 620 ? "medium" : "narrow")
+        : rootWidth > 0 && rootWidth < 620 ? "narrow" : "wide";
+      const isNarrow = tier === "narrow";
       const pageClass = cx("sk-page", surface === "side" && "is-side", "sk-tier-" + tier);
 
       const [toasts, pushToast] = useToasts();
       const { data, error, loading, reload, setData } = useBoardData();
-      const [filters, setFilters] = React.useState(readFilters);
+      const sessionId = surface === "side" ? ctxProps.sessionId : null;
+      const [currentOnly, setCurrentOnly] = React.useState(true);
+      const [mode, setMode] = React.useState(() => {
+        try {
+          const saved = localStorage.getItem(`dsh-super-kanban:view:${surface}`);
+          if (Object.hasOwn(VIEW_MODES, saved)) return saved;
+        } catch { /* optional preference */ }
+        return surface === "side" ? "list" : "board";
+      });
+      const [filters, setFilters] = React.useState(() => readFilters(surface));
+      const [, setHandoffTick] = React.useState(0);
       const searchRef = React.useRef(null);
       const [drawerId, setDrawerId] = React.useState(null);
       const [newTaskStatus, setNewTaskStatus] = React.useState(null);
@@ -3642,6 +4175,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const [nowTick, setNowTick] = React.useState(0);
       const [filterOpen, setFilterOpen] = React.useState(false);
       const [moreOpen, setMoreOpen] = React.useState(false);
+
+      React.useEffect(() => {
+        try { localStorage.setItem(`dsh-super-kanban:view:${surface}`, mode); } catch { /* optional preference */ }
+      }, [mode, surface]);
 
       React.useEffect(() => {
         const timer = setInterval(() => setNowTick((value) => value + 1), 30_000);
@@ -3662,7 +4199,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             else if (filterOpen) setFilterOpen(false);
             return;
           }
-          if (typing || hasOpenDialog()) return;
+          if (typing || event.isComposing || hasOpenDialog()) return;
+          const root = rootRef.current;
+          const activeSurface = target?.closest?.(".sk-page");
+          if (!root || (activeSurface && activeSurface !== root) || (!activeSurface && surface === "side")) return;
           if (event.key === "/") {
             event.preventDefault();
             if (searchRef.current) searchRef.current.focus();
@@ -3673,11 +4213,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         };
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
-      }, [settingsOpen, newTaskStatus, drawerId, moreOpen, filterOpen]);
+      }, [settingsOpen, newTaskStatus, drawerId, moreOpen, filterOpen, surface]);
 
       React.useEffect(() => {
-        writeFilters(filters);
-      }, [filters]);
+        writeFilters(filters, surface);
+      }, [filters, surface]);
       React.useEffect(() => {
         if (!filterOpen) return undefined;
         const onMouseDown = (event) => {
@@ -3688,7 +4228,28 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         return () => document.removeEventListener("mousedown", onMouseDown);
       }, [filterOpen]);
 
-      const tasks = (data && data.tasks) || [];
+      const tasks = React.useMemo(() => {
+        const list = data?.tasks || [];
+        const statuses = ctxProps.sessionStatuses;
+        const bySession = new Map();
+        if (typeof statuses?.get === "function" && data?.writeOverlaps?.length) {
+          const titles = new Map(list.flatMap((task) => (task.sessions || []).map((session) => [session.id, session.title])));
+          for (const group of data.writeOverlaps) {
+            const running = group.sessions.filter(({ id }) => {
+              const status = statuses.get(id);
+              return status?.running === true && !status.pendingInteraction;
+            });
+            if (running.length < 2) continue;
+            const overlap = { path: group.path, sessions: running.map((item) => ({ ...item, title: titles.get(item.id) || "来源会话" })) };
+            for (const { id } of running) if (!bySession.has(id)) bySession.set(id, overlap);
+          }
+        }
+        return list.map((task) => {
+          const projected = withSessionStatus(task, statuses);
+          const overlap = bySession.get(task.primarySessionId) || task.sessions?.map((session) => bySession.get(session.id)).find(Boolean);
+          return overlap && !task.archived ? { ...projected, writeOverlap: overlap } : projected;
+        });
+      }, [data?.tasks, data?.writeOverlaps, ctxProps.sessionStatuses]);
       const settings = (data && data.settings) || {};
       const scan = (data && data.scan) || { state: "idle" };
       const workspaces = (data && data.workspaces) || [];
@@ -3718,33 +4279,38 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       }, [data, workspaceFilterIds, tags, workspaces.length, tasks.length]);
 
       const visible = React.useMemo(() => {
-        const query = filters.query.trim().toLowerCase();
+        const terms = filters.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
         return tasks.filter((task) => {
           if (!filters.showArchived && task.archived) return false;
+          if (sessionId && currentOnly && task.primarySessionId !== sessionId && !task.sessions?.some((item) => item.id === sessionId)) return false;
           if (filters.workspace && task.workspaceId !== filters.workspace) return false;
           if (filters.priority && task.priority !== filters.priority) return false;
           if (filters.tag && !(task.tags || []).includes(filters.tag)) return false;
           if (filters.source === "ai" && task.origin === "manual") return false;
           if (filters.source === "manual" && task.origin !== "manual") return false;
-          if (query) {
+          if (terms.length) {
             // v2 的 goal 是对象，直接拼接会变成 "[object Object]"；搜索覆盖目标/关键事实/问题/下一步。
             const goal = goalInfoOf(task);
             const parts = [
               task.title,
               goal && goal.text,
+              task.acceptanceCriteria,
+              task.writeOverlap?.path,
               task.workspaceTitle,
               ...(task.tags || []),
               ...keyFactsOf(task).map((fact) => fact.text),
               ...(Array.isArray(task.issues) ? task.issues.map((issue) => issue && issue.text) : []),
               ...(Array.isArray(task.nextSteps) ? task.nextSteps : []),
-              ...(Array.isArray(task.sessions) ? task.sessions.map((session) => session && session.title) : []),
+              ...artifactsOf(task).flatMap((item) => [item.name, item.path]),
+              ...(Array.isArray(task.sessions) ? task.sessions.flatMap((session) => [session?.title, session?.id]) : []),
+              ...(Array.isArray(task.evidence) ? task.evidence.map((item) => item?.text) : []),
             ];
             const haystack = parts.filter(Boolean).join(" ").toLowerCase();
-            if (!haystack.includes(query)) return false;
+            if (!terms.every((term) => haystack.includes(term))) return false;
           }
           return true;
         });
-      }, [tasks, filters]);
+      }, [tasks, filters, sessionId, currentOnly]);
 
       const byStatus = React.useMemo(() => {
         const map = { backlog: [], in_progress: [], blocked: [], done: [] };
@@ -3756,7 +4322,34 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
         return map;
       }, [visible]);
 
-      const drawerTask = drawerId ? tasks.find((task) => task.id === drawerId) : null;
+      const taskIndex = React.useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+      const signals = React.useMemo(() => {
+        const result = new Map();
+        const now = Date.now();
+        for (const task of tasks) {
+          const signal = taskSignal(task, taskIndex, now);
+          if (signal) result.set(task.id, signal);
+        }
+        return result;
+      }, [tasks, taskIndex, nowTick]);
+      const attentionCount = visible.filter((task) => signals.has(task.id)).length;
+      const openAttentionSession = (id) => {
+        if (!host.openSession?.(id)) pushToast("无法打开来源会话", "error");
+      };
+      const drawerTask = drawerId ? taskIndex.get(drawerId) : null;
+      const liveHandoff = pendingHandoff?.expires > Date.now() ? pendingHandoff : null;
+      const attachHandoff = async () => {
+        if (!liveHandoff || !sessionId) return;
+        try {
+          await command("task.linkSession", { id: liveHandoff.id, sessionId, continuation: true });
+          pendingHandoff = null;
+          setHandoffTick((value) => value + 1);
+          pushToast("已关联续做会话", "info");
+          await reload(true);
+        } catch (cause) {
+          pushToast(cause.message, "error");
+        }
+      };
       // S9：任务被删除后 drawerId 残留在 state 里；清理掉，避免后续意外重开或状态陈旧。
       React.useEffect(() => {
         if (drawerId && !drawerTask) setDrawerId(null);
@@ -4187,15 +4780,41 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           ),
           h("span", { className: "sk-count" }, `显示 ${visible.length} / ${tasks.length}`),
         ),
-        visible.length === 0 && tasks.length > 0
+        h("div", { className: "sk-viewbar" },
+          h("div", { className: "sk-view-switch", role: "group", "aria-label": "任务视图" },
+            Object.entries(VIEW_MODES).map(([key, label]) => h("button", {
+              key, type: "button", "aria-pressed": mode === key, onClick: () => setMode(key),
+            }, label, key === "attention" && attentionCount > 0 ? h("span", { className: "sk-view-count" }, ` ${attentionCount}`) : null))),
+          sessionId ? h("button", { type: "button", className: "sk-btn", "aria-pressed": currentOnly,
+            onClick: () => setCurrentOnly((value) => !value),
+          }, currentOnly ? "当前会话" : "全部会话") : null),
+        data.storage?.writable === false
+          ? h("div", { className: "sk-board-notice", role: "alert" }, "看板存储暂不可写",
+              h("button", { type: "button", className: "sk-btn", onClick: () => setMode("maintenance") }, "查看维护"))
+          : null,
+        sessionId && liveHandoff?.targetId === sessionId
+          ? h("div", { className: "sk-board-notice" }, `继续任务 · ${liveHandoff.title}`,
+              h("button", { type: "button", className: "sk-btn", onClick: attachHandoff }, "关联当前会话"),
+              h("button", { type: "button", className: "sk-text", onClick: () => { pendingHandoff = null; setHandoffTick((value) => value + 1); } }, "关闭"))
+          : null,
+        mode === "maintenance"
+          ? h(MaintenanceView, { data, reload, pushToast, startScan })
+          : mode === "artifacts"
+            ? h(ArtifactsView, { tasks: visible, host, pushToast, onOpen: setDrawerId })
+            : mode !== "board"
+              ? h(TaskCollection, { key: mode, mode, tasks: visible, signals, onOpen: setDrawerId, openSession: openAttentionSession, reload, pushToast,
+                  emptyText: sessionId && currentOnly ? "当前会话还没有关联任务" : "没有匹配的任务",
+                  onClear: sessionId && currentOnly ? () => setCurrentOnly(false) : clearFilters,
+                  clearLabel: sessionId && currentOnly ? "查看全部会话" : "清空筛选" })
+        : visible.length === 0 && tasks.length > 0
           ? h(
               "div",
               { className: "sk-board-v3" },
               h(
                 "div",
                 { className: "sk-empty-v3" },
-                "没有匹配的任务",
-                h("button", { type: "button", className: "sk-text", onClick: clearFilters }, "清空筛选"),
+                sessionId && currentOnly ? "当前会话还没有关联任务" : "没有匹配的任务",
+                h("button", { type: "button", className: "sk-text", onClick: sessionId && currentOnly ? () => setCurrentOnly(false) : clearFilters }, sessionId && currentOnly ? "查看全部会话" : "清空筛选"),
               ),
             )
           : tasks.length === 0
@@ -4214,6 +4833,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   status: sideStatus,
                   setStatus: setSideStatus,
                   byStatus,
+                  signals,
                   onOpen: (id) => setDrawerId(id),
                   onAdd: (targetStatus) => setNewTaskStatus(targetStatus),
                   draggingId,
@@ -4228,6 +4848,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                       key: status,
                       status,
                       tasks: byStatus[status] || [],
+                      signals,
                       onOpen: (id) => setDrawerId(id),
                       onAdd: (targetStatus) => setNewTaskStatus(targetStatus),
                       onDropTask: (id, targetStatus) => moveTask(id, targetStatus),
@@ -4238,10 +4859,10 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
                   ),
                 ),
         drawerTask
-          ? h(TaskDrawer, { task: drawerTask, ctxProps, settings, onClose: () => setDrawerId(null), onChanged: () => reload(true), pushToast })
+          ? h(TaskDrawer, { key: drawerTask.id, task: drawerTask, signal: signals.get(drawerTask.id), tasks, workspaces, onOpenTask: setDrawerId, ctxProps, settings, onClose: () => setDrawerId(null), onChanged: () => reload(true), pushToast })
           : null,
         newTaskStatus !== null
-          ? h(NewTaskModal, { defaultStatus: newTaskStatus, workspaces, onClose: () => setNewTaskStatus(null), onCreate: async () => { setNewTaskStatus(null); await reload(true); }, pushToast })
+          ? h(NewTaskModal, { defaultStatus: newTaskStatus, workspaces, sessionId: currentOnly ? sessionId : null, onClose: () => setNewTaskStatus(null), onCreate: async () => { setNewTaskStatus(null); await reload(true); }, pushToast })
           : null,
         settingsOpen
           ? h(SettingsModal, {
@@ -4361,11 +4982,11 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           if (!ok) setTimeout(attempt, 280);
           return true;
         },
-        openSideTab() {
+        openSideTab(sessionId) {
           try {
             const sidebarRight = ctx.get("sidebarRight");
             if (sidebarRight && typeof sidebarRight.openTab === "function") {
-              sidebarRight.openTab(SIDE_KIND);
+              sidebarRight.openTab(SIDE_KIND, { params: { sessionId } });
               return true;
             }
           } catch {
@@ -4385,33 +5006,51 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
           }
           return false;
         },
-        startSession(workspaceId, prompt) {
-          try {
-            const ui = ctx.get("uiWorkspace");
-            if (ui && typeof ui.startSession === "function") {
-              ui.startSession(workspaceId, { prompt: String(prompt || "") });
-              return true;
-            }
-          } catch {
-            /* ui workspace unavailable */
-          }
-          return false;
+        async prepareSession(workspaceId, prompt) {
+          const ui = ctx.get("uiWorkspace");
+          const sessions = ctx.get("sessions");
+          const input = ctx.get("conversation")?.input;
+          if (!workspaceId || typeof ui?.openWorkspace !== "function" || typeof sessions?.binding !== "function" ||
+              typeof input?.requestDraftInitialization !== "function") return null;
+          let placement = null;
+          await ui.openWorkspace(workspaceId, (sessionId) => {
+            const binding = sessions.binding(sessionId);
+            if (!binding) throw new Error("新会话输入框尚未就绪");
+            const result = input.requestDraftInitialization(binding, { prompt, whenDraftExists: "keep" });
+            if (result === "blocked") throw new Error("新会话输入框暂不可写");
+            placement = { sessionId, result };
+          });
+          return placement;
         },
-        openResource(sessionId, path) {
+        async openResource(sessionId, path) {
           const sid = String(sessionId || "");
-          const relative = String(path || "").replace(/^\/+/, "");
-          if (!sid || !relative) return false;
-          const encodedPath = relative
+          const raw = String(path || "").replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+          if (!sid || !raw.replace(/^\/+/, "")) return false;
+          const encodedPath = raw
             .split("/")
-            .filter(Boolean)
-            .map((segment) => encodeURIComponent(segment))
+            .map((segment, index) => index === 0 && /^[a-z]:$/i.test(segment) ? segment : encodeURIComponent(segment))
             .join("/");
           const address = "dsh-resource://file/session/" + encodeURIComponent(sid) + "/" + encodedPath;
           try {
             const sidebarRight = ctx.get("sidebarRight");
-            if (sidebarRight && typeof sidebarRight.openResource === "function") {
-              sidebarRight.openResource(address);
-              return true;
+            if (typeof sidebarRight?.openResource !== "function") return false;
+            const tryOpen = () => {
+              try {
+                sidebarRight.openResource(address);
+                return true;
+              } catch (error) {
+                if (/no session surface is mounted/i.test(error?.message)) return false;
+                throw error;
+              }
+            };
+            if (tryOpen()) return true;
+            if (!hostApi.openSession(sid)) return false;
+            // The global panel owns no right Sidebar surface. Wait for DSH to mount the source Session.
+            for (let attempt = 0; attempt < 20; attempt++) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              const mountedId = sidebarRight.screen?.()?.sessionId;
+              if (mountedId && mountedId !== sid) return false;
+              if (tryOpen()) return true;
             }
           } catch {
             /* sidebar service unavailable */
@@ -4483,16 +5122,25 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
       const prefs = readPrefs();
 
       // S3：任何 render 异常都被错误边界接住，只坏插件面板。
-      const PageKanbanBody = (slotProps) =>
-        h(BoardErrorBoundary, null, h(BoardPage, { ...(slotProps || {}), ...baseProps, surface: "page" }));
-      const SideKanbanBody = (slotProps) =>
-        h(BoardErrorBoundary, null, h(BoardPage, { ...(slotProps || {}), ...baseProps, surface: "side" }));
+      const WithSessionStatus = (props) => {
+        const sessionStatuses = props.useSessionStatus((snapshot) => snapshot);
+        return h(BoardPage, { ...props, sessionStatuses });
+      };
+      const board = (props) => h(BoardErrorBoundary, null,
+        h(typeof props.useSessionStatus === "function" ? WithSessionStatus : BoardPage, props));
+
+      const PageKanbanBody = (slotProps) => board({ ...(slotProps || {}), ...baseProps, surface: "page" });
+      const SideKanbanBody = (slotProps) => {
+        const info = slotProps?.useTabInfo?.();
+        const sessionId = slotProps?.sessionId || info?.tab?.navigation?.params?.sessionId || null;
+        return board({ ...(slotProps || {}), ...baseProps, sessionId, surface: "side" });
+      };
 
       function KanbanSidebarIcon({ size }) {
         return h(Icon, { name: "board", size: size || 18 });
       }
 
-      const HeaderKanbanButton = () =>
+      const HeaderKanbanButton = ({ sessionId }) =>
         h(
           "button",
           {
@@ -4500,7 +5148,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
             className: "sk-header-btn",
             title: "打开任务看板",
             "aria-label": "打开任务看板",
-            onClick: () => hostApi.openSideTab(),
+            onClick: () => hostApi.openSideTab(sessionId),
           },
           h(Icon, { name: "board", size: 16 }),
         );

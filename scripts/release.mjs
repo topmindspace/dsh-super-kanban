@@ -12,7 +12,7 @@
  * `v*` tag with provenance. Zero third-party dependencies.
  *
  * Usage:
- *   node scripts/release.mjs [--dry-run] [--yes] [--root=<repo>]
+ *   node scripts/release.mjs [--dry-run] [--root=<repo>]
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -22,11 +22,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function parseArgs(argv) {
-  const options = { root: ROOT, dryRun: false, yes: false };
+  const options = { root: ROOT, dryRun: false };
   for (const arg of argv) {
     if (arg === "--help" || arg === "-h") return { help: true };
     if (arg === "--dry-run") options.dryRun = true;
-    else if (arg === "--yes" || arg === "-y") options.yes = true;
     else if (arg.startsWith("--root=")) options.root = path.resolve(arg.slice("--root=".length));
     else return { unknown: arg };
   }
@@ -72,7 +71,7 @@ function readVersion(root) {
 function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
-    console.log("Usage: node scripts/release.mjs [--dry-run] [--yes] [--root=<repo>]");
+    console.log("Usage: node scripts/release.mjs [--dry-run] [--root=<repo>]");
     return 0;
   }
   if (options.unknown) {
@@ -105,7 +104,7 @@ function main() {
       console.log(`  git commit -m "chore: refresh market index for v${version}"`);
     }
     console.log(`  git tag -a v${version} -m "v${version}"`);
-    console.log(`  git push origin main --tags`);
+    console.log(`  git push --atomic origin HEAD:refs/heads/main refs/tags/v${version}`);
     console.log("\nPushing the tag runs .github/workflows/release.yml: it re-runs the");
     console.log("checks, publishes to npm with provenance and creates the GitHub Release.");
     console.log("NPM_TOKEN must be configured as a repository secret.");

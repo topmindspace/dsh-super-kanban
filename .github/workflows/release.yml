@@ -4,9 +4,9 @@ name: Release
 # to npm with provenance and create the matching GitHub Release:
 #
 #   git tag -a vX.Y.Z -m "vX.Y.Z"
-#   git push origin main --tags
+#   git push --atomic origin HEAD:refs/heads/main refs/tags/vX.Y.Z
 #
-# Required repository secret: NPM_TOKEN (npm automation token with publish
+# Required repository secret: NPM_TOKEN (npm granular access token with publish
 # rights to the `dsh-super-kanban` package). Publishing fails with a clear
 # message when the secret is absent instead of silently skipping the release.
 
@@ -70,6 +70,12 @@ jobs:
             exit 1
           fi
           node scripts/build-market-index.mjs --check
+          pin="$(node -p 'require("./docs/index.json").plugins[0].versions[0].source.commit || ""')"
+          if [ -n "$pin" ]; then
+            git merge-base --is-ancestor "$pin" HEAD
+            pinned_version="$(git show "$pin:package.json" | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version')"
+            test "v$pinned_version" = "$GITHUB_REF_NAME"
+          fi
 
       - name: Package contents (npm pack --dry-run)
         run: npm pack --dry-run
@@ -93,20 +99,31 @@ jobs:
           node-version: "22.19"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Require NPM_TOKEN secret
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "${NODE_AUTH_TOKEN}" ]; then
-            echo "::error::NPM_TOKEN secret is missing. Add it under Settings -> Secrets and variables -> Actions (npm automation token with publish rights for dsh-super-kanban), then re-run this workflow."
-            exit 1
-          fi
-
       - name: Publish with provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          package="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
+          commit="$(git rev-parse HEAD)"
+          registry_error="$(mktemp)"
+          trap 'rm -f "$registry_error"' EXIT
+          if published="$(npm view "$package@$version" gitHead --json 2>"$registry_error")"; then
+            if [ "$published" != "\"$commit\"" ]; then
+              echo "::error::$package@$version already exists with an unverified commit. Check the registry before retrying."
+              exit 1
+            fi
+            echo "$package@$version already points at the release commit."
+            exit 0
+          fi
+          if ! grep -q 'E404' "$registry_error"; then
+            echo "::error::Could not check whether $package@$version is already published."
+            exit 1
+          fi
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN secret is missing. Configure a granular access token with publish rights, then re-run this workflow."
+            exit 1
+          fi
           if ! npm publish --provenance --access public; then
             echo "::error::npm publish failed for dsh-super-kanban@$version. Check that NPM_TOKEN still has publish rights, that the token is not expired, and that this version is not already published on npm."
             exit 1
@@ -116,9 +133,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if gh release view "$GITHUB_REF_NAME" --json url >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists."
+            exit 0
+          fi
+          notes="$(mktemp)"
+          trap 'rm -f "$notes"' EXIT
+          awk -v heading="## [${GITHUB_REF_NAME#v}]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > "$notes"
+          test -s "$notes"
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file "$notes" \
             --verify-tag
 
       # Keep the public Releases page short: only the three newest release
@@ -159,7 +188,14 @@ jobs:
           node-version: "22.19"
 
       - name: Regenerate the market index for the released commit
-        run: node scripts/build-market-index.mjs --source=git --commit="$GITHUB_SHA"
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$expected" != "$GITHUB_REF_NAME" ]; then
+            echo "main has advanced to $expected. Keeping its market index."
+            exit 0
+          fi
+          commit="$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")"
+          node scripts/build-market-index.mjs --source=git --commit="$commit"
 
       - name: Commit the index to main
         run: |
@@ -171,7 +207,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/index.json docs/icon.svg
           git commit -m "chore: update plugin market index for $GITHUB_REF_NAME"
-          # Rebase on the latest main in case another commit landed meanwhile;
-          # this job only touches docs/index.json and docs/icon.svg.
-          git pull --rebase origin main
           git push origin HEAD:main

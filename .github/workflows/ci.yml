@@ -100,6 +100,7 @@ jobs:
             "server/store.mjs",
             "server/auth.mjs",
             "server/http.mjs",
+            "server/task-relations.mjs",
             "server/titles.mjs",
           ];
           const missing = required.filter((entry) => !files.includes(entry));

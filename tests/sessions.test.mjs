@@ -776,7 +776,9 @@ test("extractArtifacts: dedupes, resolves paths, keeps deliverables first, filte
     artifacts.map((artifact) => artifact.path),
     ["docs/guide.md", "src/app.mjs"],
   );
-  assert.equal(artifacts[0].description, "指南");
+  assert.equal(artifacts[0].description, "重复", "the newest explicit delivery supplies the description");
+  assert.equal(artifacts[0].kind, "deliverable");
+  assert.equal(artifacts[1].kind, "modified");
   assert.equal(artifacts[0].sessionId, "sess-artifacts");
   assert.equal(artifacts[1].name, "app.mjs");
   assert.ok(artifacts.every((artifact) => artifact.id.startsWith("a_")));
@@ -938,4 +940,25 @@ test("isoDay: null for missing/out-of-range timestamps", () => {
   assert.equal(isoDay(Number.POSITIVE_INFINITY), null);
   assert.equal(isoDay(1e300), null);
   assert.equal(isoDay(T0), "2026-01-05");
+});
+
+test("a cached parse recomputes runtime when an unchanged session becomes idle", (t) => {
+  const home = tempDir(t);
+  const now = Date.now();
+  const { file, dir } = writeSessionAt(home, "demo", "sess-idle", framesOf([
+    evt("session", 1, now - 3000, { id: "sess-idle", cwd: home }),
+    evt("user/message", 2, now - 2000, { content: [{ type: "text", text: "Continue work" }] }),
+    evt("turn/start", 3, now - 1000, { turn: 1 }),
+  ]));
+  const stat = fs.statSync(file);
+  const source = createSessionSource({ dshHome: home });
+  const meta = { id: "sess-idle", dir, file, title: "Runtime fixture", sigKey: `${stat.size}:${stat.mtimeMs}` };
+  assert.equal(source.loadParsed(meta).isLive, true);
+  const clock = Date.now;
+  try {
+    Date.now = () => now + 31 * 60_000;
+    assert.equal(source.loadParsed(meta).isLive, false);
+  } finally {
+    Date.now = clock;
+  }
 });

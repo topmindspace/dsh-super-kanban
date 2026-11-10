@@ -20,6 +20,7 @@ PROFILE="${DSH_PROFILE:-desktop}"
 PROFILE_DIR="$DSH_HOME/profiles/$PROFILE"
 PKG="$PROFILE_DIR/package.json"
 BACKUP="$PROFILE_DIR/super-kanban-profile-backup.json"
+MODULE="$PROFILE_DIR/node_modules/dsh-super-kanban"
 YES=0
 [ "${1:-}" = "-y" ] || [ "${1:-}" = "--yes" ] && YES=1
 
@@ -36,6 +37,10 @@ if [ ! -f "$PKG" ]; then
   echo "ERROR: profile not found: $PKG (is DSH installed and has it been opened once?)" >&2
   exit 1
 fi
+if [ -e "$MODULE" ] && [ ! -L "$MODULE" ]; then
+  echo "ERROR: a package directory already exists; uninstall it from DSH before linking the source checkout." >&2
+  exit 1
+fi
 
 if [ "$YES" -ne 1 ]; then
   printf "Install the plugin into this profile? [y/N] "
@@ -45,11 +50,11 @@ fi
 
 # 1. Link the package where the profile resolves bundle dependencies.
 mkdir -p "$PROFILE_DIR/node_modules"
-ln -sfn "$PLUGIN_DIR" "$PROFILE_DIR/node_modules/dsh-super-kanban"
+ln -sfn "$PLUGIN_DIR" "$MODULE"
 
 # 2. Record the dependency + select the bundle in the profile manifest.
 python3 - "$PKG" "$BACKUP" "$PLUGIN_DIR" <<'PY'
-import json, os, sys, time
+import json, os, sys
 
 pkg_path, backup_path, plugin_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(pkg_path, encoding="utf-8") as fh:

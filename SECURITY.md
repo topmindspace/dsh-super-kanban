@@ -4,13 +4,11 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.5.x | ✅ (current release line) |
-| 0.4.x | 🟡 (previous line — best-effort fixes; upgrade recommended) |
-| < 0.4 | ❌ (no longer supported) |
+| 0.6.x | ✅ (current release line) |
+| 0.5.x | 🟡 (previous line, best-effort fixes) |
+| < 0.5 | ❌ (end of support) |
 
-Security fixes land on the current release line (`0.5.x`). The previous line
-(`0.4.x`) receives best-effort fixes only; upgrade to the latest `0.5.x`
-release (see [INSTALL.md](./docs/INSTALL.md)).
+Security fixes land on `0.6.x`. The `0.5.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
 
 ## Reporting a vulnerability
 
@@ -43,9 +41,7 @@ does not collect telemetry.
   project cache under `$DSH_HOME/storages/`.
 - Local host logs may contain session ids and error messages for
   troubleshooting, but never credentials, session digests or board task titles.
-- Session and board data never leave the machine, except for the compact
-  session digest sent through the DSH-configured model provider when the
-  optional LLM analyzer is enabled (see below).
+- Board files and raw session logs are stored locally. Optional AI requests go through the configured DSH provider.
 
 ### Network and credentials
 
@@ -65,11 +61,8 @@ does not collect telemetry.
 
 ### Where model requests go (data recipients)
 
-- The request body is built by the plugin: a system prompt plus a **compacted
-  session digest** (≤1.5KB per session: title, recent user request, recent
-  reply, todo/error/tool summaries and file paths) plus the selected
-  provider/model. No full transcripts, file contents, attachments, images or
-  tools are sent.
+- Analysis sends a system prompt, a **compacted session digest** (≤1.5KB per session) and up to three related task IDs, short titles and statuses. The digest can contain recent messages, todo and error summaries, and file paths.
+- Handoff generation is local. Choosing **AI 润色** sends the current draft of up to 3,000 characters to the configured model, including any criteria, paths and source references present in the draft.
 - The plugin does **not** pass a `sessionId` (which would let DSH's official
   routes attach their session-log payload), so no session log is uploaded to a
   model provider by the board.

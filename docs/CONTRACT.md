@@ -214,7 +214,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 `scan.message` 是**持久化的人类可读扫描结论**，客户端统计行直接展示（不再自行拼接、不做机器解析）。典型内容：
 
 - `扫描完成：28/28 个会话 · 本次无 AI 调用`（AI 开启但本次未调用；AI 关闭时只有前半段）；
-- `扫描完成：28/28 个会话 · AI 3 次/5120 tokens · 低价值跳过 2 · 合并重复卡 1`；
+- `扫描完成：28/28 个会话 · AI 3 次/5120 tokens · 低价值跳过 2`；
 - `扫描完成：41/41 个会话 · AI 40 次/72000 tokens · 剩余 18 个会话下次扫描继续`（单次预算或 10 分钟墙钟到点，未研判会话下次继续）；
 - `本次 AI 预算已用完（40 次）其余仅规则 · 剩余 18 个会话下次扫描继续`（固定档本次预算耗尽，每日额度仍有剩余）；
 - `今日 AI 预算已用完（150/150）· 剩余 18 个会话明日继续（本次其余仅规则）`；
@@ -288,13 +288,14 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 | `task.relink` | `{id, sessionIds: string[]}` | 手动改来源会话（**Host 接口已支持，当前 UI 未暴露**，保留给后续版本） |
 | `task.unlock` | `{id, fields?: string[]}` | 解锁字段，交还 AI 维护 |
 | `task.analyze` | `{id}` | 立即重跑研判：**只研判主来源会话**（`primarySessionId`，旧卡回退 `sessions[0]`）；一次最多 1 个预算单位；与扫描 / 其他 AI 命令互斥（见下）；AI 不可用/超预算自动降级规则 |
-| `task.continuePrompt` | `{id, target: "session"\|"newSession"}` | 生成「继续此任务」提示词（本地模板，0 token） |
+| `task.continuePrompt` | `{id, target: "session"\|"newSession", purpose?, sessionId?}` | 本地生成续做草稿，`sessionId` 可指定当前任务的任一关联会话 |
+| `task.accept` | `{id, expectedUpdatedAt?}` | 人工验收并锁定完成状态。归档任务须先恢复，过期修订返回 409 |
 | `task.polishPrompt` | `{id, prompt}` | AI 润色提示词（耗 1 个预算单位；与扫描 / 其他 AI 命令互斥，见下；不可用时原样返回） |
 | `task.importTodos` | `{id}` | 从来源会话导入待办为子任务 |
 | `task.toggleSubtask` | `{id, subtaskId, done}` | 勾选子任务 |
 | `task.addSubtask` | `{id, text}` | 新增子任务 |
 | `task.removeSubtask` | `{id, subtaskId}` | 删除子任务 |
-| `session.ignore` / `session.unignore` | `{sessionId}` | 忽略会话：不再自动建卡（**Host 接口已支持，当前 UI 未暴露**） |
+| `session.ignore` / `session.unignore` | `{sessionId}` | 跳过或恢复自动扫描，在会话关系与维护视图操作 |
 | `settings.update` | `{patch: {...settings}}` | 更新设置；`aiProvider/aiModel` 成对提交（半对归一并记一条 warn）、`aiBudgetMode` 非法值忽略；**纯预算 patch（键集合 ⊆ {`maxAiCallsPerScan`, `dailyAiCallLimit`}）且不带 `aiBudgetMode` 时，本次更新推断为 `fixed`**（见 §6） |
 | `scan.start` | `{mode: "incremental"\|"full"}` | 触发扫描（扫描运行中或显式 AI 任务进行中返回 `409 busy`，见下） |
 | `scan.cancel` | `{}` | 取消扫描 |
@@ -328,7 +329,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 
 ```jsonc
 { "prompt": "结构化的继续任务提示词", "target": "session", "sessionId": "session-...",
-  "workspaceId": "workspace-id", "workspaceTitle": "示例工作区", "isLive": false }
+  "workspaceId": "workspace-id", "workspaceTitle": "示例工作区", "isLive": false, "updatedAt": "ISO 8601" }
 ```
 
 ### GET `/session/:sessionId`
@@ -370,10 +371,31 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 
 > 浏览器半导出时通过 `fetch("/export")` 取回同一份 JSON，另存为 `super-kanban-YYYY-MM-DD.json`（ISO 日期，如 `super-kanban-2026-11-05.json`）；HTTP 头里的文件名只用于直接下载该路由的客户端。
 
+### 工作视图与维护接口
+
+`GET /state` 增加 `storage` 和 `maintenance`，分别提供写入健康状态、最近保存时间、会话读取失败数量、回收站与忽略清单。任务可携带 `attention`、`completionBasis`、`relations`、`resolvedIssues`、`pinned`。字段采用增量扩展，旧状态仍可读取。
+
+`acceptanceCriteria` 是用户填写的多行验收条件，上限 600 字。`task.create` 接受该字段，`task.update` 在 `patch` 中接受，空字符串清空。自动研判保留此字段。有验收条件的未完成任务在会话提供完成依据时标为 `attention: "acceptance"`。`task.accept` 写入 `completionBasis: "user"`，并保留子任务的人工勾选状态。显式合并保留双方验收条件，超出上限时返回错误，合并撤销恢复各自条件。
+
+`writeOverlaps` 是最近 15 分钟内同一 Git 工作树和文件的写入证据分组，每组形如 `{ path, sessions: [{ id, at, seq }] }`。Host 从当前未结束轮次的成功 `write`、`edit` 结果提取证据。客户端只对至少两个由 DSH 确认运行中且没有待交互请求的会话显示提示。记录使用工作树相对路径，并保留来源会话和结果序号。
+
+- `GET /sessions?q=关键词` 返回至多 50 个可关联的会话元数据，支持会话 ID、标题、工作区和父会话查询。
+- `GET /merge-candidates?id=任务ID` 返回同工作区相似卡片，只有用户执行 `task.merge` 才会改动任务。
+- `task.update` 接受可选的 `expectedUpdatedAt`。版本冲突返回 HTTP 409 / `revision-conflict`。
+- `task.linkSession` 接受 `{ id, sessionId, primary?, continuation?, remove? }`。续做会话被设为主会话，旧会话可继续补充产物与证据。
+- `task.relate` 接受 `{ id, taskId, type, remove? }`。类型为 `parent`、`depends_on`、`related`，父子与依赖关系分别检查循环。
+- `task.issue` 接受 `{ id, text, resolve? }`。手动记录的问题和已解决的同名问题在后台刷新后保留。
+- `task.batch` 接受 `{ ids, archived?, priority? }`，单次最多 200 项。 `task.pin` 接受 `{ id, pinned }`。
+- `task.merge` 接受 `{ id, sourceId }`。删除和合并记录可用 `task.restore` 恢复。合并后的目标被再次编辑时，接口返回冲突以保护新修改。
+- `backup.preview` 接受 `{ backup }`，返回当前和待恢复的任务数量、`expectedSavedAt` 与 `backupHash`。
+- `backup.restore` 接受 `{ backup, expectedSavedAt, backupHash }`。文件内容或看板版本变化时返回 409，恢复前先保留当前看板快照。浏览器支持最高 15 MiB 的备份文件，使用独立的 `POST /backup` 入口。
+- `storage.retry` 重试保存。用户写入失败返回 HTTP 503 / `storage-unavailable`，且内存回滚。
+
+手动子任务上限为 100 项，自动提取的摘要子任务最多 12 项。产物按交付类型和时间排序，任务可保留最多 24 项。
+
 ### GET `/events`（SSE，可选）
 
-Host 提供的 SSE 端点，供第三方集成 / 后续客户端使用；**当前浏览器半不使用它**——`client.js` 始终轮询
-`/state`（4 秒；扫描中约 1.2 秒；页面隐藏时停止），不创建 `EventSource`。
+客户端使用同源 `EventSource` 接收状态变化通知。通知会合并触发 `/state` 刷新。轮询仍用于断线恢复，页面隐藏时暂停刷新。
 
 ```
 event: scan
@@ -425,7 +447,7 @@ const binding = ctx.get("sessions").binding(sessionId);   // 可轮询最多 ~3s
 ctx.get("conversation").input.requestDraftInitialization(binding, {
   prompt, whenDraftExists: "replace",                    // 或 "keep"
 });                                                      // "applied" | "preserved" | "blocked"
-// 产物在 DSH 文档预览中打开
+// 产物在 DSH 文档预览中打开，先确保有已挂载的会话界面
 ctx.get("sidebarRight").openResource(
   `dsh-resource://file/session/${encodeURIComponent(sessionId)}/${path.split("/").map(encodeURIComponent).join("/")}`,
 );

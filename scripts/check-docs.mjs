@@ -51,6 +51,7 @@ const PUBLIC_DOCS = [
   "docs/DEVELOPMENT.md",
   "docs/INSTALL.md",
   "docs/MARKET.md",
+  "docs/ROADMAP.md",
   "docs/TROUBLESHOOTING.md",
   ".github/PULL_REQUEST_TEMPLATE.md",
 ];

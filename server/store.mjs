@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { normalizeRelations } from "./task-relations.mjs";
 
 export const STORE_VERSION = 2;
 
@@ -22,7 +23,8 @@ export const STORE_VERSION = 2;
 export const EVIDENCE_LIMIT = 8;
 export const KEYFACT_LIMIT = 6;
 export const SUBTASK_LIMIT = 12;
-export const ARTIFACT_LIMIT = 6;
+export const MANUAL_SUBTASK_LIMIT = 100;
+export const ARTIFACT_LIMIT = 24;
 export const HISTORY_LIMIT = 20;
 export const EVIDENCE_QUOTE_LIMIT = 160;
 export const KEYFACT_TEXT_LIMIT = 60;
@@ -33,12 +35,13 @@ export const KEYFACT_TEXT_LIMIT = 60;
  * `task.create`, `task.update` and `truncateTask` (used on load and save) all
  * read these constants, so a value can never be clipped differently depending
  * on which code path wrote it. The board UI must use the same maxima:
- *   title ≤80, goal ≤280, tags ≤4×12, subtasks ≤12×60,
+ *   title ≤80, goal ≤280, acceptance criteria ≤600, tags ≤4×12, subtasks ≤12×60,
  *   issues ≤5×160, nextSteps ≤5×160, milestones ≤20×120,
  *   keyFacts ≤6×60, evidence ≤8 (text ≤200, quote ≤160), artifact name ≤80.
  */
 export const TITLE_TEXT_LIMIT = 80;
 export const GOAL_TEXT_LIMIT = 280;
+export const ACCEPTANCE_TEXT_LIMIT = 600;
 export const TAG_LIMIT = 4;
 export const TAG_TEXT_LIMIT = 12;
 export const SUBTASK_TEXT_LIMIT = 60;
@@ -55,6 +58,7 @@ export const EVIDENCE_TEXT_LIMIT = 200;
 export const TEXT_LIMITS = Object.freeze({
   title: TITLE_TEXT_LIMIT,
   goal: GOAL_TEXT_LIMIT,
+  acceptanceCriteria: ACCEPTANCE_TEXT_LIMIT,
   tags: TAG_LIMIT,
   tagText: TAG_TEXT_LIMIT,
   subtasks: SUBTASK_LIMIT,
@@ -214,6 +218,7 @@ export function createEmptyState() {
     ignoredSessions: [],
     suppressedSessions: [], // sessions whose auto task was deleted by the user
     deletedLog: [], // last N deleted task tombstones (traceability)
+    recovery: [],
     workspaces: [],
     activity: [],
     scan: emptyScanState(),
@@ -276,6 +281,7 @@ export function normalizeIssueRecord(item) {
     seq: positiveSeqOrNull(item.seq),
   };
   if (typeof item.id === "string" && item.id) record.id = item.id;
+  if (item.source === "manual") record.source = "manual";
   return record;
 }
 
@@ -322,9 +328,11 @@ export function truncateTask(task) {
     task.keyFacts = [];
   }
   if (Array.isArray(task.subtasks)) {
-    task.subtasks = task.subtasks
-      .filter((item) => item && typeof item === "object")
-      .slice(0, SUBTASK_LIMIT)
+    const items = task.subtasks.filter((item) => item && typeof item === "object");
+    task.subtasks = [
+      ...items.filter((item) => item.source === "manual").slice(0, MANUAL_SUBTASK_LIMIT),
+      ...items.filter((item) => item.source !== "manual").slice(0, SUBTASK_LIMIT),
+    ]
       .map((item) => ({ ...item, text: clipText(item.text, SUBTASK_TEXT_LIMIT) }));
   } else {
     task.subtasks = [];
@@ -370,7 +378,10 @@ export function truncateTask(task) {
     task.milestones = [];
   }
   if (!Array.isArray(task.sessions)) task.sessions = [];
+  task.relations = normalizeRelations(task.relations, task.id);
+  task.resolvedIssues = Array.isArray(task.resolvedIssues) ? task.resolvedIssues.filter((item) => typeof item === "string").slice(-50) : [];
   if (typeof task.title === "string") task.title = clipText(task.title, TITLE_TEXT_LIMIT);
+  task.acceptanceCriteria = clipText(typeof task.acceptanceCriteria === "string" ? task.acceptanceCriteria.trim() : "", ACCEPTANCE_TEXT_LIMIT);
   if (task.goal && typeof task.goal === "object") {
     task.goal.text = clipText(task.goal.text, GOAL_TEXT_LIMIT);
     if (!["active", "done", "none"].includes(task.goal.status)) task.goal.status = task.goal.text ? "active" : "none";
@@ -675,20 +686,23 @@ export function createStore({ dshHome, logger } = {}) {
     if (Array.isArray(raw.ignoredSessions)) target.ignoredSessions = stringList(raw.ignoredSessions);
     if (Array.isArray(raw.suppressedSessions)) target.suppressedSessions = stringList(raw.suppressedSessions);
     if (Array.isArray(raw.deletedLog)) target.deletedLog = raw.deletedLog.filter(isRecord);
+    if (Array.isArray(raw.recovery)) target.recovery = raw.recovery.filter((entry) => isRecord(entry) && typeof entry.task?.id === "string").slice(-50);
     if (Array.isArray(raw.workspaces)) target.workspaces = raw.workspaces.filter(isRecord);
     if (Array.isArray(raw.activity)) target.activity = raw.activity.filter(isRecord);
     if (isRecord(raw.scan)) target.scan = { ...emptyScanState(), ...raw.scan };
+    if (typeof raw.savedAt === "string" && Number.isFinite(Date.parse(raw.savedAt))) target.savedAt = raw.savedAt;
     target.usage = rolloverUsage(raw.usage);
     for (const task of target.tasks) truncateTask(task);
   }
 
   function saveState(state) {
     state.version = STORE_VERSION;
-    state.savedAt = new Date().toISOString();
+    state.savedAt = new Date(Math.max(Date.now(), (Date.parse(state.savedAt) || 0) + 1)).toISOString();
     state.usage = rolloverUsage(state.usage);
     for (const task of state.tasks) truncateTask(task);
     // Tombstones and ignored lists stay bounded.
     if (state.deletedLog.length > 50) state.deletedLog = state.deletedLog.slice(-50);
+    state.recovery = (state.recovery || []).slice(-50);
     if (state.ignoredSessions.length > 500) state.ignoredSessions = state.ignoredSessions.slice(-500);
     if (state.suppressedSessions.length > 500) state.suppressedSessions = state.suppressedSessions.slice(-500);
     writeJson(stateFile, state);
@@ -700,6 +714,28 @@ export function createStore({ dshHome, logger } = {}) {
     writeJson(cacheFile, cache);
   }
 
+  function readBackup(raw) {
+    if (!isRecord(raw) || raw.version !== STORE_VERSION || !Array.isArray(raw.tasks) || !isRecord(raw.settings)) {
+      throw new TypeError("请选择当前看板导出的备份文件");
+    }
+    const ids = new Set();
+    for (const task of raw.tasks) {
+      if (!isRecord(task) || typeof task.id !== "string" || !task.id || ids.has(task.id) ||
+          typeof task.title !== "string" || !task.title.trim()) {
+        throw new TypeError("备份中有无效或重复的任务");
+      }
+      ids.add(task.id);
+    }
+    const restored = createEmptyState();
+    copyFields(restored, raw);
+    restored.scan = emptyScanState();
+    return restored;
+  }
+
+  function saveRestorePoint(state) {
+    writeJson(path.join(backupsDir, "before-restore.json"), { state });
+  }
+
   return {
     dir,
     stateFile,
@@ -708,6 +744,8 @@ export function createStore({ dshHome, logger } = {}) {
     load,
     saveState,
     saveCache,
+    readBackup,
+    saveRestorePoint,
     ensureDirs,
     backupCorrupt,
   };

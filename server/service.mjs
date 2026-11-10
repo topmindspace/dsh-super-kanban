@@ -16,16 +16,19 @@
  *   createKanbanService({ ctx }) -> { handle(req,res,{route,url,method}), start(), stop() }
  */
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { homedir } from "node:os";
 
-import { createSessionSource } from "./sessions.mjs";
-import { analyzeSessionRules, normalizeAnalysis, titleSimilarity } from "./analyzer-rules.mjs";
+import { createSessionSource, RECENT_WRITE_MS } from "./sessions.mjs";
+import { analyzeSessionRules, normalizeAnalysis } from "./analyzer-rules.mjs";
 import { createLlmAnalyzer } from "./analyzer-llm.mjs";
 import { llmOf } from "./native-llm.mjs";
 import { badRequest, classifyError, clipText, conflict, decodeId, isStringArray, json, notFound, readBody } from "./http.mjs";
 import { titleMergeScore } from "./titles.mjs";
+import { editRelation, issueKey } from "./task-relations.mjs";
 import {
+  ACCEPTANCE_TEXT_LIMIT,
   AI_CALLS_PER_SCAN_MAX,
   AI_CALLS_PER_SCAN_MIN,
   ARTIFACT_LIMIT,
@@ -35,9 +38,11 @@ import {
   emptyScanState,
   GOAL_TEXT_LIMIT,
   ISSUE_LIMIT,
+  ISSUE_TEXT_LIMIT,
   KEYFACT_LIMIT,
   KEYFACT_TEXT_LIMIT,
   MILESTONE_LIMIT,
+  MANUAL_SUBTASK_LIMIT,
   newManualTaskId,
   NEXTSTEP_LIMIT,
   NEXTSTEP_TEXT_LIMIT,
@@ -125,7 +130,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   const sseClients = new Set();
   let lastScanBroadcast = 0;
   let scanBroadcastTimer = null;
-  let suppressPersist = false;
+  let storageFailed = false;
   let scanDigestBytes = []; // digest byte sizes of the current scan (usage.lastScan.digestBytesAvg)
 
   /** Host loggers are external code: a broken logger must never break the board. */
@@ -373,7 +378,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   /** Compose the human-readable scan conclusion (the host owns scan.message). */
   function buildScanMessage({
     lowValueSkipped = 0,
-    mergedTasks = 0,
     aiRouteMessage = null,
     aiDeferredReason = null,
     aiBudget = 0,
@@ -402,7 +406,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     } else if (pending > 0) {
       parts.push(`剩余 ${pending} 个会话下次扫描继续`);
     }
-    if (mergedTasks > 0) parts.push(`合并重复卡 ${mergedTasks}`);
     if (aiFailureCount > 0) parts.push(`${aiFailureCount} 个会话研判失败，5 分钟后重试`);
     return parts.join(" · ");
   }
@@ -579,12 +582,48 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   /* ------------------------------ persistence ---------------------- */
 
   function persistState() {
-    if (suppressPersist) return;
     try {
       store.saveState(state);
+      storageFailed = false;
+      return true;
     } catch (error) {
-      logWarn(`[super-kanban] failed to save state: ${String(error?.message || error)}`);
+      storageFailed = true;
+      logWarn(`[super-kanban] state write failed (${error?.code || "unknown"})`);
+      return false;
     }
+  }
+
+  /** Synchronous commit boundary: publish changes only after the atomic write. */
+  function commitState(change, reason = "task") {
+    const previous = state;
+    state = structuredClone(previous);
+    try {
+      const result = change();
+      if (!persistState()) {
+        throw Object.assign(new Error("无法保存看板，请检查存储后重试"), { code: "storage-unavailable" });
+      }
+      emitChanged(reason, reason === "task" ? 1 : 0);
+      return result;
+    } catch (error) {
+      state = previous;
+      throw error;
+    }
+  }
+
+  function decodeBackup(payload) {
+    try {
+      return store.readBackup(payload.backup?.state);
+    } catch (error) {
+      throw badRequest(error.message);
+    }
+  }
+
+  function backupHash(payload) {
+    return createHash("sha256").update(JSON.stringify(payload.backup.state)).digest("hex");
+  }
+
+  function touchTask(task) {
+    task.updatedAt = new Date(Math.max(Date.now(), (Date.parse(task.updatedAt) || 0) + 1)).toISOString();
   }
 
   function persistCache() {
@@ -597,11 +636,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   /** Persist state at most every few seconds during a long scan. */
   function schedulePersist() {
-    if (saveTimer || suppressPersist || stopped) return;
+    if (saveTimer || stopped) return;
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      persistState();
-      persistCache();
+      if (persistState()) persistCache();
     }, 2000);
   }
 
@@ -689,11 +727,40 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     }));
   }
 
+  function fileWriteOverlaps() {
+    const now = Date.now();
+    const cutoff = now - RECENT_WRITE_MS;
+    const ids = new Set();
+    for (const task of state.tasks) {
+      if (task.archived) continue;
+      if (task.primarySessionId) ids.add(task.primarySessionId);
+      for (const session of task.sessions || []) if (session?.id) ids.add(session.id);
+    }
+    const groups = new Map();
+    for (const id of ids) {
+      const meta = cache.sessions[id]?.meta;
+      if (meta?.parseError || !meta?.hasOpenTurn || !Array.isArray(meta.recentWrites)) continue;
+      for (const write of meta.recentWrites) {
+        if (!write?.key || !write.path || !Number.isFinite(write.at) || write.at < cutoff || write.at > now) continue;
+        if (!groups.has(write.key)) groups.set(write.key, { path: write.path, sessions: [] });
+        groups.get(write.key).sessions.push({ id, at: write.at, seq: write.seq });
+      }
+    }
+    return [...groups.values()].filter((group) => group.sessions.length > 1).slice(0, 100);
+  }
+
   function buildStatePayload() {
     return {
       ok: true,
       generatedAt: new Date().toISOString(),
       tasks: state.tasks,
+      writeOverlaps: fileWriteOverlaps(),
+      storage: { writable: !storageFailed, savedAt: state.savedAt },
+      maintenance: {
+        recovery: state.recovery.map((entry) => ({ id: entry.task.id, title: entry.task.title, at: entry.at, kind: entry.kind })),
+        ignoredSessions: state.ignoredSessions.map((id) => ({ id, title: metaForSessionId(id)?.title || id })),
+        parseFailures: Object.values(cache.sessions).filter((entry) => entry?.meta?.parseError).length,
+      },
       stats: computeStats(),
       activity: state.activity,
       workspaces: state.workspaces,
@@ -730,6 +797,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       turnCount: parsed ? parsed.turnCount : meta.turnCount || 0,
       lastTurnEnd: mapTurnEndKind(parsed ? parsed.lastTurnEnd?.kind : meta.lastTurnEnd?.kind),
       lastActivityAt: parsed ? parsed.lastActivityAt : meta.lastActivityAt || 0,
+      lastEventSeq: parsed ? parsed.lastEvent?.seq || 0 : meta.lastEventSeq || 0,
       todoTotal: parsedCounts ? parsedCounts.todoTotal : todoCounts.total || 0,
       todoDone: parsedCounts ? parsedCounts.todoDone : todoCounts.completed || 0,
     };
@@ -789,26 +857,23 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       }
     }
     // Manual subtasks win over generated ones with the same text.
-    return dedupeByText([...manual, ...others], SUBTASK_LIMIT);
+    const userItems = dedupeByText(manual, MANUAL_SUBTASK_LIMIT);
+    const userTexts = new Set(userItems.map((item) => item.text));
+    return [...userItems, ...dedupeByText(others.filter((item) => !userTexts.has(item.text)), SUBTASK_LIMIT)];
   }
 
   function mergeArtifacts(primary = [], secondary = []) {
     const seen = new Set();
     const merged = [];
-    for (const item of [...(primary || []), ...(secondary || [])]) {
+    const candidates = [...(primary || []), ...(secondary || [])].sort((left, right) =>
+      Number(right?.kind === "deliverable") - Number(left?.kind === "deliverable") || (right?.time || 0) - (left?.time || 0),
+    );
+    for (const item of candidates) {
       if (!item || typeof item !== "object") continue;
       const key = item.absPath || item.path || item.name;
       if (!key || seen.has(key)) continue;
-      // DSH preview needs the file to exist; drop stale paths (moved/deleted).
-      if (item.absPath) {
-        try {
-          if (!fs.existsSync(item.absPath)) continue;
-        } catch {
-          continue;
-        }
-      }
       seen.add(key);
-      merged.push(item);
+      merged.push({ ...item, missing: Boolean(item.absPath && !fs.existsSync(item.absPath)) });
       if (merged.length >= ARTIFACT_LIMIT) break;
     }
     return merged;
@@ -879,6 +944,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     if (!task || task.status !== "done" || !Array.isArray(task.subtasks) || task.subtasks.length === 0) return false;
     if (!task.subtasks.some((subtask) => !subtask.done)) return false;
     task.status = "in_progress";
+    task.completionBasis = null;
+    task.attention = null;
+    syncGoalStatus(task);
     pushHistory(task, { kind: "status", from: "done", to: "in_progress", by: "user", note: "子任务未完成，任务回到进行中" });
     return true;
   }
@@ -915,15 +983,16 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   function refreshTaskDeterministic(task, meta, context) {
     if (!task) return false;
     let changed = false;
+    const locked = new Set(task.lockedFields || []);
     const previousSubtasks = JSON.stringify(task.subtasks || []);
     const manual = (task.subtasks || []).filter((subtask) => subtask.source === "manual");
     const mergedSubtasks = mergeSubtasks((context?.subtasks || []), (task.subtasks || []).filter((s) => s.source !== "manual"), manual);
-    if (JSON.stringify(mergedSubtasks) !== previousSubtasks) {
+    if (!locked.has("subtasks") && JSON.stringify(mergedSubtasks) !== previousSubtasks) {
       task.subtasks = mergedSubtasks;
       changed = true;
     }
     const artifacts = mergeArtifacts(context?.artifacts || [], task.artifacts || []);
-    if (JSON.stringify(artifacts) !== JSON.stringify(task.artifacts || [])) {
+    if (!locked.has("artifacts") && JSON.stringify(artifacts) !== JSON.stringify(task.artifacts || [])) {
       task.artifacts = artifacts;
       changed = true;
     }
@@ -933,6 +1002,18 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         task.sessionContext = nextContext;
         changed = true;
       }
+    }
+    const attention = task.acceptanceCriteria && context?.completionBasis && trustedUnfinishedSubtasks(task).length === 0
+      ? "acceptance" : context?.attention;
+    if (attention !== undefined && task.status !== "done" && task.attention !== attention) {
+      task.attention = attention;
+      changed = true;
+    }
+    if (task.status === "done" && !locked.has("status") && context?.attention && !task.completionBasis) {
+      task.status = "in_progress";
+      if (!locked.has("progress")) task.progress = progressFromSubtasks(task.subtasks);
+      task.attention = context.attention;
+      changed = true;
     }
     if (context?.sessionGoal && (!task.goal || !task.goal.text)) {
       task.goal = goalObjectFor(null, context, task.status);
@@ -953,7 +1034,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     if (changed) {
       attachSession(task, meta, (task.evidence || []).length);
       task.lastActivityAt = Math.max(task.lastActivityAt || 0, meta.lastActivityAt || 0);
-      task.updatedAt = new Date().toISOString();
+      touchTask(task);
       truncateTask(task);
     }
     return changed;
@@ -1023,14 +1104,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   function findTaskBySession(sessionId) {
     if (!sessionId) return null;
-    return (
-      state.tasks.find(
-        (task) =>
-          task.origin !== "manual" &&
-          (task.primarySessionId === sessionId ||
-            (Array.isArray(task.sessions) && task.sessions.some((session) => session.id === sessionId))),
-      ) || null
-    );
+    let archived = null;
+    for (const task of state.tasks) {
+      if (task.primarySessionId !== sessionId && !task.sessions?.some((session) => session.id === sessionId)) continue;
+      if (!task.archived) return task;
+      archived ||= task;
+    }
+    return archived;
   }
 
   /* --------------------- cross-session duplicate merge --------------- */
@@ -1049,107 +1129,50 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return result;
   }
 
-  /**
-   * Merge auto tasks that describe the same ongoing work (same workspace +
-   * similar title), e.g. the same "workspace audit" run in two sessions.
-   * Manual / user-edited / locked cards are never merged.
-   */
-  function mergeDuplicateTasks() {
-    const me = [];
-    for (const task of state.tasks) {
-      if (task.archived) continue;
-      if (task.origin !== "auto") continue; // manual + auto+edited are protected
-      if ((task.lockedFields || []).length > 0) continue;
-      me.push(task);
-    }
-    let mergedCount = 0;
-    for (;;) {
-      let best = null;
-      for (let i = 0; i < me.length; i++) {
-        const left = me[i];
-        if (!left || !state.tasks.includes(left)) continue;
-        for (let j = i + 1; j < me.length; j++) {
-          const right = me[j];
-          if (!right || !state.tasks.includes(right)) continue;
-          if (!left.workspaceId || left.workspaceId !== right.workspaceId) continue;
-          const sameSession = left.primarySessionId && left.primarySessionId === right.primarySessionId;
-          const score = titleMergeScore(left.title, right.title);
-          // Cards split from the very same session are usually intentional;
-          // only accept near-identical titles for them.
-          const threshold = sameSession ? 0.85 : 0.62;
-          if (score < threshold) continue;
-          if (!best || score > best.score) best = { left, right, score };
-        }
-      }
-      if (!best) break;
-      const [target, source] =
-        (Date.parse(best.left.createdAt) || 0) <= (Date.parse(best.right.createdAt) || 0)
-          ? [best.left, best.right]
-          : [best.right, best.left];
-      mergeTaskInto(target, source);
-      mergedCount += 1;
-    }
-    return mergedCount;
-  }
-
   function mergeTaskInto(target, source) {
-    const nowIso = new Date().toISOString();
-    const targetLastActivity = target.lastActivityAt || 0;
-    const sessionMap = new Map();
-    for (const session of [...(target.sessions || []), ...(source.sessions || [])]) {
-      if (session?.id && !sessionMap.has(session.id)) sessionMap.set(session.id, session);
+    const beforeTarget = structuredClone(target);
+    const sessions = new Map((target.sessions || []).map((session) => [session.id, session]));
+    for (const session of source.sessions || []) {
+      if (!sessions.has(session.id)) sessions.set(session.id, session);
     }
-    target.sessions = [...sessionMap.values()].slice(0, MAX_SESSIONS_PER_TASK);
-    if (!target.primarySessionId) target.primarySessionId = source.primarySessionId;
+    if (sessions.size > MAX_SESSIONS_PER_TASK) throw badRequest("合并后关联会话过多");
+    const subtasks = mergeSubtasks(target.subtasks, source.subtasks);
+    const manualTexts = new Set([...target.subtasks, ...source.subtasks].filter((item) => item.source === "manual").map((item) => item.text));
+    if (manualTexts.size > MANUAL_SUBTASK_LIMIT) throw badRequest("合并后手动子任务过多");
+    const acceptanceCriteria = [...new Set([target.acceptanceCriteria, source.acceptanceCriteria].filter(Boolean))].join("\n\n");
+    if (acceptanceCriteria.length > ACCEPTANCE_TEXT_LIMIT) throw badRequest("合并后验收条件过长，请先精简验收条件");
+    target.acceptanceCriteria = acceptanceCriteria;
+    target.sessions = [...sessions.values()];
+    target.primarySessionId ||= source.primarySessionId;
+    target.sessionContext ||= source.sessionContext;
+    target.goal = target.goal?.text ? target.goal : source.goal;
     target.evidence = mergeTaskEvidence(target.evidence, source.evidence);
-    target.issues = dedupeByText([...(target.issues || []), ...(source.issues || [])], 8);
-    target.milestones = dedupeByText([...(target.milestones || []), ...(source.milestones || [])], 20);
-    target.nextSteps = dedupeByText(
-      [...(target.nextSteps || []).map((text) => ({ text })), ...(source.nextSteps || []).map((text) => ({ text }))],
-      5,
-    ).map((item) => item.text);
+    target.keyFacts = mergeKeyFacts(target.keyFacts, source.keyFacts);
+    target.subtasks = subtasks;
+    target.artifacts = mergeArtifacts(target.artifacts, source.artifacts);
+    target.resolvedIssues = [...new Set([...(target.resolvedIssues || []), ...(source.resolvedIssues || [])])].slice(-50);
+    const resolved = new Set(target.resolvedIssues);
+    target.issues = dedupeByText([...target.issues, ...source.issues].filter((issue) =>
+      issue.source === "manual" || !resolved.has(issueKey(issue))), ISSUE_LIMIT);
+    target.nextSteps = [...new Set([...target.nextSteps, ...source.nextSteps])].slice(0, NEXTSTEP_LIMIT);
+    target.milestones = dedupeByText([...target.milestones, ...source.milestones], MILESTONE_LIMIT);
     target.lastActivityAt = Math.max(target.lastActivityAt || 0, source.lastActivityAt || 0);
-    const sourceIsNewer = (source.lastActivityAt || 0) > targetLastActivity;
-    // v2 fields merge: key facts / subtasks / artifacts / goal / sessionContext.
-    target.keyFacts = mergeKeyFacts(target.keyFacts || [], source.keyFacts || []);
-    target.subtasks = mergeSubtasks(source.subtasks || [], target.subtasks || []);
-    target.artifacts = mergeArtifacts(target.artifacts || [], source.artifacts || []);
-    if ((!target.goal || !target.goal.text) && source.goal?.text) target.goal = { ...source.goal };
-    if (!target.sessionContext && source.sessionContext) target.sessionContext = { ...source.sessionContext };
-    if (sourceIsNewer && source.sessionContext && target.primarySessionId === source.primarySessionId) {
-      target.sessionContext = { ...source.sessionContext };
-    }
-    // The newer card carries the freshest verdict (status/progress/AI reason).
-    if (sourceIsNewer && !(target.lockedFields || []).includes("status")) target.status = source.status;
-    if (!(target.lockedFields || []).includes("progress")) {
-      const subtaskProgress = progressFromSubtasks(target.subtasks);
-      if (subtaskProgress !== null) target.progress = subtaskProgress;
-      else if (sourceIsNewer) target.progress = source.progress;
-    }
-    if (source.ai && (!target.ai || Date.parse(source.ai.analyzedAt || 0) > Date.parse(target.ai.analyzedAt || 0))) {
-      target.ai = source.ai;
-    }
+    target.origin = target.origin === "auto" ? "auto+edited" : target.origin;
+    reopenIfSubtasksUnfinished(target);
+    syncProgressFromSubtasks(target);
+    syncGoalStatus(target);
     refreshSessionEvidenceCounts(target);
-    target.updatedAt = nowIso;
-    pushHistory(target, {
+    touchTask(target);
+    pushHistory(target, { kind: "merge", by: "user", note: `合并任务：${source.title}` });
+    state.recovery.push({
+      task: source,
       kind: "merge",
-      by: "ai",
-      note: `合并重复会话：${clipText(source.title, 60)}`,
+      at: new Date().toISOString(),
+      beforeTarget,
+      targetUpdatedAt: target.updatedAt,
     });
     state.tasks = state.tasks.filter((task) => task.id !== source.id);
-    state.deletedLog.push({
-      id: source.id,
-      title: source.title,
-      origin: source.origin,
-      deletedAt: nowIso,
-      sessionIds: (source.sessions || []).map((session) => session.id),
-      reason: "merge",
-      mergedInto: target.id,
-    });
-    if (state.deletedLog.length > 50) state.deletedLog = state.deletedLog.slice(-50);
-    truncateTask(target);
-    // Privacy: ids only — task titles come from user sessions and do not belong in logs.
-    logInfo(`[super-kanban] merged duplicate task ${source.id} into ${target.id}`);
+    return target;
   }
 
   function sessionEntryFromMeta(meta, evidenceCount = 0) {
@@ -1281,7 +1304,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     for (const childId of childIds) {
       const child = childSummaries.get(childId);
       if (!child) continue;
-      const stateLabel = child.isLive ? "进行中" : child.turnEndKind === "error" ? "以错误结束" : "已完成";
+      const outcome = { completed: "本轮结束", error: "以错误结束", aborted: "已中止", interrupted: "已中断" };
+      const stateLabel = child.isLive ? "运行中" : outcome[child.turnEndKind] || "状态待确认";
       const kind = child.isLive ? "tool" : "artifact";
       extra.push({
         id: `e_${childId.slice(-6)}_subagent`,
@@ -1295,8 +1319,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       });
     }
     if (!extra.length) return analysis;
-    const merged = [...(analysis.evidence || []), ...extra];
-    return { ...analysis, evidence: merged.slice(0, EVIDENCE_LIMIT) };
+    return { ...analysis, evidence: mergeTaskEvidence(extra, analysis.evidence) };
   }
 
   /** Parse one discovered session; updates cache; returns parse result. */
@@ -1373,8 +1396,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       digestBytesAvg,
     };
     recordUsage({ calls: state.scan.aiCalls, tokens: state.scan.tokens });
-    persistState();
-    persistCache();
+    if (!persistState()) {
+      state.scan.state = "error";
+      state.scan.error = "无法保存扫描结果";
+      state.scan.message = "扫描结果尚未保存，请检查存储后重试";
+    } else {
+      persistCache();
+    }
     broadcastScan(true);
     emitChanged("scan", state.scan.newTasks + state.scan.updatedTasks);
     logInfo(
@@ -1385,7 +1413,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   async function runScanBody(mode) {
     const discovery = source.discover();
     parentToChildren = new Map();
-    for (const [parentId, childId] of discovery.childToParent || []) {
+    for (const [childId, parentId] of discovery.childToParent || []) {
       if (!parentToChildren.has(parentId)) parentToChildren.set(parentId, []);
       parentToChildren.get(parentId).push(childId);
     }
@@ -1396,7 +1424,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
     const cutoff = Date.now() - (state.settings.initialDays || 30) * DAY;
     const childSummaries = new Map();
-    let orphanMerged = 0;
     let lowValueSkipped = 0;
     let aiBudgetExhausted = false;
     scanDigestBytes = [];
@@ -1417,7 +1444,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         // scan would re-parse every unchanged session forever.
         const aiMissing = state.settings.aiEnabled && analyzerHasService() && !cached?.meta?.aiAt;
         const forceMainParse =
-          preEligible && (mode === "full" || changed || !findTaskBySession(discovered.id) || aiMissing);
+          preEligible && (mode === "full" || changed || !findTaskBySession(discovered.id) || aiMissing ||
+            typeof meta.hasOpenTurn !== "boolean" || source.sessionLiveness(meta) !== meta.isLive);
         if (changed || forceMainParse) {
           try {
             const result = parseDiscovered(discovered);
@@ -1457,6 +1485,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
             maxTasks: state.settings.maxTasksPerSession || 3,
           });
           const context = buildV2Context(parsed, meta, workspaceTitle);
+          context.attention = rules.tasks[0]?.attention;
+          context.completionBasis = rules.tasks[0]?.completionBasis;
           // v2 token gate: low-value sessions and unchanged verdict inputs stay rules-only.
           const lowValue = isLowValueForAi(meta);
           if (lowValue) lowValueSkipped += 1;
@@ -1634,7 +1664,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
               context,
             });
             applied = result.applied;
-            orphanMerged += pruneSessionOrphans(meta, result.targets);
           } else {
             applied = applyAnalysisList(rules.tasks, meta, context, {
               engine: "rules",
@@ -1653,7 +1682,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           const bound = findTaskBySession(meta.id);
           const hasAiVerdict = Boolean(bound && bound.ai && bound.ai.engine === "llm");
           if (hasAiVerdict) {
-            refreshTaskDeterministic(bound, meta, context);
+            if (bound.primarySessionId && bound.primarySessionId !== meta.id) {
+              updateSupportingSession(bound, meta, context, rules.tasks[0]?.evidence || []);
+            } else {
+              refreshTaskDeterministic(bound, meta, context);
+            }
           } else {
             applied = applyAnalysisList(rules.tasks, meta, context, {
               engine: "rules",
@@ -1671,9 +1704,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       }
     }
 
-    // Phase C2: collapse auto tasks that describe the same work.
-    const mergedTasks = mergeDuplicateTasks() + orphanMerged;
-
     // Phase D: persist derived board data + the human-readable scan conclusion.
     state.workspaces = computeWorkspaces(discovery.workspaces, [...sessionsById.values()]);
     state.activity = computeActivity();
@@ -1682,7 +1712,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     } else {
       state.scan.message = buildScanMessage({
         lowValueSkipped,
-        mergedTasks,
         aiRouteMessage,
         aiDeferredReason,
         aiBudget: state.scan.aiBudget,
@@ -1728,74 +1757,49 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     }
   }
 
-  function resolveTargetTask(analysis, meta, index) {
-    const stableId = stableTaskId(meta.id, index);
-    const byStable = state.tasks.find((task) => task.id === stableId && task.origin !== "manual");
-    if (byStable) return byStable;
-    if (index === 0) {
-      const bound = findTaskBySession(meta.id);
-      if (bound) return bound;
-    }
-    if (analysis.mergeWith) {
-      const explicit = state.tasks.find((task) => task.id === analysis.mergeWith && task.origin !== "manual");
-      if (explicit) return explicit;
-    }
-    // Similar-title merge inside the same workspace (stable enough for rules).
-    let best = null;
-    let bestScore = 0;
-    for (const candidate of state.tasks) {
-      if (candidate.origin === "manual" || candidate.archived) continue;
-      if (candidate.id === stableId) continue;
-      if ((candidate.workspaceId || null) !== (meta.workspaceId || null)) continue;
-      if (candidate.sessions.some((session) => session.id === meta.id)) continue;
-      const score = titleSimilarity(candidate.title, analysis.title);
-      if (score > bestScore) {
-        bestScore = score;
-        best = candidate;
+  function resolveGeneratedTask(sessionId, index) {
+    // A previously unlinked task can still own the old generated ID.
+    // Find a free ID or one already associated with this source.
+    let attempt = 0;
+    for (;;) {
+      const id = stableTaskId(attempt === 0 ? sessionId : `${sessionId}:replacement:${attempt}`, index);
+      const task = state.tasks.find((item) => item.id === id);
+      if (!task || task.primarySessionId === sessionId || task.sessions?.some((item) => item.id === sessionId)) {
+        return { id, task };
       }
+      attempt += 1;
     }
-    return bestScore >= 0.72 ? best : null;
+  }
+
+  function updateSupportingSession(task, meta, context, evidence) {
+    if (!(task.lockedFields || []).includes("artifacts")) task.artifacts = mergeArtifacts(task.artifacts, context.artifacts);
+    task.evidence = mergeTaskEvidence(evidence, task.evidence);
+    attachSession(task, meta, evidence?.length || 0);
+    refreshSessionEvidenceCounts(task);
+    task.lastActivityAt = Math.max(task.lastActivityAt || 0, meta.lastActivityAt || 0);
+    touchTask(task);
   }
 
   function applyAnalysisList(analyses, meta, context, options) {
     const targets = [];
-    analyses.forEach((analysis, index) => {
+    const bound = findTaskBySession(meta.id);
+    const explicit = bound?.origin === "manual" || bound?.sessions?.some((session) => session.id === meta.id && session.linkedByUser);
+    (explicit ? analyses.slice(0, 1) : analyses).forEach((analysis, index) => {
       const withChildren = index === 0 ? foldChildEvidence(analysis, meta, options.childSummaries) : analysis;
-      const target = resolveTargetTask(withChildren, meta, index);
-      const stableId = stableTaskId(meta.id, index);
+      const { id, task: target } = index === 0 && bound ? { id: bound.id, task: bound } : resolveGeneratedTask(meta.id, index);
       if (target) {
-        updateTaskFromAnalysis(target, withChildren, meta, options);
+        if (target.primarySessionId && target.primarySessionId !== meta.id) {
+          updateSupportingSession(target, meta, context, withChildren.evidence);
+        } else {
+          updateTaskFromAnalysis(target, withChildren, meta, options);
+        }
         targets.push(target);
       } else {
-        targets.push(createTaskFromAnalysis(withChildren, meta, stableId, options));
+        targets.push(createTaskFromAnalysis(withChildren, meta, id, options));
         state.scan.newTasks += 1;
       }
     });
     return { applied: targets.length, targets };
-  }
-
-  /**
-   * When a session's fresh analysis yields fewer cards than before (e.g. the
-   * model merged two splits), fold the now-orphaned auto cards back into the
-   * primary card instead of leaving stale duplicates on the board.
-   */
-  function pruneSessionOrphans(meta, targets) {
-    if (!targets.length) return 0;
-    const keep = new Set(targets.map((task) => task.id));
-    const primary = targets[0];
-    const orphans = state.tasks.filter(
-      (task) =>
-        task.origin === "auto" &&
-        !task.archived &&
-        task.primarySessionId === meta.id &&
-        !keep.has(task.id) &&
-        (task.lockedFields || []).length === 0 &&
-        (task.sessions || []).length <= 1,
-    );
-    for (const orphan of orphans) {
-      mergeTaskInto(primary, orphan);
-    }
-    return orphans.length;
   }
 
   /**
@@ -1854,7 +1858,24 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     };
   }
 
+  function trustedAnalysis(analysis, options) {
+    const rules = options.rules?.tasks?.[0];
+    if (!rules || options.engine !== "llm") return analysis;
+    if (analysis.status !== "done" || rules.completionBasis) {
+      return { ...analysis, attention: analysis.status === "done" ? null : rules.attention, completionBasis: rules.completionBasis };
+    }
+    return {
+      ...analysis,
+      status: rules.status === "blocked" ? "blocked" : "in_progress",
+      progress: rules.progress,
+      attention: rules.attention || "review",
+      completionBasis: null,
+      reason: `${analysis.reason || "AI 建议完成"}；等待完成依据`,
+    };
+  }
+
   function createTaskFromAnalysis(analysis, meta, taskId, options) {
+    analysis = trustedAnalysis(analysis, options);
     const nowIso = new Date().toISOString();
     const context = options.context || {};
     const subtasks = mergeSubtasks(analysis.subtasks || [], context.subtasks || []);
@@ -1866,6 +1887,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       goal,
       status: STATUSES.includes(analysis.status) ? analysis.status : "backlog",
       progress,
+      attention: analysis.attention || null,
+      completionBasis: analysis.completionBasis || null,
       priority: PRIORITIES.includes(analysis.priority) ? analysis.priority : "P2",
       tags: Array.isArray(analysis.tags) ? analysis.tags.slice(0, TAG_LIMIT) : [],
       origin: "auto",
@@ -1906,9 +1929,15 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   }
 
   function updateTaskFromAnalysis(task, analysis, meta, options) {
+    analysis = trustedAnalysis(analysis, options);
+    if (task.acceptanceCriteria && task.status !== "done" && analysis.status === "done") {
+      analysis = { ...analysis, status: "in_progress", attention: "acceptance", completionBasis: null };
+    }
     const locked = new Set(Array.isArray(task.lockedFields) ? task.lockedFields : []);
     const context = options.context || {};
-    const nowIso = new Date().toISOString();
+    if (task.origin === "manual" && !options.explicit) {
+      for (const field of ["title", "goal", "priority", "tags", "status", "progress"]) locked.add(field);
+    }
     let otherChanged = false;
     const setField = (field, value) => {
       if (locked.has(field)) return false;
@@ -1923,7 +1952,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     if (setField("title", clipText(analysis.title, TITLE_TEXT_LIMIT))) otherChanged = true;
     if (setField("priority", PRIORITIES.includes(analysis.priority) ? analysis.priority : undefined)) otherChanged = true;
     if (setField("tags", Array.isArray(analysis.tags) ? analysis.tags.slice(0, TAG_LIMIT) : undefined)) otherChanged = true;
-    if (setField("issues", analysis.issues)) otherChanged = true;
+    const manualIssues = (task.issues || []).filter((issue) => issue.source === "manual");
+    const openIssues = (analysis.issues || []).filter((issue) => !(task.resolvedIssues || []).includes(issueKey(issue)));
+    if (setField("issues", dedupeByText([...manualIssues, ...openIssues], ISSUE_LIMIT))) otherChanged = true;
     if (setField("nextSteps", analysis.nextSteps)) otherChanged = true;
     if (!locked.has("milestones") && Array.isArray(analysis.milestones) && analysis.milestones.length > 0) {
       task.milestones = analysis.milestones;
@@ -1964,7 +1995,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       }
     }
     // Artifacts: deterministic union (deliverables + write/edit paths).
-    const mergedArtifacts = mergeArtifacts(task.artifacts || [], context.artifacts || []);
+    const mergedArtifacts = mergeArtifacts(context.artifacts || [], task.artifacts || []);
     if (JSON.stringify(mergedArtifacts) !== JSON.stringify(task.artifacts || [])) {
       task.artifacts = mergedArtifacts;
       otherChanged = true;
@@ -1983,8 +2014,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         }
       }
     } else {
-      const nextProgress = Number.isFinite(analysis.progress) ? analysis.progress : undefined;
-      if (!locked.has("progress") && nextProgress !== undefined) {
+      const nextProgress = Number.isFinite(analysis.progress) ? analysis.progress : null;
+      if (!locked.has("progress")) {
         const previous = task.progress;
         if (previous !== nextProgress) {
           const delta = previous === null || previous === undefined ? 100 : Math.abs(nextProgress - previous);
@@ -2031,9 +2062,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     }
     refreshSessionEvidenceCounts(task);
     task.ai = analysisAiInfo(analysis, options);
-    task.updatedAt = nowIso;
+    const waitingOnUserWork = analysis.attention === "acceptance" && trustedUnfinishedSubtasks(task).length > 0;
+    task.attention = task.status === "done" || waitingOnUserWork ? null : analysis.attention || null;
+    task.completionBasis = task.status === "done" ? (locked.has("status") ? task.completionBasis || null : analysis.completionBasis || null) : null;
+    touchTask(task);
     task.lastActivityAt = Math.max(task.lastActivityAt || 0, meta.lastActivityAt || 0);
-    if (options.engine === "llm") task.origin = task.origin === "manual" ? "manual" : "auto";
     truncateTask(task);
     state.scan.updatedTasks += 1;
     return task;
@@ -2046,6 +2079,12 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const task = state.tasks.find((candidate) => candidate.id === id);
     if (!task) throw notFound("task-not-found");
     return task;
+  }
+
+  function checkTaskRevision(task, expectedUpdatedAt) {
+    if (typeof expectedUpdatedAt === "string" && expectedUpdatedAt !== task.updatedAt) {
+      throw Object.assign(new Error("任务已更新，请核对最新内容后再操作"), { code: "revision-conflict" });
+    }
   }
 
   function normalizedStatus(value, fallback) {
@@ -2061,6 +2100,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return JSON.stringify([
       task.title,
       task.goal,
+      task.acceptanceCriteria,
       task.status,
       task.progress,
       task.priority,
@@ -2095,13 +2135,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     try {
       const discovery = source.discover();
       parentToChildren = new Map();
-      for (const [parentId, childId] of discovery.childToParent || []) {
+      for (const [childId, parentId] of discovery.childToParent || []) {
         if (!parentToChildren.has(parentId)) parentToChildren.set(parentId, []);
         parentToChildren.get(parentId).push(childId);
       }
-      for (const discovered of discovery.sessions) {
-        if (!sessionsById.has(discovered.id)) sessionsById.set(discovered.id, hydrateMeta(discovered));
-      }
+      sessionsById = new Map(discovery.sessions.map((discovered) => [discovered.id, hydrateMeta(discovered)]));
       if (!state.workspaces.length) {
         state.workspaces = computeWorkspaces(discovery.workspaces, [...sessionsById.values()]);
       }
@@ -2127,6 +2165,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const task = {
         id: newManualTaskId(title),
         title: clipText(title, TITLE_TEXT_LIMIT),
+        acceptanceCriteria: clipText(typeof payload.acceptanceCriteria === "string" ? payload.acceptanceCriteria.trim() : "", ACCEPTANCE_TEXT_LIMIT),
         goal: {
           // Trim like task.update does; an empty goal must end up as status none.
           text: clipText((typeof payload.goal === "string" ? payload.goal : payload.goal?.text || "").trim(), GOAL_TEXT_LIMIT),
@@ -2176,22 +2215,30 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         history: [],
       };
       // Same invariant as AI-created cards: goal.status follows task.status.
+      if (task.status === "done") task.completionBasis = "user";
       syncGoalStatus(task);
       if (sessionMeta) {
         state.suppressedSessions = state.suppressedSessions.filter((id) => id !== sessionMeta.id);
       }
       pushHistory(task, { kind: "create", by: "user", note: "手动创建任务" });
       state.tasks.push(task);
-      persistState();
-      emitChanged("task", 1);
       return task;
     },
 
     "task.update"(payload) {
       const task = requireTask(payload);
       const patch = payload.patch && typeof payload.patch === "object" ? payload.patch : {};
+      checkTaskRevision(task, payload.expectedUpdatedAt);
       const beforeEdit = editableSnapshot(task);
       let otherChanged = false;
+      if (Object.hasOwn(patch, "acceptanceCriteria") && typeof patch.acceptanceCriteria === "string") {
+        const criteria = clipText(patch.acceptanceCriteria.trim(), ACCEPTANCE_TEXT_LIMIT);
+        if (criteria !== task.acceptanceCriteria) {
+          task.acceptanceCriteria = criteria;
+          if (!criteria && task.attention === "acceptance") task.attention = "review";
+          otherChanged = true;
+        }
+      }
       for (const field of FIELD_NAMES) {
         // hasOwn: a patch with "__proto__"/"constructor" keys must not be read
         // through the prototype chain.
@@ -2202,6 +2249,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           if (next !== task.status) {
             const from = task.status;
             task.status = next;
+            task.completionBasis = next === "done" ? "user" : null;
+            task.attention = null;
             pushHistory(task, { kind: "status", from, to: next, by: "user", note: "用户编辑" });
           }
           continue;
@@ -2279,14 +2328,31 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         task.lockedFields = [...locks];
         otherChanged = true;
       }
+      syncGoalStatus(task);
       if (otherChanged) pushHistory(task, { kind: "edit", by: "user", note: "用户编辑任务" });
       // Only a real user change detaches an auto card from duplicate merging; a
       // no-op or invalid patch must not wash away its auto identity.
       if (task.origin === "auto" && editableSnapshot(task) !== beforeEdit) task.origin = "auto+edited";
-      task.updatedAt = new Date().toISOString();
+      touchTask(task);
       truncateTask(task);
-      persistState();
-      emitChanged("task", 1);
+      return task;
+    },
+
+    "task.accept"(payload) {
+      const task = requireTask(payload);
+      checkTaskRevision(task, payload.expectedUpdatedAt);
+      if (task.archived) throw conflict("请先恢复归档任务再确认验收");
+      if (task.status === "done" && task.completionBasis === "user") return task;
+      const from = task.status;
+      task.status = "done";
+      task.attention = null;
+      task.completionBasis = "user";
+      task.lockedFields = [...new Set([...(task.lockedFields || []), "status"])];
+      if (task.origin === "auto") task.origin = "auto+edited";
+      if (!(task.lockedFields || []).includes("progress")) task.progress = progressFromSubtasks(task.subtasks) ?? 100;
+      syncGoalStatus(task);
+      pushHistory(task, { kind: "status", from, to: "done", by: "user", note: "确认验收" });
+      touchTask(task);
       return task;
     },
 
@@ -2299,6 +2365,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (nextStatus !== task.status) {
         pushHistory(task, { kind: "status", from: task.status, to: nextStatus, by: "user", note: "拖拽换列" });
         task.status = nextStatus;
+        task.completionBasis = nextStatus === "done" ? "user" : null;
+        task.attention = null;
+        task.lockedFields = [...new Set([...(task.lockedFields || []), "status"])];
+        syncGoalStatus(task);
         // Same rule as task.update: only a real column change marks the card as
         // user-edited (reordering inside a column does not).
         if (task.origin === "auto") task.origin = "auto+edited";
@@ -2310,9 +2380,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (index !== null && index >= 0 && index < group.length) insertAt = group[index].candidateIndex;
       else insertAt = group.length > 0 ? group[group.length - 1].candidateIndex + 1 : state.tasks.length;
       state.tasks.splice(insertAt, 0, task);
-      task.updatedAt = new Date().toISOString();
-      persistState();
-      emitChanged("task", 1);
+      touchTask(task);
       return task;
     },
 
@@ -2328,10 +2396,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           note: archived ? "用户归档" : "用户恢复",
         });
         task.archived = archived;
-        task.updatedAt = new Date().toISOString();
+        touchTask(task);
       }
-      persistState();
-      emitChanged("task", 1);
       return task;
     },
 
@@ -2339,6 +2405,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const task = requireTask(payload);
       const sessionIds = (task.sessions || []).map((session) => session.id);
       state.tasks = state.tasks.filter((candidate) => candidate.id !== task.id);
+      const suppressed = task.origin === "manual" ? [] : sessionIds.filter((id) => !state.suppressedSessions.includes(id) && !findTaskBySession(id));
+      state.recovery.push({ task, kind: "delete", at: new Date().toISOString(), suppressed });
       state.deletedLog.push({
         id: task.id,
         title: task.title,
@@ -2346,12 +2414,149 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         deletedAt: new Date().toISOString(),
         sessionIds,
       });
-      if (task.origin !== "manual") {
-        state.suppressedSessions = [...new Set([...state.suppressedSessions, ...sessionIds])].slice(-500);
+      if (suppressed.length) {
+        state.suppressedSessions = [...new Set([...state.suppressedSessions, ...suppressed])].slice(-500);
       }
-      persistState();
-      emitChanged("task", 1);
       return { id: task.id, deleted: true };
+    },
+
+    "task.restore"(payload) {
+      const entry = state.recovery.findLast((item) => item.task.id === payload.id);
+      if (!entry) throw notFound("恢复记录不存在");
+      if (state.tasks.some((task) => task.id === payload.id)) throw conflict("任务已存在");
+      if (entry.kind === "merge") {
+        const index = state.tasks.findIndex((task) => task.id === entry.beforeTarget?.id);
+        if (index < 0 || state.tasks[index].updatedAt !== entry.targetUpdatedAt) {
+          throw conflict("合并后的任务已变化，无法安全撤销");
+        }
+        touchTask(entry.beforeTarget);
+        state.tasks[index] = entry.beforeTarget;
+      }
+      touchTask(entry.task);
+      state.tasks.push(entry.task);
+      state.recovery = state.recovery.filter((item) => item !== entry);
+      const suppressed = new Set(Array.isArray(entry.suppressed) ? entry.suppressed : []);
+      state.suppressedSessions = state.suppressedSessions.filter((id) => !suppressed.has(id));
+      return entry.task;
+    },
+
+    "task.merge"(payload) {
+      const target = requireTask(payload);
+      const source = requireTask({ id: payload.sourceId });
+      if (target === source) throw badRequest("请选择两张不同的任务");
+      if (source.relations?.length || state.tasks.some((task) => task.relations?.some((link) => link.taskId === source.id))) {
+        throw badRequest("来源任务仍有关联，请先调整其关系");
+      }
+      return mergeTaskInto(target, source);
+    },
+
+    "task.relate"(payload) {
+      const task = requireTask(payload);
+      task.relations = editRelation(state.tasks, task, payload);
+      touchTask(task);
+      pushHistory(task, { kind: "edit", by: "user", note: payload.remove ? "移除任务关系" : "更新任务关系" });
+      return task;
+    },
+
+    "task.pin"(payload) {
+      const task = requireTask(payload);
+      task.pinned = payload.pinned === true;
+      touchTask(task);
+      return task;
+    },
+
+    "task.batch"(payload) {
+      if (!isStringArray(payload.ids) || payload.ids.length === 0 || payload.ids.length > 200) throw badRequest("请选择 1–200 项任务");
+      const targets = [...new Set(payload.ids)].map((id) => requireTask({ id }));
+      if (typeof payload.archived !== "boolean" && !PRIORITIES.includes(payload.priority)) throw badRequest("请选择批量操作");
+      for (const task of targets) {
+        if (typeof payload.archived === "boolean") ops["task.archive"]({ id: task.id, archived: payload.archived });
+        if (PRIORITIES.includes(payload.priority)) ops["task.update"]({ id: task.id, patch: { priority: payload.priority }, lockFields: ["priority"] });
+      }
+      return { count: targets.length };
+    },
+
+    "task.issue"(payload) {
+      const task = requireTask(payload);
+      const text = clipText(typeof payload.text === "string" ? payload.text.trim() : "", ISSUE_TEXT_LIMIT);
+      const key = issueKey({ text });
+      if (!key) throw badRequest("请输入问题内容");
+      if (payload.resolve === true) {
+        if (!task.issues.some((issue) => issueKey(issue) === key)) throw notFound("问题已变化");
+        task.resolvedIssues = [...new Set([...(task.resolvedIssues || []), key])].slice(-50);
+        task.issues = task.issues.filter((issue) => issueKey(issue) !== key);
+      } else {
+        if (task.issues.some((issue) => issueKey(issue) === key)) throw badRequest("问题已存在");
+        if (task.issues.length >= ISSUE_LIMIT) throw badRequest("待处理问题已达上限");
+        task.resolvedIssues = (task.resolvedIssues || []).filter((item) => item !== key);
+        task.issues.push({ text, severity: "medium", source: "manual", sessionId: null, seq: null });
+      }
+      touchTask(task);
+      pushHistory(task, { kind: "edit", by: "user", note: payload.resolve ? `解决问题：${text}` : `新增问题：${text}` });
+      return task;
+    },
+
+    "task.linkSession"(payload) {
+      const task = requireTask(payload);
+      const id = typeof payload.sessionId === "string" ? payload.sessionId : "";
+      if (!id || id.length > 200 || /[/\\\0]/.test(id)) throw badRequest("无效会话");
+      const current = task.sessions.find((item) => item.id === id);
+      if (payload.remove === true) {
+        task.sessions = task.sessions.filter((item) => item.id !== id);
+      } else {
+        refreshSessionIndex();
+        const meta = sessionsById.get(id);
+        if (!meta) throw notFound("会话不可用，请先打开或刷新 DSH 会话");
+        const other = findTaskBySession(id);
+        if (other && other !== task) throw conflict("会话已关联其他任务，可先合并任务");
+        if (!current && task.sessions.length >= MAX_SESSIONS_PER_TASK) throw badRequest("关联会话已达上限");
+        if (!current) {
+          task.sessions.push({ ...sessionEntryFromMeta(meta), linkedByUser: true, continuedAt: payload.continuation ? new Date().toISOString() : null });
+        } else if (payload.continuation) {
+          current.linkedByUser = true;
+          current.continuedAt ||= new Date().toISOString();
+        }
+        state.suppressedSessions = state.suppressedSessions.filter((sid) => sid !== id);
+      }
+      if (payload.remove !== true && (payload.primary || payload.continuation)) task.primarySessionId = id;
+      if (!task.sessions.some((item) => item.id === task.primarySessionId)) task.primarySessionId = task.sessions[0]?.id || null;
+      task.sessionContext = sessionContextFromMeta(metaForSessionId(task.primarySessionId));
+      if (!task.workspaceId && task.primarySessionId) {
+        const meta = metaForSessionId(task.primarySessionId);
+        task.workspaceId = meta?.workspaceId || null;
+        task.workspaceTitle = meta?.workspaceTitle || null;
+        task.workspacePath = meta?.workspacePath || null;
+      }
+      touchTask(task);
+      pushHistory(task, { kind: "edit", by: "user", note: payload.remove ? "解除会话关联" : payload.continuation ? "关联续做会话" : "关联来源会话" });
+      return task;
+    },
+
+    "storage.retry"() {
+      return { saved: true };
+    },
+
+    "backup.preview"(payload) {
+      const restored = decodeBackup(payload);
+      return { current: state.tasks.length, incoming: restored.tasks.length, expectedSavedAt: state.savedAt, backupHash: backupHash(payload) };
+    },
+
+    "backup.restore"(payload) {
+      if (scanPromise || aiBusy) throw conflict("请等待扫描或研判结束后再恢复");
+      if (typeof payload.expectedSavedAt !== "string" || payload.expectedSavedAt !== state.savedAt) {
+        throw conflict("看板已变化，请重新预览备份");
+      }
+      const restored = decodeBackup(payload);
+      if (payload.backupHash !== backupHash(payload)) throw conflict("备份内容已变化，请重新预览");
+      try {
+        store.saveRestorePoint(state);
+      } catch {
+        throw Object.assign(new Error("无法保存当前看板的恢复点"), { code: "storage-unavailable" });
+      }
+      restored.tasks.forEach(touchTask);
+      restored.savedAt = state.savedAt;
+      state = restored;
+      return { count: state.tasks.length };
     },
 
     "task.relink"(payload) {
@@ -2367,10 +2572,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const sessions = [];
       for (const sessionId of sessionIds.slice(0, MAX_SESSIONS_PER_TASK)) {
         const meta = metaForSessionId(sessionId);
-        sessions.push(meta ? sessionEntryFromMeta(meta, 0) : { id: sessionId, title: sessionId, seqEnd: 0, evidenceCount: 0 });
+        sessions.push({ ...(meta ? sessionEntryFromMeta(meta, 0) : { id: sessionId, title: sessionId, seqEnd: 0, evidenceCount: 0 }), linkedByUser: true });
       }
       task.sessions = sessions;
       task.primarySessionId = sessions[0]?.id || null;
+      task.sessionContext = sessionContextFromMeta(metaForSessionId(task.primarySessionId));
       const firstMeta = sessions[0] ? metaForSessionId(sessions[0].id) : null;
       if (firstMeta) {
         task.workspaceId = firstMeta.workspaceId || task.workspaceId;
@@ -2378,11 +2584,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         task.workspacePath = firstMeta.workspacePath || task.workspacePath;
       }
       state.suppressedSessions = state.suppressedSessions.filter((id) => !sessionIds.includes(id));
-      task.updatedAt = new Date().toISOString();
+      touchTask(task);
       pushHistory(task, { kind: "edit", by: "user", note: `重新关联 ${sessions.length} 个来源会话` });
       if (task.origin === "auto") task.origin = "auto+edited";
-      persistState();
-      emitChanged("task", 1);
       return task;
     },
 
@@ -2390,10 +2594,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const task = requireTask(payload);
       const fields = isStringArray(payload.fields) && payload.fields.length > 0 ? payload.fields : null;
       task.lockedFields = fields ? task.lockedFields.filter((field) => !fields.includes(field)) : [];
-      task.updatedAt = new Date().toISOString();
+      touchTask(task);
       pushHistory(task, { kind: "edit", by: "user", note: fields ? `解锁字段：${fields.join("、")}` : "解锁全部字段" });
-      persistState();
-      emitChanged("task", 1);
       return task;
     },
 
@@ -2489,28 +2691,33 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         }
         // Explicit analyze updates exactly this task (scan owns auto splitting).
         const primary = analyses[0];
-        if (primary) {
-          updateTaskFromAnalysis(task, primary, meta, {
-            engine: jobEngine,
-            model: jobModel,
-            provider: jobProvider,
-            rules,
-            context,
-          });
-        }
-        task.origin = task.origin === "auto" ? "auto+edited" : task.origin;
-        task.updatedAt = new Date().toISOString();
-        truncateTask(task);
-        if (aiCalls > 0) recordUsage({ calls: aiCalls, tokens });
-        persistState();
-        emitChanged("task", 1);
-        let message;
-        if (engine === "llm") message = "AI 研判完成";
-        else if (aiCalls > 0) message = `AI 判断该会话无需建卡（已消耗 ${aiCalls} 次）`;
-        else if (budgetHit || budgetExhausted) message = "今日 AI 预算已用完，已用规则引擎重判";
-        else if (state.settings.aiEnabled && !route.ok) message = `${route.message}，已用规则引擎重判`;
-        else message = "AI 不可用或未启用，已用规则引擎重判";
-        return { task, engine, aiCalls, tokens, sessions: 1, message, model, provider };
+        return commitState(() => {
+          const current = requireTask(payload);
+          if (current.updatedAt !== task.updatedAt) {
+            throw Object.assign(new Error("研判期间任务已更新，请重新研判"), { code: "revision-conflict" });
+          }
+          if (primary) {
+            updateTaskFromAnalysis(current, primary, meta, {
+              engine: jobEngine,
+              explicit: true,
+              model: jobModel,
+              provider: jobProvider,
+              rules,
+              context,
+            });
+          }
+          current.origin = current.origin === "auto" ? "auto+edited" : current.origin;
+          touchTask(current);
+          truncateTask(current);
+          if (aiCalls > 0) recordUsage({ calls: aiCalls, tokens });
+          let message;
+          if (engine === "llm") message = "AI 研判完成";
+          else if (aiCalls > 0) message = `AI 判断该会话无需建卡（已消耗 ${aiCalls} 次）`;
+          else if (budgetHit || budgetExhausted) message = "今日 AI 预算已用完，已用规则引擎重判";
+          else if (state.settings.aiEnabled && !route.ok) message = `${route.message}，已用规则引擎重判`;
+          else message = "AI 不可用或未启用，已用规则引擎重判";
+          return { task: current, engine, aiCalls, tokens, sessions: 1, message, model, provider };
+        });
       } finally {
         // Every return/throw path must free the shared AI mutex.
         releaseAiTask();
@@ -2522,19 +2729,37 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     "task.continuePrompt"(payload) {
       const task = requireTask(payload);
       const target = payload.target === "newSession" ? "newSession" : "session";
-      const meta = task.primarySessionId ? metaForSessionId(task.primarySessionId) : null;
-      const sessionContext = task.sessionContext || (meta ? sessionContextFromMeta(meta) : null);
+      const primaryId = task.primarySessionId || task.sessionContext?.sessionId || task.sessions?.[0]?.id || null;
+      const selected = typeof payload.sessionId === "string" && payload.sessionId ? payload.sessionId : primaryId;
+      if (selected && selected !== primaryId && !task.sessions?.some((item) => item.id === selected)) {
+        throw badRequest("请从当前任务的关联会话中选择");
+      }
+      const meta = selected ? metaForSessionId(selected) : null;
+      const sessionContext = selected === primaryId && task.sessionContext ? task.sessionContext : sessionContextFromMeta(meta);
+      const instructions = {
+        continue: "根据当前目标推进未完成项，验证变更并汇报结果。",
+        unblock: "定位首要阻塞，验证修复。需要用户决定时列出具体选择。",
+        verify: "按验收条件检查现有产物，逐项说明通过、失败或无法验证的依据。发现问题时记录复现方式。",
+        handoff: "整理已完成内容、剩余工作、约束及可复用产物，供下一会话接手。",
+      };
+      const purpose = Object.hasOwn(instructions, payload.purpose) ? payload.purpose : "continue";
       const lines = [];
-      lines.push("你将继续执行一个已有任务，请接手并把它推进到完成。", "");
+      lines.push(instructions[purpose], "");
       lines.push("## 任务");
       lines.push(`- 标题：${task.title}`);
       lines.push(`- 目标：${task.goal?.text || "未设置（请根据标题与会话判断）"}`);
       lines.push(`- 当前状态：${STATUS_LABELS[task.status] || task.status}${Number.isFinite(task.progress) ? `（进度 ${task.progress}%）` : ""}`);
       if (task.workspaceTitle) lines.push(`- 工作区：${task.workspaceTitle}`);
-      const keyFacts = (task.keyFacts || []).slice(0, 5);
+      if (task.updatedAt) lines.push(`- 看板快照：${task.updatedAt}`);
+      if (task.acceptanceCriteria) lines.push("", "## 验收条件", task.acceptanceCriteria);
+      const facts = task.keyFacts || [];
+      const keyFacts = [...facts.filter((fact) => fact.kind === "decision"), ...facts.filter((fact) => fact.kind !== "decision")].slice(0, 5);
       if (keyFacts.length) {
-        lines.push("", "## 关键事实");
-        for (const fact of keyFacts) lines.push(`- ${fact.text}`);
+        lines.push("", "## 关键决策与事实");
+        for (const fact of keyFacts) {
+          const source = fact.sessionId && positiveSeqOrNull(fact.seq) ? `（会话 ${fact.sessionId} #${fact.seq}）` : "";
+          lines.push(`- ${fact.text}${source}`);
+        }
       }
       const issues = (task.issues || []).slice(0, 3);
       if (issues.length) {
@@ -2546,35 +2771,51 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         lines.push("", "## 建议下一步");
         for (const step of nextSteps) lines.push(`- ${step}`);
       }
-      const pendingSubtasks = (task.subtasks || []).filter((subtask) => !subtask.done).slice(0, 5);
+      const pendingSubtasks = (task.subtasks || []).filter((subtask) => !subtask.done);
       if (pendingSubtasks.length) {
-        lines.push("", "## 未完成子任务");
-        for (const subtask of pendingSubtasks) lines.push(`- ${subtask.text}`);
+        lines.push("", `## 未完成子任务（${pendingSubtasks.length} 项）`);
+        for (const subtask of pendingSubtasks.slice(0, 8)) lines.push(`- ${subtask.text}`);
+        if (pendingSubtasks.length > 8) lines.push(`- 其余 ${pendingSubtasks.length - 8} 项见任务详情`);
       }
-      if (sessionContext) {
-        lines.push("", "## 来源会话");
-        lines.push(
-          `- ${sessionContext.title || meta?.title || "?"}（sessionId: ${sessionContext.sessionId || task.primarySessionId}）`,
-        );
-        lines.push(
-          `- 状态：${sessionContext.isLive ? "进行中" : "已结束"}；轮次：${sessionContext.turnCount || 0}；待办：${sessionContext.todoDone || 0}/${sessionContext.todoTotal || 0}`,
-        );
+      const artifacts = (task.artifacts || []).filter((item) => typeof item.path === "string" && item.path.length > 0 && item.path.length <= 4096).sort((a, b) =>
+        Number(Boolean(a.missing)) - Number(Boolean(b.missing)) ||
+        Number(b.kind === "deliverable") - Number(a.kind === "deliverable") || (b.time || 0) - (a.time || 0),
+      ).slice(0, 4);
+      if (artifacts.length) {
+        lines.push("", "## 交付物与修改记录");
+        for (const artifact of artifacts) {
+          const source = artifact.sessionId ? ` · 会话 ${artifact.sessionId}${positiveSeqOrNull(artifact.seq) ? ` #${artifact.seq}` : ""}` : "";
+          lines.push(`- ${artifact.kind === "deliverable" ? "交付物" : "修改文件"} ${artifact.path}${artifact.missing ? "（文件当前不可用）" : ""}${source}`);
+        }
       }
-      lines.push(
-        "",
-        "## 要求",
-        "1. 先简要复述你对任务目标与当前进展的理解，并给出 2-4 步执行计划；",
-        "2. 然后直接开始执行，优先解决阻塞问题；",
-        "3. 完成后汇报产出（文件路径/结果）与验证方式；",
-        "4. 遇到阻塞明确说明原因与需要用户决策的点，不要假装完成。",
-      );
+      const evidence = (task.evidence || []).filter((item) => positiveSeqOrNull(item.seq)).slice(0, 3);
+      if (evidence.length) {
+        lines.push("", "## 来源证据");
+        for (const item of evidence) lines.push(`- 会话 ${item.sessionId || task.primarySessionId || "未知"} #${item.seq} ${clipText(item.text, 75)}`);
+      }
+      const dependencies = (task.relations || []).filter((link) => link.type === "depends_on")
+        .map((link) => state.tasks.find((item) => item.id === link.taskId)).filter(Boolean).slice(0, 4);
+      if (dependencies.length) {
+        lines.push("", "## 依赖");
+        for (const dependency of dependencies) lines.push(`- ${dependency.title} · ${STATUS_LABELS[dependency.status] || "状态未知"}`);
+      }
+      if (task.sessions?.length || selected) {
+        lines.push("", "## 关联会话");
+        for (const entry of (task.sessions?.length ? task.sessions : [{ id: selected, title: sessionContext?.title }]).slice(0, 6)) {
+          const role = [entry.id === primaryId ? "主会话" : "", target === "session" && entry.id === selected ? "当前续做目标" : ""].filter(Boolean).join(" · ");
+          lines.push(`- ${entry.title || "来源会话"}（${entry.id}${role ? ` · ${role}` : ""}）`);
+        }
+        if (task.sessions?.length > 6) lines.push(`- 其余 ${task.sessions.length - 6} 个会话见任务详情`);
+      }
+      lines.push("", "## 要求", "保留现有约束。完成后说明实际产出、验收结果和仍需处理的事项。");
       return {
         prompt: lines.join("\n"),
         target,
-        sessionId: task.primarySessionId || (sessionContext?.sessionId ?? null),
+        sessionId: selected,
         workspaceId: task.workspaceId || meta?.workspaceId || null,
         workspaceTitle: task.workspaceTitle || meta?.workspaceTitle || null,
         isLive: Boolean(sessionContext?.isLive ?? meta?.isLive),
+        updatedAt: task.updatedAt,
       };
     },
 
@@ -2595,11 +2836,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       task.subtasks = merged;
       syncProgressFromSubtasks(task);
       task.sessionContext = sessionContextFromMeta(meta, parsed);
-      task.updatedAt = new Date().toISOString();
+      touchTask(task);
       pushHistory(task, { kind: "edit", by: "user", note: `从会话导入待办 ${todoSubtasks.length} 项` });
       truncateTask(task);
-      persistState();
-      emitChanged("task", 1);
       return task;
     },
 
@@ -2611,11 +2850,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       subtask.done = typeof payload.done === "boolean" ? payload.done : !subtask.done;
       reopenIfSubtasksUnfinished(task);
       syncProgressFromSubtasks(task);
-      task.updatedAt = new Date().toISOString();
+      touchTask(task);
       pushHistory(task, { kind: "edit", by: "user", note: `${subtask.done ? "完成" : "取消完成"}子任务：${clipText(subtask.text, 30)}` });
       truncateTask(task);
-      persistState();
-      emitChanged("task", 1);
       return task;
     },
 
@@ -2623,12 +2860,20 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const task = requireTask(payload);
       const text = typeof payload.text === "string" ? payload.text.trim() : "";
       if (!text) throw badRequest("text-required");
+      const clipped = clipText(text, SUBTASK_TEXT_LIMIT);
+      const items = task.subtasks || [];
+      if (items.some((item) => item.text === clipped && item.source === "manual")) {
+        throw badRequest("已有同名手动子任务");
+      }
+      if (items.filter((item) => item.source === "manual").length >= MANUAL_SUBTASK_LIMIT) {
+        throw badRequest(`手动子任务已达 ${MANUAL_SUBTASK_LIMIT} 项上限`);
+      }
       task.subtasks = mergeSubtasks(
         task.subtasks || [],
         [
           {
             id: shortId("s", `manual:${task.id}:${Date.now()}:${text}`),
-            text: clipText(text, SUBTASK_TEXT_LIMIT),
+            text: clipped,
             done: false,
             source: "manual",
             seq: null,
@@ -2637,11 +2882,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       );
       reopenIfSubtasksUnfinished(task);
       syncProgressFromSubtasks(task);
-      task.updatedAt = new Date().toISOString();
+      touchTask(task);
       pushHistory(task, { kind: "edit", by: "user", note: `新增子任务：${clipText(text, 30)}` });
       truncateTask(task);
-      persistState();
-      emitChanged("task", 1);
       return task;
     },
 
@@ -2653,11 +2896,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (task.subtasks.length === before) throw notFound("subtask-not-found");
       reopenIfSubtasksUnfinished(task);
       syncProgressFromSubtasks(task);
-      task.updatedAt = new Date().toISOString();
+      touchTask(task);
       pushHistory(task, { kind: "edit", by: "user", note: "删除子任务" });
       truncateTask(task);
-      persistState();
-      emitChanged("task", 1);
       return task;
     },
 
@@ -2688,8 +2929,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (!sessionId) throw badRequest("sessionId-required");
       if (!state.ignoredSessions.includes(sessionId)) state.ignoredSessions.push(sessionId);
       state.suppressedSessions = state.suppressedSessions.filter((id) => id !== sessionId);
-      persistState();
-      emitChanged("settings", 0);
       return { sessionId, ignored: true };
     },
 
@@ -2697,8 +2936,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
       if (!sessionId) throw badRequest("sessionId-required");
       state.ignoredSessions = state.ignoredSessions.filter((id) => id !== sessionId);
-      persistState();
-      emitChanged("settings", 0);
       return { sessionId, ignored: false };
     },
 
@@ -2728,8 +2965,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           ...workspace,
           included: !(state.settings.excludeWorkspaces || []).includes(workspace.id),
         }));
-        persistState();
-        emitChanged("settings", 0);
       }
       return state.settings;
     },
@@ -2885,6 +3120,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         settings: state.settings,
         usage: state.usage,
         ignoredSessions: state.ignoredSessions,
+        suppressedSessions: state.suppressedSessions,
+        deletedLog: state.deletedLog,
+        recovery: state.recovery,
         workspaces: state.workspaces,
         activity: state.activity,
         scan: state.scan,
@@ -2914,14 +3152,37 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         json(res, 200, buildStatePayload());
         return;
       }
+      if (route === "/sessions" && method === "GET") {
+        refreshSessionIndex();
+        const query = (url?.searchParams?.get("q") || "").slice(0, 100).trim().toLowerCase();
+        const all = [...sessionsById.values()].filter((meta) =>
+          !query || [meta.id, meta.title, meta.workspaceTitle, meta.parentSession].some((value) => String(value || "").toLowerCase().includes(query)),
+        );
+        all.sort((left, right) => right.lastActivityAt - left.lastActivityAt);
+        const sessions = all.slice(0, 50).map((meta) => ({
+          id: meta.id, title: meta.title, workspaceTitle: meta.workspaceTitle, parentId: meta.parentSession,
+          isLive: source.sessionLiveness(meta), lastTurnEnd: mapTurnEndKind(meta.lastTurnEnd?.kind),
+          ignored: state.ignoredSessions.includes(meta.id),
+        }));
+        json(res, 200, { ok: true, sessions, total: all.length });
+        return;
+      }
+      if (route === "/merge-candidates" && method === "GET") {
+        const task = requireTask({ id: url?.searchParams?.get("id") });
+        const candidates = state.tasks.filter((item) => item.id !== task.id && !item.archived && task.workspaceId && item.workspaceId === task.workspaceId)
+          .map((item) => ({ id: item.id, title: item.title, score: titleMergeScore(task.title, item.title) }))
+          .filter((item) => item.score >= 0.62).sort((left, right) => right.score - left.score).slice(0, 5);
+        json(res, 200, { ok: true, candidates });
+        return;
+      }
       if (route === "/ai/models" && method === "GET") {
         // Owner admission is enforced by the prefix handler in index.mjs. The
         // catalog is additive and never part of /state (4s polling stays small).
         json(res, 200, { ok: true, ...(await getAiCatalog()) });
         return;
       }
-      if (route === "/command" && method === "POST") {
-        const body = await readBody(req);
+      if ((route === "/command" || route === "/backup") && method === "POST") {
+        const body = await readBody(req, route === "/backup" ? { limit: 16 * 1024 * 1024 } : undefined);
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           json(res, 400, { ok: false, error: "invalid-input", message: "command body must be a JSON object" });
           return;
@@ -2929,13 +3190,15 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         const op = typeof body.op === "string" ? body.op : "";
         // hasOwn: ops inherits Object.prototype, so "constructor"/"toString"
         // must be rejected as unknown ops instead of being called.
-        if (!Object.hasOwn(ops, op)) {
+        if (!Object.hasOwn(ops, op) || (route === "/backup" && !["backup.preview", "backup.restore"].includes(op))) {
           json(res, 400, { ok: false, error: "unknown-op", message: `unknown op: ${op}` });
           return;
         }
         const handler = ops[op];
         try {
-          const data = await handler(body.payload && typeof body.payload === "object" ? body.payload : {});
+          const payload = body.payload && typeof body.payload === "object" ? body.payload : {};
+          const direct = ["task.continuePrompt", "task.analyze", "task.polishPrompt", "backup.preview"].includes(op) || op.startsWith("scan.");
+          const data = direct ? await handler(payload) : commitState(() => handler(payload), op.startsWith("task.") ? "task" : "settings");
           json(res, 200, { ok: true, data });
         } catch (error) {
           const status = classifyError(error);
@@ -3043,6 +3306,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     if (stopped) return;
     stopped = true;
     scanCancel = true;
+    scanAbort?.abort();
     if (startupTimer) clearTimeout(startupTimer);
     startupTimer = null;
     if (autoTimer) clearInterval(autoTimer);

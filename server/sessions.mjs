@@ -24,6 +24,7 @@ import crypto from "node:crypto";
 
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 export const SESSION_FILE_NAME = "session.v4.jsonl.zstd";
+export const RECENT_WRITE_MS = 15 * 60_000;
 const PROJCACHE_DIR = ["storages", "session_projcache", "sessions"];
 /**
  * Bounded LRU capacity for parsed session logs. /session polling, task.analyze
@@ -258,25 +259,27 @@ export function extractArtifacts(parsed, { workspacePath = null, max = LOCAL_ART
       ? path.resolve(parsed.session.cwd)
       : null;
   const candidates = [];
+  const failedCalls = new Set((parsed.toolResults || []).filter((item) => item.isError && item.toolCallId).map((item) => item.toolCallId));
   for (const item of parsed.deliverables || []) {
     for (const file of item.files || []) {
-      const absPath = resolveArtifactPath(file.path, workspaceRoot, parsed.session?.cwd);
+      const cwd = item.cwd && item.cwd !== parsed.session?.cwd ? item.cwd : workspaceRoot;
+      const absPath = resolveArtifactPath(file.path, cwd);
       if (!absPath) continue;
       candidates.push({ absPath, seq: item.seq, time: item.time, description: file.description || "", priority: 0 });
     }
   }
   for (const call of parsed.toolCalls || []) {
     if (call.name !== "write" && call.name !== "edit") continue;
+    if (failedCalls.has(call.callId)) continue;
     const args = parseToolArgs(call);
     const absPath = resolveArtifactPath(
       args.path || args.file_path || args.filePath || args.file,
-      workspaceRoot,
-      parsed.session?.cwd,
+      call.cwd && call.cwd !== parsed.session?.cwd ? call.cwd : workspaceRoot,
     );
     if (!absPath) continue;
     candidates.push({ absPath, seq: call.seq, time: call.time, description: "", priority: 1 });
   }
-  candidates.sort((left, right) => left.priority - right.priority || left.seq - right.seq);
+  candidates.sort((left, right) => left.priority - right.priority || right.seq - left.seq);
   const seen = new Set();
   const chosen = [];
   for (const candidate of candidates) {
@@ -303,7 +306,57 @@ export function extractArtifacts(parsed, { workspacePath = null, max = LOCAL_ART
     seq: candidate.seq,
     time: candidate.time,
     description: clip(candidate.description, 120),
+    kind: candidate.priority === 0 ? "deliverable" : "modified",
   }));
+}
+
+function gitWorktreeRoot(cwd) {
+  for (let current = fs.realpathSync(cwd); ; current = path.dirname(current)) {
+    const marker = path.join(current, ".git");
+    const stat = fs.statSync(marker, { throwIfNoEntry: false });
+    if (stat) {
+      let gitDir = marker;
+      if (stat.isFile() && stat.size <= 4096) {
+        const target = /^gitdir: (.+)$/m.exec(fs.readFileSync(marker, "utf8"))?.[1]?.trim();
+        if (!target) return null;
+        gitDir = path.resolve(current, target);
+      } else if (!stat.isDirectory()) return null;
+      return fs.statSync(path.join(gitDir, "HEAD"), { throwIfNoEntry: false })?.isFile() ? current : null;
+    }
+    if (path.dirname(current) === current) return null;
+  }
+}
+
+/** Positive evidence only: successful write/edit operations from the current open turn. */
+function recentWritesOf(parsed, now) {
+  if (!parsed.hasOpenTurn) return [];
+  const turnStart = parsed.turnStarts.at(-1)?.seq;
+  if (!turnStart) return [];
+  const cutoff = now - RECENT_WRITE_MS;
+  const results = new Map(parsed.toolResults.filter((item) => item.seq > turnStart && item.toolCallId).map((item) => [item.toolCallId, item]));
+  const roots = new Map();
+  const writes = new Map();
+  for (let index = parsed.toolCalls.length - 1; index >= 0 && writes.size < 12; index--) {
+    const call = parsed.toolCalls[index];
+    if (call.seq <= turnStart) break;
+    if (!call.cwd || !["write", "edit"].includes(call.name)) continue;
+    const result = results.get(call.callId);
+    if (!result || result.isError || result.seq <= call.seq || result.time < cutoff || result.time > now) continue;
+    const args = parseToolArgs(call);
+    const target = resolveArtifactPath(args.path || args.file_path || args.filePath || args.file, call.cwd);
+    if (!target) continue;
+    try {
+      if (!roots.has(call.cwd)) roots.set(call.cwd, gitWorktreeRoot(call.cwd));
+      const root = roots.get(call.cwd);
+      if (!root) continue;
+      const file = fs.realpathSync(target);
+      const relative = path.relative(root, file);
+      if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !fs.statSync(file).isFile()) continue;
+      const key = shortHash(`${root}\0${file}`, 24);
+      if (!writes.has(key)) writes.set(key, { key, path: relative, seq: result.seq, at: result.time });
+    } catch { /* missing or inaccessible checkout evidence is omitted */ }
+  }
+  return [...writes.values()];
 }
 
 /**
@@ -764,6 +817,18 @@ export function createSessionSource({ dshHome } = {}) {
     }
   }
 
+  function sessionLiveness({ dir, file, hasOpenTurn, lastActivityAt }, now = Date.now()) {
+    const sessionDir = dir || (file ? path.dirname(file) : null);
+    if (sessionDir) {
+      try {
+        if (now - fs.statSync(path.join(sessionDir, "session.lock")).mtimeMs < 5 * 60_000) return true;
+      } catch {
+        // A session may have no active writer.
+      }
+    }
+    return Boolean(hasOpenTurn && lastActivityAt > 0 && now - lastActivityAt < 30 * 60_000);
+  }
+
   /**
    * Read + decompress + parse one session file (synchronous, ~10-300ms).
    *
@@ -786,7 +851,8 @@ export function createSessionSource({ dshHome } = {}) {
         // LRU touch: re-insert so the hottest session survives eviction.
         parsedCache.delete(file);
         parsedCache.set(file, cached);
-        return cached.parsed;
+        const isLive = sessionLiveness(cached.parsed);
+        return isLive === cached.parsed.isLive ? cached.parsed : { ...cached.parsed, isLive };
       }
     }
     const diagnostics = [];
@@ -834,6 +900,9 @@ export function createSessionSource({ dshHome } = {}) {
     let lastAssistantText = null;
     let assistantTexts = 0;
     let turnsSeen = 0;
+    let lastSeedSeq = 0;
+    const initialCwd = typeof sessionInfo.cwd === "string" ? sessionInfo.cwd : meta.cwd;
+    let workingDirectory = typeof initialCwd === "string" && path.isAbsolute(initialCwd) ? initialCwd : null;
 
     for (const event of events) {
       const data = event.data || {};
@@ -843,6 +912,12 @@ export function createSessionSource({ dshHome } = {}) {
       if (day) activity[day] = (activity[day] || 0) + 1;
 
       switch (event.type) {
+        case "session/end-seed":
+          lastSeedSeq = event.seq;
+          break;
+        case "working-directory/change":
+          workingDirectory = typeof data.cwd === "string" && path.isAbsolute(data.cwd) ? data.cwd : null;
+          break;
         case "user/message": {
           const text = textOfContent(data.content).trim();
           if (!text) break;
@@ -885,13 +960,14 @@ export function createSessionSource({ dshHome } = {}) {
               time: event.time,
               name: String(data.name),
               callId: data.callId || null,
+              cwd: workingDirectory,
               args: typeof data.arguments === "string" ? data.arguments : JSON.stringify(data.arguments ?? ""),
             });
           }
           break;
         }
         case "tool/result": {
-          const isError = data.message?.isError === true;
+          const isError = data.message?.isError === true || Boolean(data.error);
           const text = textOfContent(data.message?.content);
           toolResults.push({
             seq: event.seq,
@@ -949,6 +1025,7 @@ export function createSessionSource({ dshHome } = {}) {
           const files = Array.isArray(data.files) ? data.files : [];
           if (files.length) {
             deliverables.push({
+              cwd: workingDirectory,
               seq: event.seq,
               time: event.time,
               files: files
@@ -1005,19 +1082,8 @@ export function createSessionSource({ dshHome } = {}) {
       readableTitle(title, users[0]?.text) ||
       `会话 ${meta.id.slice(-6)}`;
     const lastTurnEnd = turnEnds[turnEnds.length - 1] || null;
-    const sessionDir = meta.dir || (meta.file ? path.dirname(meta.file) : "");
-    let lockAgeMs = null;
-    if (sessionDir) {
-      try {
-        lockAgeMs = Date.now() - fs.statSync(path.join(sessionDir, "session.lock")).mtimeMs;
-      } catch {
-        lockAgeMs = null;
-      }
-    }
-    const structuralLive =
-      Boolean(lastEvent) && lastEvent.type !== "turn/end" && lastEvent.type !== "session/end-seed";
-    const recentlyActive = lastActivityAt > 0 && Date.now() - lastActivityAt < 30 * 60_000;
-    const isLive = (structuralLive && recentlyActive) || (lockAgeMs !== null && lockAgeMs < 5 * 60_000);
+    const hasOpenTurn = (turnStarts.at(-1)?.seq || 0) > Math.max(lastTurnEnd?.seq || 0, lastSeedSeq);
+    const isLive = sessionLiveness({ ...meta, lastActivityAt, hasOpenTurn });
 
     return {
       id: meta.id,
@@ -1064,6 +1130,7 @@ export function createSessionSource({ dshHome } = {}) {
       assistantMessageCount: assistantTexts,
       eventCount: events.length,
       isLive,
+      hasOpenTurn,
       diagnostics,
     };
   }
@@ -1102,6 +1169,7 @@ export function createSessionSource({ dshHome } = {}) {
       eventCount: parsed.eventCount,
       turnCount: parsed.turnCount,
       isLive: parsed.isLive,
+      hasOpenTurn: parsed.hasOpenTurn,
       lastEventType: parsed.lastEvent?.type || null,
       lastEventSeq: parsed.lastEvent?.seq ?? 0,
       lastTurnEnd: parsed.lastTurnEnd,
@@ -1116,6 +1184,7 @@ export function createSessionSource({ dshHome } = {}) {
       goalText: parsed.goal?.text || null,
       goalStatus: parsed.goal?.status || null,
       activity: parsed.activity,
+      recentWrites: recentWritesOf(parsed, Date.now()),
       parsedAt: new Date().toISOString(),
     };
   }
@@ -1328,6 +1397,7 @@ export function createSessionSource({ dshHome } = {}) {
   return {
     discover,
     loadParsed,
+    sessionLiveness,
     metaFromParsed,
     buildDigest,
     collectEvidence,

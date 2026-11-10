@@ -38,10 +38,8 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 node -p "require(require('os').homedir() + '/.dsh/profiles/desktop/node_modules/dsh-super-kanban/package.json').version"
 ```
 
-- 如果依赖是 `^0.3.0` / `0.3.x`：按 [INSTALL.md 第 3.2 节](INSTALL.md#32-推荐升级步骤所有安装方式通用) **卸载旧版，安装精确版本** `dsh-super-kanban@0.5.2`（以目标版本号为准；市场详情页的版本列表也能直接选具体版本）。
-- 如果依赖是 `^0.4.0`：0.4.x 补丁版（0.4.1…）可被解析，重新安装/`pnpm install` 即可；升级到 0.5.x 跨 minor 仍需精确版本（如 `0.5.2`）。
-- 如果依赖是 `^0.5.0`：0.5.x 补丁版（0.5.1、0.5.2…）可被解析；跨 minor 仍需精确版本。
-- 如果依赖是 `link:/path/...`：这是源码安装，升级方式是更新该目录的代码（`git pull` / `git checkout v0.5.2` 固定到目标版本），刷新窗口即可；各安装方式的「安装特定版本」示例见 [INSTALL.md 第 1 节](INSTALL.md#1-安装四种方式)。
+- 跨 minor 升级时，按 [安装指南第 3.2 节](INSTALL.md#32-推荐升级步骤所有安装方式通用) 卸载后安装目标精确版本。
+- 如果依赖是 `link:/path/...`：这是源码安装，升级方式是更新该目录的代码（`git pull` / `git checkout v0.6.0` 固定到目标版本），刷新窗口即可；各安装方式的「安装特定版本」示例见 [INSTALL.md 第 1 节](INSTALL.md#1-安装四种方式)。
 
 ### 原因二：客户端 bundle 缓存 / 旧进程
 
@@ -56,7 +54,7 @@ DSH 桌面版使用 `desktop` profile；如果你在隔离 home（`DSH_HOME=/pat
 ### 仍不生效
 
 按 [INSTALL.md 第 3.5 节](INSTALL.md#35-更新后界面仍旧4-步快速排查) 走完整 4 步；再不行则卸载插件、重启 DSH、重新安装目标精确版本
-（如 `dsh-super-kanban@0.5.2`；市场版本列表、npm 精确版本、Git tag 等写法见 [INSTALL.md 第 1 节](INSTALL.md#1-安装四种方式)），
+（如 `dsh-super-kanban@0.6.0`；市场版本列表、npm 精确版本、Git tag 等写法见 [INSTALL.md 第 1 节](INSTALL.md#1-安装四种方式)），
 并带上 [诊断信息](#如何收集诊断信息) 反馈。回滚步骤见 [INSTALL.md 第 4 节](INSTALL.md#4-回滚到旧版本)。
 
 ---
