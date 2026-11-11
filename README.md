@@ -10,6 +10,8 @@
 
 ![Super Kanban 封面](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/cover.png)
 
+> 封面为功能示意，实际界面见截图页面。
+
 ## 功能
 
 - **自动更新**：增量扫描会话，整理任务进度、问题和交付物；也可手动管理和锁定字段。
@@ -21,7 +23,7 @@
 
 ## 快速开始
 
-1. 在 DSH 的 **插件 → 添加插件** 输入 `dsh-super-kanban@0.8.0`，安装、启用并刷新窗口。也可通过[插件市场](https://topmindspace.github.io/dsh-super-kanban/index.json)或源码安装；`0.8.0` 是精确版本示例。
+1. 在 DSH 的 **插件 → 添加插件** 输入 `dsh-super-kanban@0.8.0`，安装、启用并刷新窗口。也可通过[插件市场](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐)或源码安装；`0.8.0` 是精确版本示例。
 2. 打开左侧 **任务看板**，在设置中确认扫描范围，然后点击 **扫描**。
 3. 在 **待处理** 查看需要关注的事项，打开任务详情，选择 **继续此任务** 或 **验收产出**。检查草稿后由你发送。
 

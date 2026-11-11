@@ -10,6 +10,8 @@ Manage projects and tasks in DeepSeek Harness (DSH): track session progress, han
 
 ![Super Kanban cover](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/cover.png)
 
+> The cover is an illustration; see the screenshot gallery for the actual interface.
+
 ## Features
 
 - **Automatic updates**: incrementally scan sessions for progress, issues, and deliverables; manage tasks manually and lock fields too.
@@ -21,7 +23,7 @@ Manage projects and tasks in DeepSeek Harness (DSH): track session progress, han
 
 ## Quick start
 
-1. In DSH, open **Plugins → Add plugin**, enter `dsh-super-kanban@0.8.0`, install and enable it, then reload the window. You can also use the [plugin market](https://topmindspace.github.io/dsh-super-kanban/index.json) or install from source; `0.8.0` is an example of an exact version.
+1. In DSH, open **Plugins → Add plugin**, enter `dsh-super-kanban@0.8.0`, install and enable it, then reload the window. You can also use the [plugin market](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐) or install from source; `0.8.0` is an example of an exact version.
 2. Open **任务看板** (Task board) in the left sidebar, check the scan scope in settings, and click **扫描** (Scan). The UI is currently in Chinese.
 3. Open **待处理** (Inbox), select a task, and choose **继续此任务** (Continue task) or **验收产出** (Review deliverables). Review the draft and send it yourself.
 
