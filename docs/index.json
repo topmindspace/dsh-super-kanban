@@ -41,8 +41,8 @@
         "zh": "Super Kanban 任务看板"
       },
       "description": {
-        "en": "Local task board for DeepSeek Harness. Triage session requests, group related sessions, review deliverables and continue work from a shared task card.",
-        "zh": "面向 DeepSeek Harness 的 AI 任务看板：从会话自动研判任务目标、进度与问题，优先展示关键事实，支持子任务、产物追溯、一键继续任务，以及全页 / 右侧栏双形态界面。"
+        "en": "AI project board for DeepSeek Harness with live session status, task schedules, deliverable review and quick chat.",
+        "zh": "面向 DeepSeek Harness 的 AI 项目看板。自动更新会话任务，集中处理审批、阻塞和验收，支持项目归属、任务日程、备注与快聊。可在全页或会话右侧栏打开。"
       },
       "icon": "./icon.svg",
       "author": "topmindspace",
@@ -58,6 +58,7 @@
           "dsh-plugin",
           "kanban",
           "task-tracking",
+          "project-management",
           "ai-agent",
           "session",
           "productivity"
@@ -69,6 +70,18 @@
         "sortKeys": {}
       },
       "versions": [
+        {
+          "version": "0.7.0",
+          "publishTimestamp": 1794391000,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/topmindspace/dsh-super-kanban",
+            "commit": "bcd17842a1fe88fca501bd0ef8797c85f1678306"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.5 <0.3.0"
+          }
+        },
         {
           "version": "0.6.1",
           "publishTimestamp": 1794313780,
