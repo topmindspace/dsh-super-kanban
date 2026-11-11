@@ -882,7 +882,7 @@ test("unregistered DSH default provider: rules-only, never falls back to the cat
   assert.equal(state.tasks[0].ai.engine, "rules");
 });
 
-test("no default model: falls back to the first catalog model", async (t) => {
+test("no default model: scan stays local until the user selects a model", async (t) => {
   const host = makeHost({
     scripts: [okScript()],
     providers: [{ id: "p1", name: "Provider One" }],
@@ -891,6 +891,11 @@ test("no default model: falls back to the first catalog model", async (t) => {
   });
   const { service } = await setup(t, { sessionIds: ["sess-01"], host });
 
+  const initial = await runScan(service);
+  assert.equal(initial.scan.aiCalls, 0);
+  assert.match(initial.scan.message, /DSH 尚未设置默认模型/);
+  assert.equal(host.streams.length, 0);
+  assert.equal((await command(service, "settings.model", { provider: "p1", model: "m1" })).status, 200);
   const state = await runScan(service);
   assert.equal(state.scan.aiCalls, 1);
   assert.equal(host.streams.length, 1);

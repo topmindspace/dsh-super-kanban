@@ -53,7 +53,7 @@ function call(service, { method = "GET", route = "/ai/models", body } = {}) {
   };
   const res = new MockResponse();
   const url = new URL(`http://plugin.local${route}`);
-  const pending = service.handle(req, res, { route, url, method });
+  const pending = service.handle(req, res, { route: url.pathname, url, method });
   if (body !== undefined) {
     req.emit("data", Buffer.from(JSON.stringify(body)));
     req.emit("end");
@@ -228,6 +228,22 @@ test("the catalog is cached for 30s", async (t) => {
   const second = await getCatalog(service);
   assert.equal(host.listModelCalls.length, 2, "a second read inside the TTL must not re-list models");
   assert.equal(second.json.fetchedAt, first.json.fetchedAt);
+});
+
+test("cached catalogs report the live DSH default and allow an explicit refresh", async (t) => {
+  const host = makeHost();
+  const { service } = await setup(t, { host });
+  await getCatalog(service);
+  host.setDefaultSelection({ provider: "minimax-cn", model: "MiniMax-M2.7" });
+  const refresh = () => call(service, { route: "/ai/models?refresh=1" });
+  assert.deepEqual((await refresh()).json.default, { provider: "minimax-cn", model: "MiniMax-M2.7" });
+  assert.equal(host.listModelCalls.length, 2, "a refresh inside the short cooldown reuses the catalog");
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now + 2500);
+  await getCatalog(service);
+  assert.equal(host.listModelCalls.length, 2);
+  await refresh();
+  assert.equal(host.listModelCalls.length, 4);
 });
 
 test("DSH model events invalidate the catalog cache and the default selection is refreshed", async (t) => {

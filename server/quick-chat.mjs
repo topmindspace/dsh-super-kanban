@@ -1,7 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { badRequest, conflict, json, readBody } from "./http.mjs";
 import { streamOnce } from "./native-llm.mjs";
 
 const INPUT_LIMIT = 4000;
+const ANSWER_LIMIT = 12_000;
+const CONTEXT_LIMIT = 24_000;
+const CONTEXT_TURNS = 4;
 const CHAT_TIMEOUT_MS = 45_000;
 const SYSTEM_PROMPTS = {
   ask: "直接简洁地回答用户的问题，使用用户的语言。只输出回答正文。",
@@ -9,7 +13,30 @@ const SYSTEM_PROMPTS = {
   "translate-en": "Translate the user's text into English. Preserve meaning and paragraphs. Output only the translation.",
 };
 
-export function createQuickChat({ llmService, defaultModelSelection }) {
+function readContext(context) {
+  if (context === undefined) return null;
+  if (!context || typeof context.provider !== "string" || context.provider.length > 100 ||
+      typeof context.model !== "string" || context.model.length > 200 ||
+      !Array.isArray(context.turns) || context.turns.length > CONTEXT_TURNS) {
+    throw badRequest("快聊上下文格式无效");
+  }
+  let size = 0;
+  for (const turn of context.turns) {
+    if (typeof turn?.input !== "string" || !turn.input.trim() || turn.input.length > INPUT_LIMIT ||
+        typeof turn.answer !== "string" || !turn.answer.trim() || turn.answer.length > ANSWER_LIMIT) {
+      throw badRequest("快聊上下文格式无效");
+    }
+    size += turn.input.length + turn.answer.length;
+  }
+  if (size > CONTEXT_LIMIT) throw badRequest("快聊上下文超过长度上限");
+  return context;
+}
+
+function userMessage(text) {
+  return { id: randomUUID(), role: "user", source: { kind: "user" }, content: [{ type: "text", text }] };
+}
+
+export function createQuickChat({ llmService, resolveAiRoute }) {
   let active = null;
   let stopped = false;
 
@@ -17,19 +44,31 @@ export function createQuickChat({ llmService, defaultModelSelection }) {
     if (!/^application\/json(?:\s*;|\s*$)/i.test(req.headers?.["content-type"] || "")) {
       throw badRequest("请使用 JSON 提交快聊内容");
     }
-    const body = await readBody(req, { limit: 32 * 1024, timeoutMs: 5000 });
+    const body = await readBody(req, { limit: 192 * 1024, timeoutMs: 5000 });
     const input = typeof body?.input === "string" ? body.input.trim() : "";
     if (!input || input.length > INPUT_LIMIT || typeof body.mode !== "string" || !Object.hasOwn(SYSTEM_PROMPTS, body.mode)) {
       throw badRequest(`请选择快聊模式并输入 1–${INPUT_LIMIT} 字`);
     }
+    const context = body.mode === "ask" ? readContext(body.context) : null;
     if (stopped) throw Object.assign(new Error("看板服务已停止"), { code: "stopped" });
     if (active) throw conflict(active.signal.aborted ? "上一次模型请求正在停止，请稍后再试" : "已有快聊请求进行中");
     const llm = llmService();
-    const route = defaultModelSelection();
-    if (!route || typeof llm?.stream !== "function") {
-      json(res, 503, { ok: false, error: "chat-unavailable", message: "快聊暂不可用，请在 DSH 设置 → 模型中设置默认模型" });
+    const route = resolveAiRoute(llm);
+    if (!route.ok || typeof llm?.stream !== "function") {
+      json(res, 503, { ok: false, error: "chat-unavailable", message: route.message || "当前 DSH 未提供快聊所需的模型服务" });
       return;
     }
+    // A new model or provider starts fresh. Never send earlier turns to it.
+    const turns = context?.provider === route.provider && context.model === route.model ? context.turns : [];
+    const messages = turns.flatMap(({ input, answer }) => [
+      userMessage(input),
+      {
+        id: randomUUID(), role: "assistant",
+        source: { kind: "model", provider: route.provider, model: route.model },
+        content: [{ type: "text", text: answer }],
+      },
+    ]);
+    messages.push(userMessage(input));
     if (res.destroyed) return;
     const controller = new AbortController();
     active = controller;
@@ -50,7 +89,7 @@ export function createQuickChat({ llmService, defaultModelSelection }) {
         "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff",
       });
-      write({ type: "start", model: route.model });
+      write({ type: "start", provider: route.provider, model: route.model, contextUsed: turns.length });
       const cancelled = new Promise((resolve) => {
         const finish = () => resolve({ ok: false, code: controller.signal.reason });
         if (controller.signal.aborted) finish();
@@ -60,8 +99,8 @@ export function createQuickChat({ llmService, defaultModelSelection }) {
       const response = streamOnce({
         llm, ...route, signal: controller.signal,
         system: SYSTEM_PROMPTS[body.mode],
-        messages: [{ role: "user", content: [{ type: "text", text: input }] }],
-        maxTokens: 1200, maxChars: 12_000,
+        messages,
+        maxTokens: 1200, maxChars: ANSWER_LIMIT,
         waitForCleanup: true,
         onText: (text) => write({ type: "delta", text }),
       }).finally(release);
@@ -71,7 +110,7 @@ export function createQuickChat({ llmService, defaultModelSelection }) {
         type: "error",
         message: outcome.code === "timeout" ? "回答超时，请重试"
           : outcome.code === "truncated" ? "回答达到长度上限，可缩短输入后重试"
-          : "模型未能完成回答，请重试或检查 DSH 默认模型",
+          : "模型未能完成回答，请重试或在 DSH 设置 → 模型中检查配置",
       });
     } finally {
       clearTimeout(timer);

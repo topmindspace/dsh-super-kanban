@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-11
+
+### 新增
+
+- 工具栏显示当前模型。可从工具栏、快聊或设置切换模型，也可跟随 DSH 默认。扫描、重新研判、润色和快聊共用这份选择。
+- 快聊支持连续追问、逐条复制和清空问答。翻译独立处理当前原文。换模型后从新一轮开始记忆，已有回答仍可查看。
+
+### 优化与修复
+
+- 快聊显示实际应答的模型，停止或失败时保留草稿和已收到的回答。模型目录支持手动刷新，选择失败会在弹窗中提示。
+- DSH 未设置默认模型时，扫描使用本地规则，快聊提示配置模型。已选模型不可用时保留选择并提示处理。
+- 更新安装、接口、隐私和排障指南，移除过时的设置布局、重复示例和历史验收说明。
+
 ## [0.7.0] - 2026-11-11
 
 ### 新增
@@ -411,7 +424,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.8.0
 [0.7.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.7.0
 [0.6.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.6.1
 [0.6.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.6.0

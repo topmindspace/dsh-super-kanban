@@ -4,11 +4,11 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.7.x | ✅ (current release line) |
-| 0.6.x | 🟡 (previous line, best-effort fixes) |
-| < 0.6 | ❌ (end of support) |
+| 0.8.x | ✅ (current release line) |
+| 0.7.x | 🟡 (previous line, best-effort fixes) |
+| < 0.7 | ❌ (end of support) |
 
-Security fixes land on `0.7.x`. The `0.6.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
+Security fixes land on `0.8.x`. The `0.7.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
 
 ## Reporting a vulnerability
 
@@ -65,17 +65,19 @@ does not collect telemetry.
 - Handoff generation is local. Choosing **AI 润色** sends the current draft of up to 3,000 characters to the configured model, including any criteria, paths and source references present in the draft.
 - Project and task notes stay in board state and are included in local exports.
 - Quick chat sends its mode instruction and the submitted text (up to 4,000
-  characters) through the DSH default model. The board keeps the answer in the
-  open dialog. Quick chat calls can incur provider usage independently of the
-  board's analysis budget.
+  characters). Q&A can include up to four recent completed exchanges from the
+  same provider and model. Translation sends the current passage. Switching
+  routes starts fresh context. The open dialog holds the local transcript in
+  memory and clears it on close. The selected provider may account for quick
+  chat separately from the board's analysis budget.
 - The plugin does **not** pass a `sessionId` (which would let DSH's official
   routes attach their session-log payload), so no session log is uploaded to a
   model provider by the board.
 - If you follow the DSH default model, requests go to whatever provider DSH is
   configured to use (for example the DeepSeek account or an API-key provider).
   If you explicitly select a third-party model in the board settings, the
-  compacted digest is sent to **that third party**, under that provider's terms
-  and data policy. The board tells you this in the settings dialog.
+  relevant request data goes to that provider under its terms and data policy.
+  The model picker names the provider.
 - Model requests may also be observed by LLM middleware installed in your DSH
   deployment (e.g. for attribution); that is part of the DSH/plugin trust
   boundary, not of this plugin.

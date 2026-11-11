@@ -46,12 +46,11 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 - CI 的 `npm run check:docs` 会校验落地页（`lang`、`<title>`、指向 `./index.json` 的链接、
   `.nojekyll`、无硬编码版本号、本地资源存在），防止页面提前失效。
 
-> 落地页显示的"当前版本"由页面在运行时 `fetch("./index.json")` 读取，不在 HTML 里写死，
-> 因此版本升级不需要改 `docs/index.html`。
+> 落地页从 `./index.json` 读取当前版本。安装示例使用本次发布的精确版本。
 
 ### 方式 B：npm 包名
 
-DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.7.0`，升级时推荐）→ 安装 → 启用 → 刷新。
+DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.8.0`，升级时推荐）→ 安装 → 启用 → 刷新。
 
 ### 方式 C：Git 仓库
 
@@ -76,7 +75,7 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 注意：
 
 - 插件页安装 npm/市场来源会用 `pnpm add --save-exact`，把**精确版本**写入 profile 依赖；所以升级需要重新安装目标版本，而不是只点一下刷新。
-- 手动使用范围依赖时，`^0.6.0` 只解析 0.6.x。升级到 0.7.x 可安装目标精确版本。
+- 手动使用范围依赖时，`^0.7.0` 只解析 0.7.x。升级到 0.8.x 可安装目标精确版本。
 - 维护者在发版推送前提交 `docs/index.json`，GitHub Pages 随主分支部署。等待索引部署完成后，刷新发现页即可看到新版本。
 
 更完整的用户升级/验证/回滚步骤见 [INSTALL.md](INSTALL.md#3-更新插件升级)。
@@ -165,5 +164,5 @@ Super Kanban 的索引由本仓库维护，通过 GitHub Pages 提供。DSH 的�
 ## 7. 安全与信任
 
 - 市场索引内容来自第三方，DSH 会在安装前提示信任风险；用户应自行确认来源（本仓库）。
-- 看板只读本机会话并在本地保存任务。AI 研判和主动触发的草稿润色经 DSH 发给配置的模型服务。数据范围见 [SECURITY.md](../SECURITY.md)。
+- 看板只读本机会话并在本地保存任务。研判、润色与快聊经 DSH 使用看板选择的模型。数据范围见 [SECURITY.md](../SECURITY.md)。
 - 发布物不包含任何凭证；仓库 CI 会运行隐私扫描（`scripts/check-privacy.mjs`）阻止个人路径/密钥进入 Git。

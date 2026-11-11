@@ -38,7 +38,7 @@ function loadClient(services, { snapshot, view = "attention", clipboard, fetch, 
     AbortSignal,
     setTimeout,
   };
-  const script = inspect ? source.replace("return { apply, inject:", "return { apply, useBoardData, command, draftChanges, inject:") : source;
+  const script = inspect ? source.replace("return { apply, inject:", "return { apply, useBoardData, command, draftChanges, chatContext, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
     get: (name) => services[name],
@@ -393,6 +393,31 @@ test("a successful write starts a fresh shared state request and a late older re
   pending[0].resolve(Response.json({ ok: true, tasks: [{ id: "t", title: "旧状态", updatedAt: "old" }] }));
   assert.equal(await before, null);
   assert.deepEqual(updates, ["新状态", "新状态"]);
+});
+
+test("board snapshots reconcile a local model update even after a switch back elsewhere", async () => {
+  const updates = [];
+  const route = { ok: true, provider: "demo", model: "previous" };
+  const { plugin } = loadClient({}, { inspect: true,
+    fetch: async () => Response.json({ ok: true, tasks: [], aiRoute: route }),
+    onState: (value) => { if (value?.aiRoute) updates.push(value.aiRoute.model); } });
+  const board = plugin.useBoardData();
+  await board.reload(true);
+  board.setData((state) => ({ ...state, aiRoute: { ...route, model: "local-choice" } }));
+  await board.reload(true);
+  assert.deepEqual(updates, ["previous", "previous"]);
+});
+
+test("quick chat only supplies recent contiguous turns from the selected model", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const route = { ok: true, provider: "demo", model: "selected" };
+  const turns = Array.from({ length: 6 }, (_, index) => ({ ...route, input: String(index), answer: "answer" }));
+  assert.deepEqual(Array.from(plugin.chatContext(turns, route).turns, ({ input }) => input), ["2", "3", "4", "5"]);
+  turns[4].provider = "another-provider";
+  assert.deepEqual(Array.from(plugin.chatContext(turns, route).turns, ({ input }) => input), ["5"]);
+  assert.equal(plugin.chatContext(turns, { ...route, model: "different" }), undefined);
+  const large = turns.map((turn) => ({ ...turn, provider: route.provider, answer: "x".repeat(12_000) }));
+  assert.equal(plugin.chatContext(large, route).turns.length, 1);
 });
 
 test("without native status, the inbox distinguishes usable deliverables from unconfirmed progress", () => {

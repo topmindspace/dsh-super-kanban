@@ -551,6 +551,11 @@ window.__ModuleLoader__.load({
       return ref && ref.provider && ref.model ? JSON.stringify([ref.provider, ref.model]) : "";
     }
 
+    function selectedModelLabel(route) {
+      if (!route?.model) return route?.ok === false ? "未配置模型" : "DSH 默认";
+      return modelNameOf(route.provider, route.model);
+    }
+
     function parseAiModelValue(value) {
       if (typeof value !== "string" || !value) return null;
       try {
@@ -719,7 +724,7 @@ window.__ModuleLoader__.load({
             : { status: "loading", data: null, error: "", announce: "" },
         );
         try {
-          const payload = await apiRequest("/ai/models", { signal: controller.signal });
+          const payload = await apiRequest(manual ? "/ai/models?refresh=1" : "/ai/models", { signal: controller.signal });
           const catalog = normalizeAiCatalog(payload);
           aiCatalogCache = { ...catalog, at: Date.now() };
           aiCatalogProviders = catalog.providers;
@@ -801,7 +806,7 @@ window.__ModuleLoader__.load({
               ? `读取模型目录失败（${catalog.error || "未知错误"}）`
               : "当前目录中没有该模型";
         return {
-          text: `已保存：${modelLabel(current.provider, current.model)}；${detail}。下一次研判仍会尝试该模型，失败则降级为规则推断。${
+          text: `已保存：${modelLabel(current.provider, current.model)}；${detail}。如果提供方仍可用，系统会继续尝试此模型。${
             catalog.status === "unavailable" ? "" : "可在「DSH 设置 → 模型」中检查后点右侧刷新，或改为跟随默认。"
           }${failText}`,
           warn: true,
@@ -848,7 +853,7 @@ window.__ModuleLoader__.load({
       }
       if (!defaultRef) {
         return {
-          text: `未读取到 DSH 默认模型；扫描时会回退到模型目录中第一个有模型的 provider 的模型（没有可用模型时用规则推断）。${failText}`,
+          text: `DSH 尚未设置默认模型。请选择目录中的模型，或先在 DSH 设置中设定默认模型。${failText}`,
           warn: true,
         };
       }
@@ -1803,7 +1808,23 @@ button.sk-task-row-main{cursor:pointer}
 .sk-schedule-group{margin-bottom:14px}
 .sk-schedule-group h2{font-size:14px;margin:8px 0}
 .sk-schedule-group h2 span{font-weight:400;color:var(--sk-ink-3);margin-inline-start:8px}
-.sk-chat-answer{max-height:min(32vh,320px);overflow:auto;overscroll-behavior:contain;border:1px solid var(--sk-line);border-radius:8px;padding:10px;background:var(--sk-surface-2);font-size:13px;line-height:1.55}
+.sk-chat-controls,.sk-chat-turn-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.sk-chat-mode,.sk-model-button{min-width:0;max-width:55%}
+.sk-chat-mode,.sk-model-controls{position:relative}
+.sk-chat-mode{display:flex;align-items:center}
+.sk-chat-mode .sk-select,.sk-model-controls .sk-select{padding-inline-end:25px}
+.sk-chat-mode .sk-ws-caret,.sk-model-controls .sk-ws-caret{inset-inline-end:8px}
+.sk-model-button{display:inline-flex;align-items:center;gap:5px}
+.sk-model-button svg,.sk-model-trigger svg{flex:none}
+.sk-model-button span,.sk-model-trigger span,.sk-chat-turn-meta span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sk-chat-thread{max-height:min(36vh,360px);min-height:0;flex:0 1 auto;overflow:auto;overscroll-behavior:contain;display:grid;gap:12px;
+  border:1px solid var(--sk-line);border-radius:8px;padding:10px;background:var(--sk-surface-2);font-size:13px;line-height:1.55}
+.sk-chat-turn{display:grid;gap:6px;min-width:0}
+.sk-chat-question{justify-self:end;max-width:92%;width:fit-content;margin:0;border-radius:8px;padding:5px 9px;background:var(--sk-surface-3,var(--sk-line));font-weight:500}
+.sk-chat-turn-meta{font-size:11px;color:var(--sk-ink-3)}
+.sk-chat-turn-meta button{flex:none}
+.sk-header-actions .sk-model-trigger.is-warn{color:var(--sk-amber)}
+.sk-page:not(.sk-compact-header) .sk-header-actions .sk-model-trigger{display:inline-flex;align-items:center;gap:5px;width:auto;max-width:148px;padding:0 7px;font-size:12px}
 .sk-chat-modal .sk-modal-foot{flex-wrap:wrap}
 .sk-iconbtn-v3.sk-chat-trigger{display:inline-flex;align-items:center;justify-content:center;width:auto;gap:5px;padding:0 7px;white-space:nowrap;font-size:12px}
 .sk-tier-narrow .sk-slimbar .sk-count{display:none}
@@ -1855,7 +1876,7 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     /** 对话框：初始焦点 + Tab 焦点陷阱 + 关闭后焦点归还；Esc 交给最上层对话框。 */
-    function useDialogFocus(rootRef, onEscape) {
+    function useDialogFocus(rootRef, onEscape, returnFocus) {
       const escapeRef = React.useRef(onEscape);
       React.useEffect(() => {
         escapeRef.current = onEscape;
@@ -1863,7 +1884,7 @@ button.sk-task-row-main{cursor:pointer}
       React.useEffect(() => {
         const token = Symbol("dialog");
         const node = rootRef.current;
-        const previous = document.activeElement;
+        const previous = returnFocus?.current || document.activeElement;
         dialogStack.push(token);
         const initial = node?.querySelector("[data-sk-initial-focus]") || focusableIn(node)[0];
         if (initial) {
@@ -1917,7 +1938,7 @@ button.sk-task-row-main{cursor:pointer}
             previous.focus({ preventScroll: true });
           }
         };
-      }, [rootRef]);
+      }, [rootRef, returnFocus]);
     }
 
     // 抽屉 / 弹窗打开时锁住页面滚动（引用计数，嵌套浮层不会提前解锁）。
@@ -1985,6 +2006,7 @@ button.sk-task-row-main{cursor:pointer}
           maintenance: payload.maintenance || null,
           writeOverlaps: payload.writeOverlaps || null,
           settings: payload.settings || null,
+          aiRoute: payload.aiRoute || null,
           usage: payload.usage || null,
           stats: payload.stats || null,
           activity: payload.activity || null,
@@ -2112,7 +2134,13 @@ button.sk-task-row-main{cursor:pointer}
         };
       }, [load]);
 
-      return { data, error, loading, reload: load, setData };
+      const applyLocalState = React.useCallback((update) => {
+        // The next server snapshot must reconcile any local change, even if it
+        // matches the last snapshot (e.g. another window switched back).
+        signature.current = "";
+        setData(update);
+      }, []);
+      return { data, error, loading, reload: load, setData: applyLocalState };
     }
 
     /* ================================ cards =============================== */
@@ -3620,10 +3648,11 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     /**
-     * 设置弹窗「AI 研判模型」全宽 block：原生 select + optgroup（零依赖、键盘/读屏/420px 原生可用）。
+     * DSH 模型选择，按提供方分组。
      * 模型目录只读 DSH；第三方模型与凭证在「DSH 设置 → 模型」配置，看板不保存凭证。
      */
-    function AiModelBlock({ draft, set, catalog }) {
+    function AiModelBlock({ draft, set, catalog, saving }) {
+      const selectId = React.useId();
       const data = catalog.data;
       const models = (data && data.models) || [];
       const groups = (data && data.groups) || [];
@@ -3633,8 +3662,7 @@ button.sk-task-row-main{cursor:pointer}
         : true;
       const busy = catalog.status === "loading" || catalog.status === "refreshing";
       // 刷新期间不 disabled（disabled 会让焦点掉出弹窗），用 aria-busy + 内部去重防重复请求。
-      const refreshDisabled = catalog.status === "loading";
-      const disabled = catalog.status === "loading";
+      const refreshDisabled = saving || catalog.status === "loading";
       const note = catalogNote(catalog, current);
       const effectiveProvider = current ? current.provider : data && data.default ? data.default.provider : "";
       const thirdParty = isThirdPartyProvider(effectiveProvider);
@@ -3676,9 +3704,9 @@ button.sk-task-row-main{cursor:pointer}
           { className: "sk-settings-block-head" },
           h(
             "div",
-            { className: "label", id: "sk-ai-model-label" },
-            h("b", null, "AI 研判模型"),
-            h("span", null, "默认跟随 DSH 的默认模型；也可以指定一个已在 DSH 中配置的模型"),
+            { className: "label" },
+            h("label", { className: "sk-sr-only", htmlFor: selectId }, "模型"),
+            h("span", null, "用于之后的扫描、重新研判、润色和快聊。"),
           ),
           catalog.status === "unavailable"
             ? null
@@ -3698,17 +3726,17 @@ button.sk-task-row-main{cursor:pointer}
         ),
         h(
           "div",
-          { className: "sk-settings-controls" },
+          { className: "sk-settings-controls sk-model-controls" },
           h(
             "select",
             {
-              id: "sk-ai-model",
+              id: selectId,
               className: "sk-select sk-model-select",
-              "aria-labelledby": "sk-ai-model-label",
-              "aria-describedby": "sk-ai-model-desc sk-ai-model-guide sk-ai-model-status",
+              "aria-describedby": `${selectId}-desc ${selectId}-guide`,
               title: current ? modelLabel(current.provider, current.model) : "跟随 DSH 默认",
               value: aiModelValue(current),
-              disabled,
+              disabled: saving,
+              "data-sk-initial-focus": true,
               onChange: (event) => {
                 const next = parseAiModelValue(event.target.value);
                 // 一次 set 两个字段，避免出现「只有 provider / 只有 model」的混合态。
@@ -3717,10 +3745,11 @@ button.sk-task-row-main{cursor:pointer}
             },
             options,
           ),
+          h(Icon, { name: "chevronDown", size: 12, className: "sk-ws-caret" }),
         ),
         h(
           "p",
-          { id: "sk-ai-model-desc", className: cx("sk-catalog-note", note.warn && "is-warn") },
+          { id: `${selectId}-desc`, className: cx("sk-catalog-note", note.warn && "is-warn") },
           note.text,
           // S2：文本按钮之间加可见分隔符，避免读屏/复制时连成「…改为跟随默认重试」。
           note.followDefault
@@ -3728,7 +3757,7 @@ button.sk-task-row-main{cursor:pointer}
                 React.Fragment,
                 null,
                 h("span", { className: "sk-catalog-sep", "aria-hidden": "true" }, " · "),
-                h("button", { type: "button", className: "sk-text", onClick: () => set({ aiProvider: "", aiModel: "" }) }, "改为跟随默认"),
+                h("button", { type: "button", className: "sk-text", disabled: saving, onClick: () => set({ aiProvider: "", aiModel: "" }) }, "改为跟随默认"),
               )
             : null,
           note.retry
@@ -3740,26 +3769,58 @@ button.sk-task-row-main{cursor:pointer}
               )
             : null,
         ),
-        h("p", { id: "sk-ai-model-guide", className: cx("sk-catalog-note", thirdParty && "is-warn") }, guideText),
+        h("p", { id: `${selectId}-guide`, className: cx("sk-catalog-note", thirdParty && "is-warn") }, guideText),
         h(
           "span",
-          { id: "sk-ai-model-status", role: "status", "aria-live": "polite", className: "sk-sr-only" },
+          { role: "status", "aria-live": "polite", className: "sk-sr-only" },
           catalog.announce || "",
         ),
       );
     }
 
-    function SettingsModal({ settings, workspaces, prefs, usage, onPrefsChange, onClose, onSave, onScan, pushToast }) {
+    function ModelModal({ settings, onClose, onSave, returnFocus }) {
+      const [draft, setDraft] = React.useState(() => ({ aiProvider: settings.aiProvider || "", aiModel: settings.aiModel || "" }));
+      const [saving, setSaving] = React.useState(false);
+      const [error, setError] = React.useState("");
+      const dialogRef = React.useRef(null);
+      const titleId = React.useId();
+      const catalog = useAiCatalog();
+      const close = () => { if (!saving) onClose(); };
+      useDialogFocus(dialogRef, close, returnFocus);
+      useBodyScrollLock();
+      const changed = aiModelValue(aiModelRef(draft)) !== aiModelValue(aiModelRef(settings));
+      const save = async (event) => {
+        event.preventDefault();
+        if (!changed || saving) return;
+        setSaving(true);
+        setError("");
+        try {
+          const { data } = await command("settings.model", { provider: draft.aiProvider, model: draft.aiModel });
+          await onSave(data);
+        } catch (cause) {
+          setError(cause.message);
+        } finally {
+          setSaving(false);
+        }
+      };
+      return h("div", { className: "sk-modal-mask", onMouseDown: (event) => event.target === event.currentTarget && close() },
+        h("form", { className: "sk-modal sk-model-modal", ref: dialogRef, role: "dialog", "aria-modal": "true", "aria-labelledby": titleId, onSubmit: save },
+          h("h3", { id: titleId }, h(Icon, { name: "spark", size: 15 }), "选择模型"),
+          h("div", { className: "sk-modal-body" },
+            h(AiModelBlock, { draft, set: setDraft, catalog, saving }),
+            error ? h("p", { role: "alert", className: "sk-error-detail" }, error) : null),
+          h("div", { className: "sk-modal-foot" },
+            h("button", { className: "sk-btn ghost", type: "button", disabled: saving, onClick: close }, "取消"),
+            h("button", { className: "sk-btn primary", type: "submit", disabled: !changed || saving }, saving ? "保存中…" : "应用模型"))));
+    }
+
+    function SettingsModal({ settings, route, modelOpen, onModel, workspaces, prefs, usage, onPrefsChange, onClose, onSave, onScan, pushToast }) {
       const [draft, setDraft] = React.useState(() => {
-        // aiProvider / aiModel 必须成对：任一为空都归一为「跟随 DSH 默认」。
-        const savedModel = aiModelRef(settings);
         return {
           aiEnabled: settings.aiEnabled !== false,
           autoScan: settings.autoScan !== false,
           scanIntervalSeconds: settings.scanIntervalSeconds || 120,
           initialDays: settings.initialDays || 30,
-          aiProvider: savedModel ? savedModel.provider : "",
-          aiModel: savedModel ? savedModel.model : "",
           // 新字段一律用 ?? 初始化（禁止 || 回退，否则 0 / "auto" 会被误判）。
           aiBudgetMode: settings.aiBudgetMode ?? AI_BUDGET_MODE_DEFAULT,
           maxAiCallsPerScan: settings.maxAiCallsPerScan ?? AI_MAX_CALLS_DEFAULT,
@@ -3773,8 +3834,6 @@ button.sk-task-row-main{cursor:pointer}
       const dialogRef = React.useRef(null);
       useDialogFocus(dialogRef, onClose);
       useBodyScrollLock();
-      // 模型目录只在弹窗打开时拉取；30s 内重开先用缓存渲染再后台刷新。
-      const catalog = useAiCatalog();
       const set = (patch) => setDraft((value) => ({ ...value, ...patch }));
       const dailyLimit = Number(draft.dailyAiCallLimit) || 150;
       const dailyRemaining = usage ? Math.max(0, dailyLimit - usage.budgetUsed) : 0;
@@ -3797,7 +3856,7 @@ button.sk-task-row-main{cursor:pointer}
           await command("settings.update", { patch: draft });
           const entryChanged = entryDraft !== prefsMode(prefs);
           if (entryChanged) onPrefsChange(modePrefs(entryDraft));
-          pushToast(entryChanged ? "设置已保存；入口偏好需刷新窗口（Cmd+R）生效" : "设置已保存（模型与预算在下次扫描或重新研判时生效）", "info");
+          pushToast(entryChanged ? "设置已保存；入口偏好需刷新窗口（Cmd+R）生效" : "设置已保存", "info");
           await onSave();
         } catch (cause) {
           pushToast(`保存失败：${cause.message}`, "error");
@@ -3815,14 +3874,14 @@ button.sk-task-row-main{cursor:pointer}
       };
       return h(
         "div",
-        { className: "sk-modal-mask", onMouseDown: (event) => event.target === event.currentTarget && onClose() },
+        { className: "sk-modal-mask", inert: modelOpen, onMouseDown: (event) => event.target === event.currentTarget && onClose() },
         h(
           "div",
           {
             className: "sk-modal",
             ref: dialogRef,
             role: "dialog",
-            "aria-modal": "true",
+            "aria-modal": modelOpen ? undefined : "true",
             "aria-labelledby": "sk-settings-title",
           },
           h("h3", { id: "sk-settings-title" }, h(Icon, { name: "settings", size: 15 }), "看板设置"),
@@ -3835,7 +3894,9 @@ button.sk-task-row-main{cursor:pointer}
               h("div", { className: "label" }, h("b", null, "AI 联网研判"), h("span", null, "使用 DSH 配置的模型（含第三方）分析会话摘要；关闭后仅用本地规则推断")),
               h("button", { type: "button", className: cx("sk-switch", draft.aiEnabled && "on"), onClick: () => set({ aiEnabled: !draft.aiEnabled }), "aria-label": "AI 联网研判", role: "switch", "aria-checked": draft.aiEnabled }, h("i")),
             ),
-            h(AiModelBlock, { draft, set, catalog }),
+            h("div", { className: "sk-settings-row" },
+              h("div", { className: "label" }, h("b", null, "模型"), h("span", null, selectedModelLabel(route))),
+              h("button", { className: "sk-btn", type: "button", onClick: onModel }, "切换模型")),
             h(
               "div",
               { className: "sk-settings-row" },
@@ -4419,10 +4480,10 @@ button.sk-task-row-main{cursor:pointer}
             h("button", { className: "sk-btn primary", type: "submit", disabled: busy || changes.conflicts.length > 0 || !draft.name.trim() }, busy ? "保存中…" : "保存项目"))));
     }
 
-    async function readChatReply({ mode, input, signal, onEvent }) {
+    async function readChatReply({ mode, input, context, signal, onEvent }) {
       const response = await fetch(new URL(`${API}/chat`, document.baseURI), {
         method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, input }), signal,
+        body: JSON.stringify({ mode, input, context }), signal,
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
@@ -4464,19 +4525,31 @@ button.sk-task-row-main{cursor:pointer}
       }
     }
 
-    function QuickChat({ onClose, pushToast }) {
+    function chatContext(turns, route) {
+      const recent = [];
+      let size = 0;
+      for (const turn of turns.slice(-4).reverse()) {
+        if (!route?.ok || turn.provider !== route.provider || turn.model !== route.model) break;
+        size += turn.input.length + turn.answer.length;
+        if (size > 24_000) break;
+        recent.unshift({ input: turn.input, answer: turn.answer });
+      }
+      return recent.length ? { provider: route.provider, model: route.model, turns: recent } : undefined;
+    }
+
+    function QuickChat({ route, modelOpen, onModel, onClose, pushToast }) {
       const [mode, setMode] = React.useState("ask");
       const [input, setInput] = React.useState("");
-      const [answer, setAnswer] = React.useState("");
-      const [model, setModel] = React.useState("");
-      const [status, setStatus] = React.useState("");
+      const [turns, setTurns] = React.useState([]);
+      const [attempt, setAttempt] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
-      const [error, setError] = React.useState("");
       const request = React.useRef(null);
       const dialogRef = React.useRef(null);
+      const inputRef = React.useRef(null);
       const outputRef = React.useRef(null);
       const followOutput = React.useRef(true);
       const titleId = React.useId();
+      const asking = mode === "ask";
       useDialogFocus(dialogRef, onClose);
       useBodyScrollLock();
       React.useEffect(() => () => {
@@ -4486,33 +4559,56 @@ button.sk-task-row-main{cursor:pointer}
       React.useLayoutEffect(() => {
         const node = outputRef.current;
         if (node && followOutput.current) node.scrollTop = node.scrollHeight;
-      }, [answer]);
+      }, [mode, turns, attempt]);
 
+      const changeMode = (event) => {
+        followOutput.current = true;
+        setMode(event.target.value);
+        setAttempt(null);
+        inputRef.current?.focus();
+      };
+      const clear = () => {
+        setTurns([]);
+        setAttempt(null);
+        inputRef.current?.focus();
+      };
       const send = async (event) => {
         event.preventDefault();
-        if (request.current || !input.trim()) return;
+        const text = input.trim();
+        if (request.current || !text || route?.ok === false) return;
         const controller = new AbortController();
         request.current = controller;
         followOutput.current = true;
-        setAnswer("");
-        setError("");
-        setModel("");
-        setStatus("正在连接模型…");
+        const context = asking ? chatContext(turns, route) : undefined;
+        let current = { input: text, answer: "", status: "正在连接模型…" };
+        const update = (patch) => {
+          current = { ...current, ...patch };
+          setAttempt(current);
+        };
+        setAttempt(current);
         setBusy(true);
+        inputRef.current?.focus();
         try {
-          await readChatReply({ mode, input, signal: controller.signal, onEvent: (event) => {
-            if (request.current !== controller) return;
-            if (event.type === "start") setModel(event.model);
-            if (event.type === "delta") {
-              setStatus("正在回答…");
-              setAnswer((value) => value + event.text);
-            }
+          await readChatReply({ mode, input: text, context, signal: controller.signal, onEvent: (event) => {
+            if (request.current !== controller || controller.signal.aborted) return;
+            if (event.type === "start") update({ model: event.model, provider: event.provider, status: "正在回答…" });
+            if (event.type === "delta") update({ answer: current.answer + event.text, status: "正在回答…" });
           } });
-          if (request.current === controller) setStatus("回答完成");
+          if (request.current !== controller) return;
+          if (controller.signal.aborted) {
+            update({ status: "已停止" });
+            return;
+          }
+          if (asking) {
+            const completed = current;
+            setTurns((previous) => [...previous.slice(-11), completed]);
+            setInput("");
+          }
+          update({ status: "回答完成", answer: asking ? "" : current.answer });
         } catch (cause) {
           if (request.current !== controller) return;
-          if (controller.signal.aborted) setStatus("已停止");
-          else { setStatus(""); setError(cause.message); }
+          if (controller.signal.aborted) update({ status: "已停止" });
+          else update({ status: "", error: cause.message });
         } finally {
           if (request.current === controller) {
             request.current = null;
@@ -4520,28 +4616,61 @@ button.sk-task-row-main{cursor:pointer}
           }
         }
       };
-      return h("div", { className: "sk-modal-mask", onMouseDown: (event) => event.target === event.currentTarget && onClose() },
-        h("form", { className: "sk-modal sk-chat-modal", ref: dialogRef, role: "dialog", "aria-modal": "true", "aria-labelledby": titleId, onSubmit: send },
+      const currentModel = selectedModelLabel(route);
+      const previousModel = turns.at(-1);
+      const newModel = asking && previousModel?.model && route?.ok &&
+        (previousModel.provider !== route.provider || previousModel.model !== route.model);
+      const turnNode = (turn, index) => h("article", { className: "sk-chat-turn", key: index },
+        h("p", { className: "sk-chat-question sk-preserve-lines" }, turn.input),
+        h("div", { className: "sk-chat-answer sk-preserve-lines", "aria-label": "模型回答" }, turn.answer),
+        h("div", { className: "sk-chat-turn-meta" },
+          h("span", { title: modelLabel(turn.provider, turn.model) }, modelNameOf(turn.provider, turn.model)),
+          h("button", { className: "sk-text", type: "button", onClick: () => copyWithToast(turn.answer, "回答", pushToast) }, "复制回答")));
+      return h("div", { className: "sk-modal-mask", inert: modelOpen, onMouseDown: (event) => event.target === event.currentTarget && onClose() },
+        h("form", { className: "sk-modal sk-chat-modal", ref: dialogRef, role: "dialog", "aria-modal": modelOpen ? undefined : "true", "aria-labelledby": titleId, onSubmit: send },
           h("h3", { id: titleId }, h(Icon, { name: "chat", size: 15 }), "快聊"),
           h("div", { className: "sk-modal-body" },
-            h("label", { className: "sk-field" }, "模式", h("select", { className: "sk-select", value: mode, disabled: busy, onChange: (event) => setMode(event.target.value) },
-              h("option", { value: "ask" }, "快速问答"), h("option", { value: "translate-zh" }, "翻译成中文"), h("option", { value: "translate-en" }, "翻译成英文"))),
-            h("label", { className: "sk-field" }, mode === "ask" ? "问题" : "原文",
-              h("textarea", { className: "sk-textarea", "data-sk-initial-focus": true, rows: 4, maxLength: 4000, value: input, readOnly: busy, onChange: (event) => setInput(event.target.value),
-                onKeyDown: (event) => { if (event.key === "Enter" && !event.isComposing && (event.metaKey || event.ctrlKey)) send(event); } })),
-            h("p", { className: "sub" }, "使用 DSH 默认模型。每次只发送当前输入，关闭后清空。"),
-            status || model ? h("div", { className: "sk-chat-status", role: "status" }, [status, model].filter(Boolean).join(" · ")) : null,
-            answer ? h("div", { className: "sk-chat-answer sk-preserve-lines", tabIndex: 0, ref: outputRef,
-              "aria-label": "模型回答", onScroll: (event) => {
-                const node = event.currentTarget;
-                followOutput.current = node.scrollHeight - node.clientHeight - node.scrollTop < 32;
-              } }, answer) : null,
-            error ? h("p", { role: "alert", className: "sk-error-detail" }, error) : null),
+            h("div", { className: "sk-chat-controls" },
+              h("span", { className: "sk-chat-mode" },
+                h("select", { className: "sk-select", "aria-label": "快聊模式", value: mode, disabled: busy, onChange: changeMode },
+                  h("option", { value: "ask" }, "快速问答"), h("option", { value: "translate-zh" }, "翻译成中文"), h("option", { value: "translate-en" }, "翻译成英文")),
+                h(Icon, { name: "chevronDown", size: 12, className: "sk-ws-caret" })),
+              h("button", { className: "sk-btn sk-model-button", type: "button", onClick: onModel, "aria-label": "切换模型",
+                title: route?.message || modelLabel(route?.provider, route?.model) || currentModel },
+                h(Icon, { name: "spark", size: 14 }), h("span", null, currentModel))),
+            route?.ok === false ? h("p", { className: "sk-error-detail" }, route.message) : null,
+            h("p", { className: "sub" }, asking
+              ? newModel ? "换模型后从下一条开始记忆，之前的问答仍可复制。"
+                : "可追问最近的问答。内容发送给当前模型，关闭快聊即清空。"
+              : "翻译只发送当前原文，关闭快聊即清空。"),
+            (asking && turns.length > 0) || attempt?.answer || (asking && busy) ?
+              h("div", { className: "sk-chat-thread", tabIndex: 0, ref: outputRef, "aria-label": asking ? "问答记录" : "译文",
+                onScroll: (event) => {
+                  const node = event.currentTarget;
+                  followOutput.current = node.scrollHeight - node.clientHeight - node.scrollTop < 32;
+                } },
+                asking ? turns.map(turnNode) : null,
+                asking && busy ? h("p", { className: "sk-chat-question sk-preserve-lines" }, attempt.input) : null,
+                attempt?.answer ? h("div", { className: "sk-chat-answer sk-preserve-lines", "aria-label": "模型回答" }, attempt.answer) : null)
+              : null,
+            attempt?.status ? h("div", { className: "sk-chat-status", role: "status" },
+              [attempt.status, modelNameOf(attempt.provider, attempt.model)].filter(Boolean).join(" · ")) : null,
+            attempt?.error ? h("p", { role: "alert", className: "sk-error-detail" }, attempt.error) : null,
+            h("label", { className: "sk-field" }, asking ? "问题" : "原文",
+              h("textarea", { className: "sk-textarea", ref: inputRef, "data-sk-initial-focus": true, rows: 3, maxLength: 4000,
+                placeholder: asking && turns.length ? "输入追问…" : undefined, value: input, readOnly: busy, onChange: (event) => setInput(event.target.value),
+                onKeyDown: (event) => { if (event.key === "Enter" && !event.isComposing && (event.metaKey || event.ctrlKey)) send(event); } }))),
           h("div", { className: "sk-modal-foot" },
             h("button", { className: "sk-btn ghost", type: "button", onClick: onClose }, "关闭"),
-            answer ? h("button", { className: "sk-btn", type: "button", onClick: () => copyWithToast(answer, "回答", pushToast) }, "复制回答") : null,
-            busy ? h("button", { className: "sk-btn", type: "button", onClick: () => request.current?.abort() }, "停止")
-              : h("button", { className: "sk-btn primary", type: "submit", disabled: !input.trim(), title: "发送（⌘/Ctrl + Enter）" }, "发送"))));
+            asking && (turns.length || attempt) && !busy
+              ? h("button", { className: "sk-btn ghost", type: "button", onClick: clear }, "清空问答") : null,
+            attempt?.answer ? h("button", { className: "sk-btn", type: "button", onClick: () => copyWithToast(attempt.answer, asking ? "回答" : "译文", pushToast) }, asking ? "复制回答" : "复制译文") : null,
+            busy ? h("button", { key: "stop", className: "sk-btn", type: "button", onClick: (event) => {
+              event.preventDefault();
+              request.current?.abort();
+              inputRef.current?.focus();
+            } }, "停止")
+              : h("button", { key: "send", className: "sk-btn primary", type: "submit", disabled: !input.trim() || route?.ok === false, title: "发送（⌘/Ctrl + Enter）" }, "发送"))));
     }
 
     function ArtifactEntry({ artifact, task, host, desktopFiles, pushToast, onPreview, details }) {
@@ -4747,6 +4876,12 @@ button.sk-task-row-main{cursor:pointer}
       const [newTaskStatus, setNewTaskStatus] = React.useState(null);
       const [projectEditor, setProjectEditor] = React.useState(null);
       const [chatOpen, setChatOpen] = React.useState(false);
+      const [modelOpen, setModelOpen] = React.useState(false);
+      const modelTriggerRef = React.useRef(null);
+      const openModel = (event) => {
+        modelTriggerRef.current = event.currentTarget;
+        setModelOpen(true);
+      };
       const [settingsOpen, setSettingsOpen] = React.useState(false);
       const [draggingId, setDraggingId] = React.useState(null);
       const [scanBusy, setScanBusy] = React.useState(false);
@@ -4858,6 +4993,7 @@ button.sk-task-row-main{cursor:pointer}
         });
       }, [data?.tasks, data?.writeOverlaps, ctxProps.sessionStatuses, projects, nowTick]);
       const settings = (data && data.settings) || {};
+      const aiRoute = data?.aiRoute;
       const scan = (data && data.scan) || { state: "idle" };
       const workspaces = (data && data.workspaces) || [];
       const stats = (data && data.stats) || { byStatus: {}, doneRate: 0, total: 0 };
@@ -5221,6 +5357,10 @@ button.sk-task-row-main{cursor:pointer}
           h(Icon, { name, size: 15 }),
         );
       const settingsButton = actionIcon("settings", "设置", () => setSettingsOpen(true));
+      const currentModel = selectedModelLabel(aiRoute);
+      const modelButton = h("button", { type: "button", className: cx("sk-iconbtn-v3 sk-model-trigger", aiRoute?.ok === false && "is-warn"),
+        "aria-label": "选择模型", title: aiRoute?.message || modelLabel(aiRoute?.provider, aiRoute?.model) || currentModel, onClick: openModel },
+        h(Icon, { name: "spark", size: 15 }), compactHeader ? null : h("span", null, currentModel));
       const chatButton = compactHeader ? actionIcon("chat", "快聊", () => setChatOpen(true)) :
         h("button", { type: "button", className: "sk-iconbtn-v3 sk-chat-trigger", "aria-label": "快聊", onClick: () => setChatOpen(true) },
           h(Icon, { name: "chat", size: 15 }), "快聊");
@@ -5240,7 +5380,7 @@ button.sk-task-row-main{cursor:pointer}
           statsLine),
         h("div", { className: "sk-header-actions" },
           !isNarrow && mode !== "projects" ? searchField : null,
-          scanButton, chatButton, settingsButton,
+          scanButton, modelButton, chatButton, settingsButton,
           surface === "side"
             ? prefs.fullEntry && actionIcon("layout", "在全页面板打开", openPageFromSide)
             : prefs.sideEntry && actionIcon("panelRight", "在右侧栏打开", openSideFromPage),
@@ -5502,10 +5642,13 @@ button.sk-task-row-main{cursor:pointer}
               onChanged: () => reload(true),
               onSave: async () => { setProjectEditor(null); pushToast("项目已保存", "info"); await reload(true); } })
           : null,
-        chatOpen ? h(QuickChat, { onClose: () => setChatOpen(false), pushToast }) : null,
+        chatOpen ? h(QuickChat, { route: aiRoute, modelOpen, onModel: openModel, onClose: () => setChatOpen(false), pushToast }) : null,
         settingsOpen
           ? h(SettingsModal, {
               settings,
+              route: aiRoute,
+              modelOpen,
+              onModel: openModel,
               workspaces,
               prefs,
               usage,
@@ -5519,6 +5662,13 @@ button.sk-task-row-main{cursor:pointer}
               pushToast,
             })
           : null,
+        modelOpen ? h(ModelModal, { settings, returnFocus: modelTriggerRef, onClose: () => setModelOpen(false),
+          onSave: ({ settings, aiRoute }) => {
+            setData((current) => current ? { ...current, settings, aiRoute } : current);
+            setModelOpen(false);
+            pushToast("已切换模型", "info");
+            void reload(true);
+          } }) : null,
         h(
           "div",
           { className: "sk-toasts", role: "status", "aria-live": "polite", "aria-atomic": "false" },

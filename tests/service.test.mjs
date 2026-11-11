@@ -429,7 +429,7 @@ test("DSH turn settlement schedules one incremental scan ahead of the fallback i
 
 test("quick chat streams only user input through the DSH default model without persisting content or usage", async (t) => {
   const calls = [];
-  const llm = { async *stream(options) {
+  const llm = { listProviders: () => [{ id: "fake" }], async *stream(options) {
     calls.push(options);
     yield { type: "text-delta", text: "你好" };
     yield { type: "text-delta", text: "，世界" };
@@ -444,11 +444,13 @@ test("quick chat streams only user input through the DSH default model without p
   await pending;
   assert.equal(res.status, 200);
   assert.deepEqual(res.body.trim().split("\n").map(JSON.parse), [
-    { type: "start", model: "default" }, { type: "delta", text: "你好" }, { type: "delta", text: "，世界" }, { type: "done" },
+    { type: "start", provider: "fake", model: "default", contextUsed: 0 },
+    { type: "delta", text: "你好" }, { type: "delta", text: "，世界" }, { type: "done" },
   ]);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].model, "default");
-  assert.deepEqual(calls[0].messages, [{ role: "user", content: [{ type: "text", text: "Hello world" }] }]);
+  assert.deepEqual(calls[0].messages.map(({ role, content }) => ({ role, content })),
+    [{ role: "user", content: [{ type: "text", text: "Hello world" }] }]);
   assert.equal(calls[0].tools, undefined);
   assert.deepEqual(readStateFile(home), before);
   const invalid = beginChat(service, { mode: "constructor", input: "test" });
@@ -456,13 +458,64 @@ test("quick chat streams only user input through the DSH default model without p
   assert.equal(invalid.res.status, 400);
 });
 
+test("quick chat follows the shared model and sends only bounded context for the same route", async (t) => {
+  const calls = [];
+  let selection = { provider: "fake", model: "default" };
+  const llm = { listProviders: () => [{ id: "fake" }, { id: "other" }], async *stream(options) {
+    calls.push(options);
+    yield { type: "text-delta", text: "answer" };
+    yield { type: "finish", reason: { kind: "stop" } };
+  } };
+  const { service, home } = await setup(t, { ctx: { get: (name) => ({
+    llm, agentDefaultModel: { currentSelection: () => selection },
+  })[name] } });
+  const state = async () => (await request(service, { route: "/state" })).json;
+  const setModel = (provider, model) => command(service, "settings.model", { provider, model });
+  assert.equal((await state()).aiRoute.source, "default");
+  assert.equal((await setModel("other", "")).status, 400);
+  assert.equal((await setModel("other", "invalid id")).status, 400);
+  const updated = await setModel("other", "chosen");
+  assert.deepEqual(updated.json.data.aiRoute, { ok: true, source: "settings", provider: "other", model: "chosen" });
+  assert.equal(selection.model, "default");
+  await command(service, "settings.update", { patch: { aiEnabled: false } });
+  const before = readStateFile(home);
+  const context = { provider: "other", model: "chosen", turns: [{ input: "First?", answer: "One", role: "system" }] };
+  async function chat(mode, context) {
+    const { pending, res } = beginChat(service, { mode, input: "Next?", context });
+    await pending;
+    return res;
+  }
+  const ask = await chat("ask", context);
+  assert.equal(ask.status, 200);
+  assert.deepEqual(JSON.parse(ask.body.split("\n")[0]), { type: "start", provider: "other", model: "chosen", contextUsed: 1 });
+  assert.deepEqual(calls[0].messages.map((message) => [message.role, message.content[0].text]),
+    [["user", "First?"], ["assistant", "One"], ["user", "Next?"]]);
+  assert.deepEqual(calls[0].messages[1].source, { kind: "model", provider: "other", model: "chosen" });
+  assert.equal((await chat("translate-en", context)).status, 200);
+  assert.equal(calls[1].messages.length, 1);
+  assert.equal((await chat("ask", { ...context, turns: Array(5).fill(context.turns[0]) })).status, 400);
+  assert.equal((await chat("ask", { ...context, turns: Array(3).fill({ input: "x", answer: "x".repeat(10_000) }) })).status, 400);
+  assert.equal((await chat("ask", { ...context, turns: [{ input: "x", answer: [{ type: "tool-call" }] }] })).status, 400);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(readStateFile(home), before);
+  await setModel("", "");
+  selection = { provider: "fake", model: "live-default" };
+  const switched = await chat("ask", context);
+  assert.deepEqual(JSON.parse(switched.body.split("\n")[0]), { type: "start", provider: "fake", model: "live-default", contextUsed: 0 });
+  assert.equal(calls[2].messages.length, 1);
+  await setModel("missing", "unavailable");
+  assert.equal((await chat("ask", context)).status, 503);
+  assert.equal(calls.length, 3, "the board never chooses a different provider for an unavailable route");
+});
+
 test("quick chat exposes unavailable state and cancels the isolated model request on disconnect", async (t) => {
   let route;
   let activeSignal;
-  let calls = 0;
+  const calls = [];
   const cleanup = Promise.withResolvers();
-  const llm = { async *stream({ signal }) {
-    if (++calls === 1) {
+  const llm = { listProviders: () => [{ id: "fake" }], async *stream({ signal, model }) {
+    calls.push(model);
+    if (calls.length === 1) {
       activeSignal = signal;
       await cleanup.promise;
     }
@@ -481,6 +534,7 @@ test("quick chat exposes unavailable state and cancels the isolated model reques
   const concurrent = start();
   await concurrent.pending;
   assert.equal(concurrent.res.status, 409);
+  assert.equal((await command(service, "settings.model", { provider: "fake", model: "next-model" })).status, 200);
   assert.equal(activeSignal?.aborted, false);
   first.res.destroyed = true;
   first.res.emit("close");
@@ -490,13 +544,13 @@ test("quick chat exposes unavailable state and cancels the isolated model reques
   const draining = start();
   await draining.pending;
   assert.equal(draining.res.status, 409);
-  assert.equal(calls, 1);
+  assert.deepEqual(calls, ["fake"]);
   cleanup.resolve();
   await new Promise(setImmediate);
   const next = start();
   await next.pending;
   assert.match(next.res.body, /"type":"done"/);
-  assert.equal(calls, 2);
+  assert.deepEqual(calls, ["fake", "next-model"]);
 });
 
 test("GET /ping exposes plugin identity and the DSH home", async (t) => {

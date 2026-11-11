@@ -98,7 +98,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   // The analyzer resolves the DSH native llm service lazily from `ctx`; a host
   // composition without one degrades AI analysis to the rules engine.
   const analyzer = createLlmAnalyzer({ ctx, logger, reserveUnit: reserveAiUnit });
-  const quickChat = createQuickChat({ llmService, defaultModelSelection });
+  const quickChat = createQuickChat({ llmService, resolveAiRoute });
   const store = createStore({ dshHome, logger });
   /**
    * Test seams only (production uses the module constants): the AI-phase wall
@@ -227,8 +227,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
    * Provider availability is a registry check only; a model id missing from the
    * catalog is not a hard error because the core route may still accept it.
    */
-  function syncAiSelection() {
-    const llm = llmService();
+  function aiSelection(llm) {
     if (!llm) return { ok: false, reason: "llm-unavailable" };
     const explicitProvider = typeof state.settings.aiProvider === "string" ? state.settings.aiProvider.trim() : "";
     const explicitModel = typeof state.settings.aiModel === "string" ? state.settings.aiModel.trim() : "";
@@ -250,66 +249,26 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return { ok: false, reason: "no-default-model" };
   }
 
-  /** First model of the first provider that returns a usable catalog. */
-  async function firstCatalogModel(llm) {
-    for (const route of providerRoutes(llm)) {
-      try {
-        const models = await withTimeout(llm.listModels(route.id), aiCatalogTimeoutMsValue, "catalog-timeout");
-        const first = Array.isArray(models) ? models.find((model) => model && typeof model.id === "string" && model.id) : null;
-        if (first) return { provider: route.id, model: first.id };
-      } catch {
-        /* try the next provider */
-      }
-    }
-    return null;
-  }
-
-  /** Rules-only explanation for an unavailable model route (host-side text). */
+  /** Explain why the selected route cannot be used. */
   function aiRouteFailureMessage(selection) {
     switch (selection.reason) {
       case "llm-unavailable":
-        return "当前 DSH 未提供 AI 模型服务，本次仅规则分析；升级 DSH 后可用";
+        return "当前 DSH 未提供 AI 模型服务，请检查 DSH 版本和模型配置";
       case "provider-unavailable":
         return selection.source === "default"
           ? `DSH 默认模型提供方 ${selection.provider} 不可用，请在 DSH 设置 → 模型 中配置`
-          : `所选模型提供方 ${selection.provider} 已不可用，请在设置中重新选择模型`;
+          : `所选模型提供方 ${selection.provider} 已不可用，请在看板中重新选择模型`;
       case "no-default-model":
-        return "DSH 尚未设置默认模型，请在看板设置中选择模型（或先在 DSH 设置 → 模型 中配置）";
-      case "no-models":
-        return `${selection.provider} 没有可用模型（可能未配置 API Key 或未登录），请在 DSH 设置 → 模型 中完成配置`;
-      case "catalog-error":
-        return "读取模型目录失败，本次仅规则分析";
+        return "DSH 尚未设置默认模型，请在看板中选择模型，或在 DSH 设置 → 模型中配置默认模型";
       default:
-        return "AI 模型不可用，本次仅规则分析";
+        return "AI 模型不可用";
     }
   }
 
-  /**
-   * Async route resolution (once per scan / explicit command).
-   * Only the "no default model at all" case consults the catalog (first-model
-   * fallback); an explicit/default provider that is down stays an error so the
-   * board never silently switches the user's model.
-   */
-  async function resolveAiRoute() {
-    const llm = llmService();
-    if (!llm) {
-      const failure = { ok: false, reason: "llm-unavailable" };
-      return { ...failure, message: aiRouteFailureMessage(failure) };
-    }
-    const selection = syncAiSelection();
-    if (selection.ok) return selection;
-    if (selection.reason === "no-default-model") {
-      let fallback = null;
-      try {
-        // Bound the whole fallback (not just each provider) so an explicit
-        // command cannot hang on a host with several slow providers.
-        fallback = await withTimeout(firstCatalogModel(llm), aiCatalogTimeoutMsValue, "catalog-timeout");
-      } catch {
-        fallback = null;
-      }
-      if (fallback) return { ok: true, source: "catalog-fallback", ...fallback };
-    }
-    return { ...selection, message: aiRouteFailureMessage(selection) };
+  /** Resolve once per operation; follow-default never selects another provider. */
+  function resolveAiRoute(llm = llmService()) {
+    const selection = aiSelection(llm);
+    return selection.ok ? selection : { ...selection, message: aiRouteFailureMessage(selection) };
   }
 
   /** Whether AI analysis can run at all (presence of the native llm service). */
@@ -439,7 +398,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const llm = llmService();
     const fetchedAt = new Date().toISOString();
     if (!llm) {
-      return { catalogAvailable: false, default: null, providers: [], models: [], failures: [], fetchedAt };
+      return { catalogAvailable: false, providers: [], models: [], failures: [], fetchedAt };
     }
     const routes = providerRoutes(llm);
     const perProvider = await Promise.all(
@@ -463,7 +422,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     );
     return {
       catalogAvailable: true,
-      default: defaultModelSelection(),
       providers: perProvider.map((provider) => ({ id: provider.id, name: provider.name, modelCount: provider.models.length })),
       models: perProvider.flatMap((provider) => provider.models),
       failures: perProvider
@@ -473,8 +431,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     };
   }
 
-  async function getAiCatalog() {
-    if (aiCatalogCache.data && Date.now() - aiCatalogCache.at < AI_CATALOG_TTL_MS) return aiCatalogCache.data;
+  async function getAiCatalog(refresh) {
+    const ttl = refresh ? 2000 : AI_CATALOG_TTL_MS;
+    if (aiCatalogCache.data && Date.now() - aiCatalogCache.at < ttl) return aiCatalogCache.data;
     if (aiCatalogPromise) return aiCatalogPromise;
     const generation = aiCatalogGeneration;
     const promise = buildAiCatalog();
@@ -490,7 +449,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       logWarn(`[super-kanban] ${label}`);
       return {
         catalogAvailable: Boolean(llmService()),
-        default: defaultModelSelection(),
         providers: [],
         models: [],
         failures: [{ provider: "", name: "", message: label }],
@@ -804,6 +762,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       workspaces: boardWorkspaces(),
       scan: state.scan,
       settings: state.settings,
+      aiRoute: resolveAiRoute(),
       usage: state.usage,
     };
   }
@@ -1613,7 +1572,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         state.scan.aiBudget = 0;
         state.scan.aiPending = aiJobs.length;
       } else {
-        const route = await resolveAiRoute();
+        const route = resolveAiRoute();
         if (!route.ok) {
           aiRouteMessage = route.message;
           state.scan.aiBudget = 0;
@@ -2796,7 +2755,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       try {
         // Same route resolver as the scan: an explicit selection or the live DSH
         // default; an unavailable route falls back to the rules engine.
-        const route = await resolveAiRoute();
+        const route = resolveAiRoute();
         const dailyRemaining = dailyAiRemaining();
         const budgetExhausted = state.settings.aiEnabled && dailyRemaining <= 0;
         const aiEnabled = state.settings.aiEnabled && route.ok && dailyRemaining > 0;
@@ -3092,7 +3051,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (original.length > 3000) throw badRequest("prompt-too-long");
       const signal = acquireAiTask();
       try {
-        const route = await resolveAiRoute();
+        const route = resolveAiRoute();
         const dailyRemaining = dailyAiRemaining();
         if (!state.settings.aiEnabled || !route.ok || dailyRemaining <= 0) {
           return { prompt: original, polished: false };
@@ -3120,6 +3079,17 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (!sessionId) throw badRequest("sessionId-required");
       state.ignoredSessions = state.ignoredSessions.filter((id) => id !== sessionId);
       return { sessionId, ignored: false };
+    },
+
+    "settings.model"(payload) {
+      const { provider, model } = payload;
+      const patch = normalizeSettingsPatch({ aiProvider: provider, aiModel: model });
+      if (patch.aiProvider === undefined || patch.aiModel === undefined ||
+          Boolean(patch.aiProvider) !== Boolean(patch.aiModel)) {
+        throw badRequest("请提供完整的模型提供方和模型，或将两者清空以跟随 DSH 默认");
+      }
+      const settings = ops["settings.update"]({ patch });
+      return { settings, aiRoute: resolveAiRoute() };
     },
 
     "settings.update"(payload) {
@@ -3362,7 +3332,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (route === "/ai/models" && method === "GET") {
         // Owner admission is enforced by the prefix handler in index.mjs. The
         // catalog is additive and never part of /state (4s polling stays small).
-        json(res, 200, { ok: true, ...(await getAiCatalog()) });
+        const catalog = await getAiCatalog(url?.searchParams?.get("refresh") === "1");
+        json(res, 200, { ok: true, ...catalog, default: catalog.catalogAvailable ? defaultModelSelection() : null });
         return;
       }
       if (route === "/chat" && method === "POST") {

@@ -48,7 +48,7 @@ dsh web --port 56790                 # 或按 DSH CLI 的方式启动 web 实例
 
 - host 半（`index.mjs` / `server/**`）改动：重启该 DSH 实例（或触发 profile 重新加载）后生效。
 - 浏览器半（`client.js`）改动：刷新窗口即可；如果使用 DSH 的开发模式（HMR），模块会自动重载。
-- 想验证 AI 引擎，先在隔离 DSH 里配置好模型（跟随 DSH 默认模型，或在看板 设置 →「AI 研判模型」选择第三方 provider 并填 API Key）；没有可用模型时插件会回退规则引擎，这本身也是需要验证的路径。
+- 想验证 AI 引擎，在隔离 DSH 中配置本地测试模型，用看板的「选择模型」切换。分别验证共享路由、无默认模型时的本地规则，以及缺少模型时快聊的提示。
 
 ## 4. 调试
 
@@ -158,17 +158,17 @@ await page.screenshot({ path: "board-light.png" });
 
 ### 7.1 版本、升级与文档一致性
 
-- **页头布局**。扫描、快聊、设置和切换入口常驻，更多菜单收纳扫描详情与导出。窄栏用下拉选择视图。
+- **页头布局**。扫描、模型、快聊、设置和切换入口常驻，更多菜单收纳扫描详情与导出。窄栏用下拉选择视图。
 - **验证运行时版本**：以 profile 的 `node_modules` 为准，而不是仓库 `package.json`：
 
   ```bash
   node -p "require(require('os').homedir() + '/.dsh/profiles/desktop/node_modules/dsh-super-kanban/package.json').version"
   ```
 
-- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.4.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.7.0` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
+- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.4.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.8.0` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
 - **文档同步**：涉及安装/升级/UI 入口的改动，需同步更新 [INSTALL.md](INSTALL.md)、[TROUBLESHOOTING.md](TROUBLESHOOTING.md)、[MARKET.md](MARKET.md) 以及中英文 README 的截图与描述。
 - **文档检查（CI 强制）**：`npm run check:docs` 会校验公开文档的相对链接与锚点、README 中英结构（章节数 / 表格 / 代码块 / 截图集合）、截图引用、GitHub Pages 落地页与历史 `plugin/` 布局残留；`npm run check:version` 会校验 `package.json`、`CHANGELOG.md`、`docs/index.json`、`SECURITY.md` 与文档中兼容范围的一致性。改文档后必须跑这两项。
-- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.7.0`）只用于演示精确安装，实际以 npm latest / 插件页为准。
+- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.8.0`）只用于演示精确安装，实际以 npm latest / 插件页为准。
 
 ## 8. 代码风格
 
@@ -184,7 +184,7 @@ await page.screenshot({ path: "board-light.png" });
 且新 push 会作废旧审批；禁止 force push 与删除分支。维护者发版时可按发布流程直接向 `main` 提交版本/索引 commit 并打 tag
 （tag 必须与 `package.json` 版本一致）。发布后只保留最近 3 个 GitHub Release 页面（tag/commit 保留）。
 
-发布前在隔离 DSH 中检查 npm 打包产物。使用合成会话和本地测试模型覆盖项目编辑、日程、会话状态和快聊。提交版本代码后运行 `npm run release`，生成索引并执行全量检查。提交索引后原子推送 main 和版本标签，再核对 npm 精确版本、GitHub Release 和线上市场索引。完整步骤见 [MARKET.md](MARKET.md)。
+发布前在隔离 DSH 中检查 npm 打包产物。使用合成会话和本地测试模型覆盖项目编辑、日程、会话状态、共享模型切换、快聊追问、翻译与取消。提交版本代码后运行 `npm run release`，生成索引并执行全量检查。提交索引后原子推送 main 和版本标签，再核对 npm 精确版本、GitHub Release 和线上市场索引。完整步骤见 [MARKET.md](MARKET.md)。
 
 提交 PR 前至少运行：
 
