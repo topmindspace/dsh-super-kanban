@@ -1,6 +1,6 @@
 # Super Kanban · 智能任务指挥台
 
-在 DeepSeek Harness（DSH）里，用一张看板跟进多条会话。按项目规划任务，查看正在运行和需要你介入的工作，验收交付物后从关联会话继续。
+**用 AI 自动整理 DSH 会话，用一张看板管理任务和项目。** Super Kanban 从 DeepSeek Harness（DSH）的多条会话中提炼任务，生成任务卡，并随会话推进更新进度、阻塞和交付物。打开看板就能看到哪些工作正在运行、哪些需要你介入，以及哪些产出可以验收。
 
 [![CI](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-super-kanban.svg)](https://www.npmjs.com/package/dsh-super-kanban)
@@ -33,8 +33,8 @@
 
 ### 跟进多条会话
 
+- **AI 自动整理任务** · 增量扫描提取任务目标、进展、阻塞和交付物，用来创建或更新任务卡。同一任务可关联多条会话。开启自动扫描后，会话轮次结束可提前触发更新。
 - **实时状态与待处理** · 筛选正在运行的任务，集中查看待审批、待回答、待审阅、阻塞和待验收事项，直接跳转到对应会话。
-- **增量扫描** · 将会话进展、问题和交付物补到任务卡。同一任务可关联多条会话。开启自动扫描后，会话轮次结束可提前触发更新。
 - **全页与右侧栏** · 在全页看板查看全局进度，也可在聊天旁打开紧凑看板。按工作区筛选，通过列表、层级和产出视图查看同一批任务。
 - **长列与快捷操作** · 各列独立滚动，每页最多显示 30 张卡。「已完成」可折叠，折叠后仍可拖入任务。右键或点「⋯」即可移动、置顶和归档任务。
 

@@ -1,6 +1,6 @@
 # Super Kanban · AI Task Command Center
 
-Follow multiple DeepSeek Harness (DSH) sessions on one board. Plan tasks by project, see what is running and what needs your attention, review deliverables, and resume work in the linked session.
+**AI organizes your DSH sessions into tasks you can manage on one board.** Super Kanban pulls tasks out of DeepSeek Harness (DSH) conversations and keeps their progress, blockers, and deliverables up to date. See what is running, what needs your attention, and what is ready for review.
 
 [![CI](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-super-kanban.svg)](https://www.npmjs.com/package/dsh-super-kanban)
@@ -33,8 +33,8 @@ Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or u
 
 ### Follow multiple sessions
 
+- **AI task organization** · Incremental scans extract goals, progress, blockers, and deliverables to create or update task cards. Link multiple sessions to one task. When auto-scan is enabled, a completed turn can bring the next scan forward.
 - **Live status and inbox** · Filter running tasks, find requests for approval, answers or review, and see blockers and pending deliverables. Open the corresponding session directly.
-- **Incremental scans** · Update task cards with session progress, issues, and deliverables. Link multiple sessions to one task. When auto-scan is enabled, a completed turn can bring the next scan forward.
 - **Full-page board and conversation sidebar** · See the whole board or keep a compact board next to the chat. Filter by workspace and switch between list, hierarchy, and deliverable views.
 - **Long columns and quick actions** · Each column scrolls independently and displays up to 30 cards per page. The Done column accepts drops while collapsed. Right-click a card or use its menu to move, pin, or archive it.
 
