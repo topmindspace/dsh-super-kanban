@@ -4,6 +4,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -128,9 +129,9 @@ test("load: hand-edited v2 state with hostile entries is sanitized, not crashed 
         id: "t_ok",
         title: "Valid card",
         status: "backlog",
-        sessions: [],
+        sessions: [null, { id: "sess-a", title: "来源" }, false],
         evidence: [null, { text: "kept" }],
-        history: [],
+        history: [null, { kind: "create" }, false],
       },
     ],
     settings: { autoScan: "yes", scanIntervalSeconds: 99999, lastScanAt: "not-a-date" },
@@ -147,6 +148,8 @@ test("load: hand-edited v2 state with hostile entries is sanitized, not crashed 
   const loaded = store.load();
   assert.equal(loaded.state.tasks.length, 1);
   assert.equal(loaded.state.tasks[0].id, "t_ok");
+  assert.deepEqual(loaded.state.tasks[0].sessions, [{ id: "sess-a", title: "来源" }]);
+  assert.deepEqual(loaded.state.tasks[0].history, [{ kind: "create" }]);
   assert.deepEqual(loaded.state.ignoredSessions, ["sess-a"]);
   assert.deepEqual(loaded.state.suppressedSessions, ["sess-b"]);
   assert.equal(loaded.state.workspaces.length, 1);
@@ -158,6 +161,17 @@ test("load: hand-edited v2 state with hostile entries is sanitized, not crashed 
   // The service must be able to derive stats from the sanitized state.
   const activeTasks = loaded.state.tasks.filter((task) => !task.archived);
   assert.equal(activeTasks.length, 1);
+});
+
+test("backup rejects broken project links before replacing the board", (t) => {
+  const store = createStore({ dshHome: tempHome(t), logger: { warn() {} } });
+  const project = { id: `p_${randomUUID()}`, name: "示例项目", workspaceId: "ws" };
+  const snapshot = { ...createEmptyState(), tasks: [{ id: "task", title: "Task", projectId: project.id }] };
+  assert.throws(() => store.readBackup(snapshot), /缺失的项目/);
+  assert.throws(() => store.readBackup({ ...snapshot, projects: [project, project] }), /重复项目/);
+  const other = { ...project, id: `p_${randomUUID()}` };
+  assert.throws(() => store.readBackup({ ...snapshot, projects: [project, other] }), /工作区绑定/);
+  assert.equal(store.readBackup({ ...snapshot, projects: [project] }).tasks[0].projectId, project.id);
 });
 
 test("load: cache entries without a usable meta are dropped", (t) => {

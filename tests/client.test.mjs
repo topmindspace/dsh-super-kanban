@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../client.js", import.meta.url), "utf8");
 
-function loadClient(services, { snapshot, view = "attention", clipboard } = {}) {
+function loadClient(services, { snapshot, view = "attention", clipboard, fetch, onState, inspect = false } = {}) {
   const registrations = new Map();
   let nextState = snapshot ? { initial: null, value: snapshot } : null;
   let nextId = 0;
@@ -19,7 +19,7 @@ function loadClient(services, { snapshot, view = "attention", clipboard } = {}) 
         nextState = null;
         return [value, () => {}];
       }
-      return [typeof initial === "function" ? initial() : initial, () => {}];
+      return [typeof initial === "function" ? initial() : initial, (value) => onState?.(value)];
     },
     useRef: (current) => ({ current }),
     useId: () => `id-${++nextId}`,
@@ -33,10 +33,13 @@ function loadClient(services, { snapshot, view = "attention", clipboard } = {}) 
     window: { __ModuleLoader__: { load({ factory }) { plugin = factory(() => React); } } },
     localStorage: { getItem: (key) => snapshot && key === "dsh-super-kanban:view:page" ? view : null },
     navigator: { clipboard },
+    document: { baseURI: "http://plugin.local/" },
+    fetch, URL,
     AbortSignal,
     setTimeout,
   };
-  vm.runInNewContext(source, context, { filename: "client.js" });
+  const script = inspect ? source.replace("return { apply, inject:", "return { apply, useBoardData, command, draftChanges, inject:") : source;
+  vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
     get: (name) => services[name],
     effect() { /* no DOM in the contract test */ },
@@ -52,7 +55,7 @@ function loadClient(services, { snapshot, view = "attention", clipboard } = {}) 
     },
   });
   const host = registrations.get("main").render({}).children[0].props.host;
-  return { registrations, host, seedNextState: (value, initial = null) => { nextState = { initial, value }; } };
+  return { registrations, host, plugin, seedNextState: (value, initial = null) => { nextState = { initial, value }; } };
 }
 
 function* elements(node) {
@@ -305,6 +308,91 @@ test("native running state clears stale review hints without including archived 
   const text = renderedText(rows);
   assert.match(text, /已停止待确认待确认进度/);
   assert.doesNotMatch(text, /新一轮已启动|已归档任务|历史问题任务|会话运行中/);
+});
+
+test("a session absent from the native snapshot stops showing a stale running marker", () => {
+  const task = { id: "task", title: "正在处理", status: "in_progress", primarySessionId: "session",
+    sessionContext: { isLive: true, lastActivityAt: Date.now() }, attention: "review" };
+  const running = renderAttention([task], new Map([["session", { running: true }]]));
+  assert.match(renderedText(running.view), /1 运行中/);
+  const idle = renderAttention([task], new Map());
+  assert.doesNotMatch(renderedText(idle.view), /1 运行中/);
+  assert.match(renderedText(idle.rows), /待确认进度/);
+});
+
+test("supporting session activity pauses stale review hints while native prompts still surface", () => {
+  const task = { id: "task", title: "联合交付", status: "in_progress", attention: "acceptance",
+    sessions: [{ id: "primary", title: "主会话" }, { id: "support", title: "并行核验" }] };
+  const statuses = new Map([["support", { running: true }]]);
+  assert.doesNotMatch(renderedText(renderAttention([task], statuses).rows), /待验收/);
+  statuses.set("support", { running: true, pendingInteraction: { kind: "question" } });
+  assert.match(renderedText(renderAttention([task], statuses).rows), /待回答 · 并行核验/);
+});
+
+test("open tasks due today or earlier appear in the inbox, while completed tasks do not", () => {
+  const { rows } = renderAttention([
+    { id: "late", title: "要交付", status: "backlog", dueDate: "2000-01-01" },
+    { id: "finished", title: "已交付", status: "done", dueDate: "2000-01-01" },
+    { id: "future", title: "之后交付", status: "backlog", dueDate: "9999-12-31" },
+  ]);
+  assert.match(renderedText(rows), /要交付已逾期 · 2000-01-01/);
+  assert.doesNotMatch(renderedText(rows), /已交付|之后交付/);
+});
+
+test("schedule groups open tasks by calendar date and keeps undated work collapsed", () => {
+  const now = new Date();
+  const days = (offset) => {
+    const day = new Date(now);
+    day.setDate(day.getDate() + offset);
+    return [day.getFullYear(), day.getMonth() + 1, day.getDate()].map((part) => String(part).padStart(2, "0")).join("-");
+  };
+  const task = (id, title, offset) => ({ id, title, dueDate: offset === undefined ? null : days(offset), status: "backlog" });
+  const tasks = [task("late", "明天以前", -1), task("today", "今天交付", 0), task("near", "近期安排", 7),
+    task("later", "未来安排", 8), task("none", "还没排期"), { ...task("done", "已结束任务", 0), status: "done" }];
+  const { registrations } = loadClient({}, { snapshot: { tasks }, view: "schedule" });
+  const root = registrations.get("main").render({}).children[0];
+  const collection = [...elements(root.type(root.props))].find((node) => node.props?.mode === "schedule");
+  const schedule = collection.type(collection.props);
+  const output = renderedText(schedule);
+  assert.match(output, /已逾期1明天以前.*今天1今天交付.*未来 7 天1近期安排.*更晚1未来安排/);
+  assert.doesNotMatch(output, /已结束任务/);
+  const undated = [...elements(schedule)].find((node) => node.type === "details");
+  assert.equal(undated.props.open, undefined);
+  assert.match(renderedText(undated), /未设到期日1还没排期/);
+});
+
+test("concurrent draft edits only conflict on fields changed to different values", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const base = { name: "旧名", notes: "", dueDate: "", status: "backlog" };
+  const result = plugin.draftChanges(base,
+    { ...base, notes: "用户备注", dueDate: "2028-02-01", status: "in_progress" },
+    { ...base, name: "新名", notes: "另一处备注", status: "in_progress" });
+  assert.deepEqual(Array.from(result.conflicts), ["notes"]);
+  assert.deepEqual({ ...result.patch }, { notes: "用户备注", dueDate: "2028-02-01" });
+});
+
+test("a successful write starts a fresh shared state request and a late older response is discarded", async () => {
+  const pending = [];
+  const updates = [];
+  const { plugin } = loadClient({}, { inspect: true, onState: (value) => { if (value?.tasks) updates.push(value.tasks[0].title); },
+    fetch(url) {
+      if (url.pathname.endsWith("/command")) return Promise.resolve(Response.json({ ok: true, data: {} }));
+      const request = Promise.withResolvers();
+      pending.push(request);
+      return request.promise;
+    } });
+  const board = plugin.useBoardData();
+  const sibling = plugin.useBoardData();
+  const before = board.reload(true);
+  await plugin.command("project.update", { id: "project" });
+  const after = board.reload(true);
+  const shared = sibling.reload(true);
+  assert.equal(pending.length, 2);
+  pending[1].resolve(Response.json({ ok: true, tasks: [{ id: "t", title: "新状态", updatedAt: "new" }] }));
+  await Promise.all([after, shared]);
+  pending[0].resolve(Response.json({ ok: true, tasks: [{ id: "t", title: "旧状态", updatedAt: "old" }] }));
+  assert.equal(await before, null);
+  assert.deepEqual(updates, ["新状态", "新状态"]);
 });
 
 test("without native status, the inbox distinguishes usable deliverables from unconfirmed progress", () => {

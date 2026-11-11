@@ -16,7 +16,7 @@ import { EventEmitter } from "node:events";
 
 import { createKanbanService } from "../server/service.mjs";
 import { SESSION_FILE_NAME } from "../server/sessions.mjs";
-import { TEXT_LIMITS } from "../server/store.mjs";
+import { createStore, TEXT_LIMITS } from "../server/store.mjs";
 
 // Recent enough for the default initialDays=30 eligibility window, old enough
 // that the session is not treated as live.
@@ -163,8 +163,9 @@ function mockRes() {
   return new MockResponse();
 }
 
-function beginRequest(service, { method = "GET", route = "/state", body, search = "" }) {
+function beginRequest(service, { method = "GET", route = "/state", body, search = "", headers = {} }) {
   const req = mockReq();
+  req.headers = headers;
   const res = mockRes();
   const url = new URL(`http://plugin.local${route}${search}`);
   const pending = service.handle(req, res, { route, url, method });
@@ -192,6 +193,10 @@ function command(service, op, payload = {}) {
   return request(service, { method: "POST", route: "/command", body: { op, payload } });
 }
 
+function beginChat(service, body) {
+  return beginRequest(service, { method: "POST", route: "/chat", headers: { "content-type": "application/json" }, body });
+}
+
 async function rawCommand(service, rawBody) {
   return request(service, { method: "POST", route: "/command", body: rawBody });
 }
@@ -200,7 +205,7 @@ function beginCommand(service, op, payload = {}) {
   return beginRequest(service, { method: "POST", route: "/command", body: { op, payload } });
 }
 
-async function setup(t, { withSessions = false, logger = null, prepare = null, sessionOptions = null } = {}) {
+async function setup(t, { withSessions = false, logger = null, prepare = null, sessionOptions = null, ctx = {} } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "sk-service-"));
   const previousHome = process.env.DSH_HOME;
   process.env.DSH_HOME = home;
@@ -218,7 +223,7 @@ async function setup(t, { withSessions = false, logger = null, prepare = null, s
         messages.warns.push(String(message));
       },
     };
-  const service = createKanbanService({ ctx: { logger: usedLogger } });
+  const service = createKanbanService({ ctx: { ...ctx, logger: usedLogger } });
   // Background auto-scans would make the assertions time-dependent; each test
   // triggers the scans it wants explicitly.
   await command(service, "settings.update", { patch: { autoScan: false } });
@@ -260,6 +265,239 @@ async function waitForScan(service, { timeoutMs = 3000 } = {}) {
 /* ------------------------------------------------------------------ */
 /* Basic routes                                                        */
 /* ------------------------------------------------------------------ */
+
+test("projects own manual planning fields, bulk assignment and future automatic cards", async (t) => {
+  const { home, service } = await setup(t, { withSessions: true });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  const oldTask = (await request(service, {})).json.tasks[0];
+  assert.equal(oldTask.projectId, null);
+  const created = await command(service, "project.create", {
+    name: "发布", notes: "项目背景", dueDate: "2028-02-29", workspaceId: "ws-demo",
+  });
+  assert.equal(created.status, 200);
+  const project = created.json.data;
+  assert.equal((await command(service, "project.create", { name: "重复绑定", workspaceId: "ws-demo" })).status, 409);
+  assert.equal((await command(service, "project.update", { id: project.id, expectedUpdatedAt: "stale", patch: { name: "过期" } })).status, 409);
+  assert.equal((await command(service, "task.update", { id: oldTask.id, patch: { dueDate: "2027-02-29" } })).status, 400);
+
+  const patched = await command(service, "task.update", {
+    id: oldTask.id, expectedUpdatedAt: oldTask.updatedAt, patch: { notes: "手工备注\n第二行", dueDate: "2028-02-28" },
+  });
+  assert.equal(patched.status, 200);
+  assert.equal((await command(service, "task.batch", { ids: [oldTask.id, "missing"], projectId: project.id })).status, 404);
+  assert.equal((await request(service, {})).json.tasks[0].projectId, null);
+  assert.equal((await command(service, "task.batch", { ids: [oldTask.id], projectId: project.id })).status, 200);
+
+  seedSessionHome(home, { sessionId: "sess-beta", title: "Prepare separate docs" });
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const saved = createStore({ dshHome: home }).load().state;
+  assert.equal(saved.projects[0].notes, "项目背景");
+  const old = saved.tasks.find((item) => item.id === oldTask.id);
+  const automatic = saved.tasks.find((item) => item.primarySessionId === "sess-beta");
+  assert.equal(automatic?.projectId, project.id);
+  assert.deepEqual([old.projectId, old.notes, old.dueDate], [project.id, "手工备注\n第二行", "2028-02-28"]);
+  const backup = (await request(service, { route: "/export" })).json.state;
+  assert.equal(createStore({ dshHome: home }).readBackup(backup).projects[0].id, project.id);
+  const archived = await command(service, "project.update", { id: project.id, expectedUpdatedAt: project.updatedAt, patch: { archived: true } });
+  assert.equal(archived.json.data.archived, true);
+  assert.equal((await command(service, "task.create", { title: "不合法", projectId: project.id })).status, 400);
+  assert.equal((await request(service, {})).json.tasks.find((item) => item.id === oldTask.id).projectId, project.id);
+  const preview = (await command(service, "backup.preview", { backup: { state: backup } })).json.data;
+  assert.equal(preview.incomingProjects, 1);
+  assert.equal((await command(service, "backup.restore", { ...preview, backup: { state: backup } })).status, 200);
+  const restored = (await request(service, {})).json;
+  assert.equal(restored.projects[0].archived, false);
+  assert.equal(restored.tasks.find((item) => item.id === oldTask.id).notes, "手工备注\n第二行");
+});
+
+test("manual project setup sees the DSH workspace registry before any scan", async (t) => {
+  const { home, service } = await setup(t, { withSessions: true });
+  const before = (await request(service, {})).json;
+  assert.equal(before.scan.state, "idle");
+  assert.equal(before.workspaces[0].id, "ws-demo");
+  const project = await command(service, "project.create", { name: "立即开始", workspaceId: "ws-demo" });
+  assert.equal(project.json.data.workspaceId, "ws-demo");
+  const registryFile = path.join(home, "storages", "workspace.json");
+  const registry = JSON.parse(fs.readFileSync(registryFile, "utf8"));
+  registry.tables.workspaces["ws-demo"].title = "更新后的 DSH 工作区";
+  writeFileDeep(registryFile, JSON.stringify(registry));
+  const after = (await request(service, {})).json;
+  assert.equal(after.workspaces[0].title, "更新后的 DSH 工作区");
+  assert.equal(after.scan.state, "idle");
+});
+
+test("a scan can be cancelled before session parsing starts", async (t) => {
+  const { service } = await setup(t, { withSessions: true });
+  assert.equal((await command(service, "scan.start")).status, 200);
+  assert.equal((await command(service, "scan.cancel")).json.data.cancelling, true);
+  const scan = await waitForScan(service);
+  assert.equal(scan.processed, 0);
+  assert.match(scan.message, /已取消/);
+});
+
+test("a deleted card stays deleted when an in-flight analysis completes", async (t) => {
+  const started = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const llm = {
+    listProviders: () => [{ id: "fake" }],
+    async *stream() {
+      started.resolve();
+      await release.promise;
+      yield { type: "text-delta", text: JSON.stringify({ tasks: [{ title: "延迟的研判结果", status: "in_progress" }] }) };
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+  };
+  const { service, home } = await setup(t, { withSessions: true, ctx: { get: (name) => ({
+    llm, agentDefaultModel: { currentSelection: () => ({ provider: "fake", model: "fake" }) },
+  })[name] } });
+  t.after(() => release.resolve());
+  await command(service, "settings.update", { patch: { aiEnabled: false } });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  const [task] = (await request(service, {})).json.tasks;
+  assert.ok(task);
+  await command(service, "settings.update", { patch: { aiEnabled: true } });
+  await command(service, "scan.start", { mode: "full" });
+  await started.promise;
+  assert.equal((await command(service, "task.delete", { id: task.id })).status, 200);
+  release.resolve();
+  await waitForScan(service);
+  assert.deepEqual(readStateFile(home).tasks, []);
+  assert.deepEqual(readStateFile(home).suppressedSessions, ["sess-alpha"]);
+});
+
+test("merging preserves notes and earliest due date and rejects cross-project moves", async (t) => {
+  const { service } = await setup(t);
+  const a = (await command(service, "project.create", { name: "项目 A" })).json.data;
+  const b = (await command(service, "project.create", { name: "项目 B" })).json.data;
+  const first = (await command(service, "task.create", { title: "first", notes: "first note", dueDate: "2028-04-01", projectId: a.id })).json.data;
+  const second = (await command(service, "task.create", { title: "second", notes: "second note", dueDate: "2028-03-01", projectId: b.id })).json.data;
+  const merge = () => command(service, "task.merge", { id: first.id, sourceId: second.id });
+  assert.equal((await merge()).status, 400);
+  await command(service, "task.update", { id: second.id, patch: { projectId: a.id } });
+  const result = (await merge()).json.data;
+  assert.deepEqual([result.projectId, result.notes, result.dueDate], [a.id, "first note\n\nsecond note", "2028-03-01"]);
+  assert.equal((await command(service, "task.restore", { id: second.id })).json.data.notes, "second note");
+  const restored = (await request(service, {})).json.tasks.find((item) => item.id === first.id);
+  assert.equal(restored.notes, "first note");
+});
+
+test("DSH turn settlement schedules one incremental scan ahead of the fallback interval", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: Date.now() });
+  let observe;
+  const { service } = await setup(t, { ctx: {
+    on(name, listener, options) {
+      if (name === "session/event") {
+        assert.equal(options.global, true);
+        observe = listener;
+      }
+      return () => {};
+    },
+  } });
+  t.mock.timers.tick(3000);
+  await command(service, "scan.start");
+  const waitForIdle = async () => {
+    for (let i = 0; i < 10; i++) {
+      const scan = (await request(service, {})).json.scan;
+      if (scan.state !== "running") return scan;
+      await new Promise(setImmediate);
+    }
+    throw new Error("scan did not settle");
+  };
+  const initial = await waitForIdle();
+  await command(service, "settings.update", { patch: { autoScan: true, scanIntervalSeconds: 120 } });
+  observe(null, { type: "assistant/message" });
+  t.mock.timers.tick(17_000);
+  assert.equal((await waitForIdle()).startedAt, initial.startedAt);
+  observe(null, { type: "turn/end" });
+  t.mock.timers.tick(4500);
+  observe(null, { type: "turn/end" });
+  t.mock.timers.tick(500);
+  assert.equal((await waitForIdle()).startedAt, initial.startedAt, "the latest turn still needs time to settle");
+  t.mock.timers.tick(5000);
+  const accelerated = await waitForIdle();
+  assert.notEqual(accelerated.startedAt, initial.startedAt);
+  t.mock.timers.tick(20_000);
+  assert.equal((await waitForIdle()).startedAt, accelerated.startedAt);
+  await command(service, "settings.update", { patch: { autoScan: false } });
+  observe(null, { type: "turn/end" });
+  t.mock.timers.tick(20_000);
+  assert.equal((await waitForIdle()).startedAt, accelerated.startedAt);
+});
+
+test("quick chat streams only user input through the DSH default model without persisting content or usage", async (t) => {
+  const calls = [];
+  const llm = { async *stream(options) {
+    calls.push(options);
+    yield { type: "text-delta", text: "你好" };
+    yield { type: "text-delta", text: "，世界" };
+    yield { type: "finish", reason: { kind: "stop" } };
+    assert.fail("the model finish event is terminal");
+  } };
+  const { service, home } = await setup(t, { ctx: { get: (name) => ({
+    llm, agentDefaultModel: { currentSelection: () => ({ provider: "fake", model: "default" }) },
+  })[name] } });
+  const before = readStateFile(home);
+  const { pending, res } = beginChat(service, { mode: "translate-zh", input: "Hello world", history: ["private context"] });
+  await pending;
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.trim().split("\n").map(JSON.parse), [
+    { type: "start", model: "default" }, { type: "delta", text: "你好" }, { type: "delta", text: "，世界" }, { type: "done" },
+  ]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "default");
+  assert.deepEqual(calls[0].messages, [{ role: "user", content: [{ type: "text", text: "Hello world" }] }]);
+  assert.equal(calls[0].tools, undefined);
+  assert.deepEqual(readStateFile(home), before);
+  const invalid = beginChat(service, { mode: "constructor", input: "test" });
+  await invalid.pending;
+  assert.equal(invalid.res.status, 400);
+});
+
+test("quick chat exposes unavailable state and cancels the isolated model request on disconnect", async (t) => {
+  let route;
+  let activeSignal;
+  let calls = 0;
+  const cleanup = Promise.withResolvers();
+  const llm = { async *stream({ signal }) {
+    if (++calls === 1) {
+      activeSignal = signal;
+      await cleanup.promise;
+    }
+    yield { type: "text-delta", text: "4" };
+    yield { type: "finish", reason: { kind: "stop" } };
+  } };
+  const { service } = await setup(t, { ctx: { get: (name) => ({
+    llm, agentDefaultModel: { currentSelection: () => route },
+  })[name] } });
+  const start = () => beginChat(service, { mode: "ask", input: "2 + 2?" });
+  const unavailable = start();
+  await unavailable.pending;
+  assert.equal(unavailable.res.status, 503);
+  route = { provider: "fake", model: "fake" };
+  const first = start();
+  const concurrent = start();
+  await concurrent.pending;
+  assert.equal(concurrent.res.status, 409);
+  assert.equal(activeSignal?.aborted, false);
+  first.res.destroyed = true;
+  first.res.emit("close");
+  await first.pending;
+  assert.equal(activeSignal.aborted, true);
+  assert.doesNotMatch(first.res.body, /"type":"done"/);
+  const draining = start();
+  await draining.pending;
+  assert.equal(draining.res.status, 409);
+  assert.equal(calls, 1);
+  cleanup.resolve();
+  await new Promise(setImmediate);
+  const next = start();
+  await next.pending;
+  assert.match(next.res.body, /"type":"done"/);
+  assert.equal(calls, 2);
+});
 
 test("GET /ping exposes plugin identity and the DSH home", async (t) => {
   const { home, service } = await setup(t);
@@ -1359,6 +1597,32 @@ test("backup preview is read-only and restore retains a recovery point", async (
   assert.equal(readStateFile(home).tasks.length, 1);
   const before = JSON.parse(fs.readFileSync(path.join(home, "storages", "super-kanban", "backups", "before-restore.json"), "utf8"));
   assert.equal(before.state.tasks.length, 2);
+});
+
+test("backup restore and successive undo keep exact merge revisions without reviving stale undo", async (t) => {
+  const { service } = await setup(t);
+  const create = async (title) => (await command(service, "task.create", { title, notes: title })).json.data;
+  const first = await create("目标");
+  const second = await create("来源一");
+  const third = await create("来源二");
+  const staleSource = await create("后来发生修改的来源");
+  const other = await create("另一目标");
+  const merge = (target, source) => command(service, "task.merge", { id: target.id, sourceId: source.id });
+  assert.equal((await merge(first, second)).status, 200);
+  const merged = (await merge(first, third)).json.data;
+  assert.equal((await command(service, "task.update", { id: first.id, patch: {} })).json.data.updatedAt, merged.updatedAt);
+  assert.equal((await merge(other, staleSource)).status, 200);
+  await command(service, "task.update", { id: other.id, patch: { notes: "合并后更改" } });
+  const backup = (await request(service, { route: "/export" })).json;
+  const edited = (await command(service, "task.update", { id: first.id, patch: { notes: "备份后更改" } })).json.data;
+  const preview = (await command(service, "backup.preview", { backup })).json.data;
+  assert.equal((await command(service, "backup.restore", { backup, ...preview })).status, 200);
+  const restored = (await request(service, {})).json.tasks.find((task) => task.id === first.id);
+  assert.ok(restored.updatedAt > edited.updatedAt);
+  assert.equal((await command(service, "task.restore", { id: third.id })).status, 200);
+  assert.equal((await command(service, "task.restore", { id: second.id })).status, 200);
+  assert.equal((await command(service, "task.restore", { id: staleSource.id })).status, 409);
+  assert.equal((await request(service, {})).json.tasks.find((task) => task.id === first.id).notes, "目标");
 });
 
 test("deleting one of several cards for the same session preserves scanning for the others", async (t) => {

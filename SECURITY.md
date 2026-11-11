@@ -4,11 +4,11 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.6.x | ✅ (current release line) |
-| 0.5.x | 🟡 (previous line, best-effort fixes) |
-| < 0.5 | ❌ (end of support) |
+| 0.7.x | ✅ (current release line) |
+| 0.6.x | 🟡 (previous line, best-effort fixes) |
+| < 0.6 | ❌ (end of support) |
 
-Security fixes land on `0.6.x`. The `0.5.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
+Security fixes land on `0.7.x`. The `0.6.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
 
 ## Reporting a vulnerability
 
@@ -56,13 +56,18 @@ does not collect telemetry.
   update check, no remote configuration fetch and no telemetry.
 - The browser half may only fetch from the same origin; it does not load
   external fonts, images or scripts.
-- Users can disable the AI engine in the board settings; the rules engine then
-  runs entirely offline and no model request is made.
+- Disabling AI analysis in the board settings switches scans to local rules.
+  Quick chat sends a model request only when the user submits text.
 
 ### Where model requests go (data recipients)
 
 - Analysis sends a system prompt, a **compacted session digest** (≤1.5KB per session) and up to three related task IDs, short titles and statuses. The digest can contain recent messages, todo and error summaries, and file paths.
 - Handoff generation is local. Choosing **AI 润色** sends the current draft of up to 3,000 characters to the configured model, including any criteria, paths and source references present in the draft.
+- Project and task notes stay in board state and are included in local exports.
+- Quick chat sends its mode instruction and the submitted text (up to 4,000
+  characters) through the DSH default model. The board keeps the answer in the
+  open dialog. Quick chat calls can incur provider usage independently of the
+  board's analysis budget.
 - The plugin does **not** pass a `sessionId` (which would let DSH's official
   routes attach their session-log payload), so no session log is uploaded to a
   model provider by the board.

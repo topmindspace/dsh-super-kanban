@@ -31,8 +31,7 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 - **分析永远可降级**：规则引擎是基线，LLM 只是增强；任何 LLM 失败都不影响看板。
 - **模型由 DSH 提供**：AI 研判不直连任何模型端点，统一经 DSH 原生 LLM 服务（`ctx.llm`）发起；
   模型目录、默认模型、第三方 provider 与凭证全部由 DSH 管理，看板只做「目录消费者」。
-- **本机优先**：只有压缩会话摘要（可选）会离开本机；请求发送给「你在 DSH 中配置的模型服务商」，
-  选择第三方模型时摘要会发给该第三方。
+- **本机优先**：任务、项目、备注与快照保存在本机。模型调用按用途发送摘要、选中的润色草稿或快聊输入，接收方为 DSH 配置的模型服务。
 
 ## 仓库结构
 
@@ -43,8 +42,10 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `server/service.mjs` | 服务主体：路由分发、状态编排、扫描调度、模型解析、命令处理、SSE 广播 |
 | `server/sessions.mjs` | 会话扫描与解析：发现、zstd 解压、事件解析、摘要 / 证据 / 子任务 / 产物提取 |
 | `server/analyzer-rules.mjs` | 本地规则引擎：从解析结果推导任务、状态、进度、问题、优先级 |
-| `server/native-llm.mjs` | 通过 `ctx.get("llm")` 惰性获取 DSH 原生 LLM 服务（不 import `@deepseek-ai/*`，服务缺失返回 undefined） |
-| `server/analyzer-llm.mjs` | 可选 LLM 引擎：经 DSH 原生 LLM 服务发起请求，流累积、usage 映射、JSON 修复、预算控制、超时与降级 |
+| `server/native-llm.mjs` | 惰性获取 DSH 模型服务、选择推理设置、读取流式输出和映射用量 |
+| `server/analyzer-llm.mjs` | 可选 LLM 引擎，负责研判提示词、JSON 提取、重试与预算 |
+| `server/quick-chat.mjs` | 快聊模型调用，负责流式 HTTP 响应、并发、断开取消和限时 |
+| `server/projects.mjs` | 项目、日期及任务规划字段的存储格式与文本上限 |
 | `server/store.mjs` | 持久化：`state.json` / `sessions-cache.json`，原子写、裁剪、版本迁移、损坏恢复 |
 | `server/auth.mjs` | owner 鉴权决策表：归一化 `connection.admit()` 结果，异常/畸形输入一律 fail-closed 403 |
 | `server/task-relations.mjs` | 任务关系校验与环检测、问题文本标识 |
@@ -60,7 +61,7 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `dev/` | 维护者本地开发/截图/验收工具（**已在 `.gitignore` 中忽略，不随仓库分发**；见 `dev/README.md`） |
 | `internal/docs-internal/` | 历史设计/QA 归档（**同样被 git 忽略**；见该目录 README） |
 
-> npm 发布包 = `package.json` 的 `files` 列表（`index.mjs`、`client.js`、`cordis.patch.yml`、`server/`、`icon.svg`、`CHANGELOG.md`）+ npm 自动包含的 `README.md`、`README.en.md`、`LICENSE`、`package.json`；当前共 18 个文件。`docs/`、`dev/`、`internal/`、`.github/` 不进入 tarball。
+> npm 发布包 = `package.json` 的 `files` 列表（`index.mjs`、`client.js`、`cordis.patch.yml`、`server/`、`icon.svg`、`CHANGELOG.md`）+ npm 自动包含的 `README.md`、`README.en.md`、`LICENSE`、`package.json`。`docs/`、`dev/`、`internal/`、`.github/` 不进入 tarball。
 
 ## Host 半边
 
@@ -110,13 +111,16 @@ store.saveState()              原子写（tmp + rename）；经 SSE 通知刷�
 
 - **会话锚点**：自动任务以来源会话为种子生成稳定 ID，显式关联优先。相似标题仅用于用户查询，扫描不自动合并任务。
 - **增量门控**：仅在「用户消息数增加、上一轮 turn 已结束、首次分析、手动重新研判」时调用模型；活跃 turn 内不重复分析；同一会话有最小间隔。
+- **轮次结束触发**：开启自动扫描后，Host 合并 DSH 的 `turn/end` 事件，通常在最新轮次结束至少 2 秒后扫描。连续事件达到 10 秒合并上限时可先扫描已落盘部分，保留仍在等待落盘的更新。事件触发的扫描至少间隔 15 秒，繁忙时顺延。
+- **扫描响应性**：扫描请求先返回，解析和应用阶段按处理时间分段让出事件循环。发送研判和应用结果前检查当前扫描范围，确保并发删除和忽略生效。
 - **模型解析**：每次扫描 / 单卡重判 / 润色前解析一次（`settings.aiProvider/aiModel` → DSH 默认模型 → 目录首模型兜底）。
 - **解析缓存**：`loadParsed` 的有界 LRU(6) 以「文件签名 + 文件 stat + 解析相关 meta 指纹」为键，抽屉轮询/重判/待办导入复用解析结果，文件或元数据变化时重新解析，失败不缓存。
 - **刷新成本**：浏览器每 4s（扫描中 1.2s）轮询 `/state`，但只在轻量 `stateSignature`（任务 id/updatedAt/status/archived + scan/settings/usage/stats/activity/workspaces）变化时才重渲染，避免大 evidence 数组的重复序列化。
+  全页与右侧栏共享同一轮读取。写入成功或收到变更事件后开启新一轮，迟到的旧响应会被丢弃。
   显式或默认 provider 不可用时不自动换模型，直接规则降级并在扫描结论说明；无 `ctx.llm` 的旧 DSH 同样规则降级。
   请求不传 `sessionId`、不传 tools / 图片。
-- **预算**：单次预算按 `aiBudgetMode` 解析（`auto` = min(待研判会话, 每日剩余)；`fixed` = min(单次上限 5–150, 每日剩余)）；
-  每日计数按**用户本地日历日**滚动（`todayKey`），不是 UTC 日。AI 阶段有 10 分钟墙钟护栏；
+- **预算**：单次预算按 `aiBudgetMode` 解析（`auto` = min(待研判会话, 每日剩余)；`fixed` = min(单次上限 5–150, 每日剩余)）。
+  按本地日历日累计 `usage.budgetUsed`，失败也占用单位。成功次数和 tokens 独立统计。AI 阶段到 10 分钟时取消在途研判；
   超预算 / 到点 / 每日耗尽的剩余会话降级规则引擎并保留到下次扫描继续，失败会话有 5 分钟冷却。
   任务优先级：从未 AI 研判的欠账 > 本轮有变化 > 最近活跃 > 会话 id 兜底（确定性）。
 - **模型目录**：`GET /ai/models` 读取 `listProviders()` + 逐 provider `listModels()`，Host 侧 30s 缓存 + 目录事件失效；
@@ -143,15 +147,18 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 ### 任务判断与写入
 
 - 规则引擎分别记录会话运行情况、任务阶段和完成依据。普通轮次正常结束时保留待确认状态，明确的 DSH 目标完成、当前轮待办完成或用户确认可提供完成依据。
-- 缓存保留静态解析与未结束轮次事实，运行情况根据当前时间和会话锁重新计算。浏览器具备 DSH `useSessionStatus` 时优先展示宿主运行与待交互状态。来源会话的新增证据可补充到同一任务，主会话提供当前状态判断。
+- 浏览器用 DSH `useSessionStatus` 读取关联会话的运行和待交互状态，快照里缺失的会话视为空闲。宿主未提供该快照时，依据扫描快照和最近活动显示「可能运行中」。主会话提供任务阶段依据，其他会话可以补充证据、运行和待交互信息。
 - 用户填写的验收条件随任务保存。主会话提供完成依据时进入待验收，人工确认记录完成依据。续做草稿按用户选择的关联会话生成，保留当前验收条件、已知交付物、未完成项和来源定位。
 - 文件证据按事件发生时的工作目录解析。扫描缓存只保留近 15 分钟、仍未结束轮次的成功写入摘要，按已核验 Git 工作树和实际文件聚合。浏览器再用 DSH 原生运行状态确认是否提示可能同时修改。
 - 用户命令通过同步候选状态提交。原子写成功后发布，失败回滚内存变更。长扫描保留可重试的保存状态。
+- 编辑器将草稿和打开时的字段值、当前值对比。不同字段自动同步；同一字段出现不同值时，由用户选择草稿或最新值，再用当前版本提交。
 - 任务删除与显式合并保存恢复快照。关系校验集中在领域模块。备份恢复校验预览的文件内容与看板版本，写入恢复点后才替换现有状态。
+- 项目归属、到期日和备注通过用户命令提交。项目可绑定一个 DSH 工作区，自动建卡时按精确的工作区 ID 归入项目。工作区列表来自 DSH 注册表和扫描发现结果，关闭自动扫描时仍能从注册表绑定工作区。
+- `quick-chat.mjs` 使用 `native-llm.mjs` 的流传输与 DSH 默认模型，单独管理在途请求、断开取消和限时。它与扫描共用宿主模型服务，各自维护状态和用量口径。
 
 ### 持久化（`store.mjs`）
 
-- `state.json`：`version`、`tasks`、`settings`、`usage`、`ignoredSessions`、`suppressedSessions`、`deletedLog`、`workspaces`、`activity`、`scan`。
+- `state.json`：`version`、`projects`、`tasks`、`settings`、`usage`、`ignoredSessions`、`suppressedSessions`、`deletedLog`、`workspaces`、`activity`、`scan`。旧 v2 数据加载时补齐项目和规划字段。
 - `sessions-cache.json`：`sessions[sessionId] = { sigKey, meta }`，用于跳过未变化会话与 AI 门控。
 - 写入是原子的（临时文件 + rename）；解析失败的文件会移动到 `backups/` 后以默认值重建。
 - `version` 变化时执行迁移（v1 → v2），迁移失败同样走备份 + 重建路径。

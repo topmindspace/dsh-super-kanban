@@ -24,7 +24,7 @@ import { MARKET_INDEX_PATH, deriveIndexUrl, normalizeRepositoryUrl, validateMark
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PLUGIN_TITLE = { en: "Super Kanban", zh: "Super Kanban 任务看板" };
 export const PLUGIN_DESCRIPTION_ZH =
-  "面向 DeepSeek Harness 的 AI 任务看板：从会话自动研判任务目标、进度与问题，优先展示关键事实，支持子任务、产物追溯、一键继续任务，以及全页 / 右侧栏双形态界面。";
+  "面向 DeepSeek Harness 的 AI 项目看板。自动更新会话任务，集中处理审批、阻塞和验收，支持项目归属、任务日程、备注与快聊。可在全页或会话右侧栏打开。";
 export const INDEX_TITLE = { en: "TopMindSpace DSH plugins", zh: "TopMindSpace DSH 插件索引" };
 export const INDEX_DESCRIPTION = {
   en: "Installable plugins for DeepSeek Harness maintained by TopMindSpace.",

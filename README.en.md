@@ -1,6 +1,6 @@
 # Super Kanban · AI Task Command Center
 
-**Turns your DSH sessions into a task board that keeps itself up to date.** You keep several DSH sessions going at once — what got done, where it is stuck, whether anything shipped — and the board answers that without scrolling back through chats. Every card traces back to a specific session and a specific sentence.
+**Manage projects and tasks that stay up to date with DSH.** See running sessions, requests that need attention, and delivery evidence. Group work by project, add notes and deadlines, and jump back into the source session from any linked card.
 
 [![CI](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/topmindspace/dsh-super-kanban/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-super-kanban.svg)](https://www.npmjs.com/package/dsh-super-kanban)
@@ -15,8 +15,8 @@
 ## At a glance
 
 - **Who it is for**: people running several DSH sessions at once who want one glance at "what got done today / what is stuck".
-- **Who it is not for**: single-session work where DSH's own todo list is already enough.
-- **The difference**: tasks grow out of your sessions automatically instead of being maintained by hand; AI is only an enhancement, and the local rules engine still works when AI is off or unavailable.
+- **Automatic updates.** Incremental scans can refresh progress, issues, and deliverables after DSH turns settle. Local rules cover unavailable models.
+- **Manual planning.** You control project assignments, notes, deadlines, and fields you lock.
 
 ## Quick start
 
@@ -24,9 +24,9 @@
 
 All three common ways support **exact versions**; local directory / source install is covered in step 3.
 
-1. **Plugin market (recommended)**: DSH → Plugins → Discover → add the index source `https://topmindspace.github.io/dsh-super-kanban/index.json` → open **Super Kanban** → in the **version list** pick an exact version (for example `0.6.1`) → install → enable and reload the window.
-2. **npm (exact version)**: DSH → Plugins → Add plugin → enter `dsh-super-kanban@0.6.1` → install → reload the window. Command-line equivalent: `dsh plugin --profile desktop add dsh-super-kanban@0.6.1`.
-3. **Git / source (tag-pinned version)**: `git clone https://github.com/topmindspace/dsh-super-kanban.git` → `git checkout v0.6.1` → `./install.sh -y` → reload the window. `./install.sh` needs `bash` + `python3`; if you prefer no command line, pick the local directory in the DSH plugin page instead. Adding the repository directly in the plugin page pins the latest commit, so use this tag flow when you need a fixed version.
+1. **Plugin market (recommended)**: DSH → Plugins → Discover → add the index source `https://topmindspace.github.io/dsh-super-kanban/index.json` → open **Super Kanban** → in the **version list** pick an exact version (for example `0.7.0`) → install → enable and reload the window.
+2. **npm (exact version)**: DSH → Plugins → Add plugin → enter `dsh-super-kanban@0.7.0` → install → reload the window. Command-line equivalent: `dsh plugin --profile desktop add dsh-super-kanban@0.7.0`.
+3. **Git / source (tag-pinned version)**: `git clone https://github.com/topmindspace/dsh-super-kanban.git` → `git checkout v0.7.0` → `./install.sh -y` → reload the window. `./install.sh` needs `bash` + `python3`; if you prefer no command line, pick the local directory in the DSH plugin page instead. Adding the repository directly in the plugin page pins the latest commit, so use this tag flow when you need a fixed version.
 
 [Verify version](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#23-命令行查看实际安装版本) · [Upgrade](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级) · [Rollback](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#4-回滚到旧版本) · [Local directory install](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本) — full steps in the [installation guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md).
 
@@ -42,6 +42,8 @@ All three common ways support **exact versions**; local directory / source insta
 
 - **See what needs your attention**: the inbox groups approvals, issues, dependencies and deliverables awaiting review, with links to the relevant sessions.
 - **One goal across sessions**: link progress and deliverables from several sessions. Incremental scans update existing cards.
+- **Plan by project.** Group tasks across workspaces, add notes and due dates, and track completion, blockers, and overdue work. Use the schedule to see open tasks by due date. Assign existing cards in bulk or link a workspace to route future automatic cards into a project.
+- **See live work.** Running indicators follow DSH session status, and the toolbar can show just the running tasks in scope. Approvals and questions appear in the inbox. When auto-scan is enabled, completed turns can bring the next incremental scan forward.
 - **Review against criteria**: find the main deliverable, blockers and evidence by source session. Human acceptance is recorded on the card.
 - **Act on tasks and artifacts**: right-click or use **⋯** to move, pin or archive a task. Hover over an artifact to see its source and path. Its menu lets you copy the file name or path, preview it, and use DSH to open it in the default app or reveal it in the file manager.
 - **Continue with context**: local templates carry acceptance criteria, open work and artifacts into the session draft you choose.
@@ -49,6 +51,7 @@ All three common ways support **exact versions**; local directory / source insta
 - **Two layouts**: a full four-column board or a compact board in the conversation's right sidebar. Views, workspace and filters share one toolbar. Narrow panes put search in the filter popover.
 - **Browse long columns**: each column scrolls independently and shows up to 30 cards per page. The completed column still accepts drops while collapsed.
 - **Manage and recover**: pin, batch archive, lock fields or explicitly merge. Restore deleted cards and import backups from the maintenance view.
+- **Quick chat.** Ask a short question or translate into Chinese or English with the DSH default model. The answer streams into the board and can be stopped or copied.
 - **Local-first**: board data is written only to `~/.dsh/storages/super-kanban/` on your machine, and the board itself has no telemetry.
 
 ## Typical scenarios
@@ -56,18 +59,19 @@ All three common ways support **exact versions**; local directory / source insta
 - **Every morning in 30 seconds**: open the inbox for sessions that need attention, then check the four columns for progress.
 - **Keep one card moving**: click "继续此任务" in the drawer and the prompt goes straight back to the original or a new session — no context rebuilding by hand.
 - **Maintain a large board manually**: create, drag and lock fields; a field you locked will not be overwritten by the next AI analysis.
+- **Organize sessions into a project.** Create a project, select existing tasks in the list, and assign them in bulk. New tasks created from a project board come with that project selected.
 
 ## AI and models
 
 - **Follows the DSH default model by default** — you do not enter any key in the board.
 - **Using a third-party model**: add a model provider in **DSH Settings → Models** (OpenAI / Anthropic / OpenRouter and similar, or a custom compatible endpoint) and enter its API key; then pick it under board Settings → "AI 研判模型".
 - **Without a native model service** (old DSH or a minimal composition) the board switches to the local rules engine automatically and explains why in the scan outcome.
-- **Privacy**: analysis sends a compact session digest and limited related task details. Choosing AI Polish sends the current draft. The configured DSH model provider receives these requests. See [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md).
+- **Privacy.** Analysis sends a compact session digest and limited related task details. AI Polish sends the current draft and quick chat sends the text you enter. Project and task notes stay in local board storage. [Security policy](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md).
 
 ## Settings and budget
 
 - **AI budget**: "Auto" by default = use up to the daily remainder per scan; or fix it at 20 / 40 / 80 / 150 calls.
-- **Daily limit**: 150 budget units by default, reset at local midnight (budget units are not a hard cost cap).
+- **Daily limit.** The default is 150 analysis units, reset at local midnight. Failed analyses and polishing requests consume units. Retries within a request share one unit. The default model provider accounts for quick chat separately.
 - **Scanning**: the auto-scan interval is configurable; sessions a scan could not finish continue on the next scan, and the outcome says "remaining N sessions continue next scan".
 - **Entry preferences**: "Display and entry" offers both / full page only / right sidebar only; changes take effect after reloading the window.
 
@@ -80,6 +84,10 @@ All three common ways support **exact versions**; local directory / source insta
 - **Data size**: board data lives in `~/.dsh/storages/super-kanban/` (tasks / settings / scan state + session cache) and there is no telemetry.
 
 ## Screenshots
+
+| Project overview | Project schedule |
+| --- | --- |
+| ![Project overview](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/projects.png) | ![Project schedule](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/project-schedule.png) |
 
 | Board (dark) | Task details |
 | --- | --- |
@@ -103,7 +111,7 @@ More screenshots: [demo GIF](https://raw.githubusercontent.com/topmindspace/dsh-
 | Third-party dependencies | None (plugin and `scripts/` validators are dependency-free) |
 | AI models | Provided by DSH's native model service: follows the DSH default model, or a third-party provider |
 
-**Version policy**: the current `0.6.x` line gets proactive security fixes; the previous `0.5.x` line is best-effort (upgrading to `0.6.x` is recommended); GitHub Releases keeps only the latest three version pages, so install historical versions from the plugin-market version list or a Git tag with an exact version. See [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md) and [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级). Cross-minor upgrades need an exact version; if the entry disappears after a DSH major upgrade, reinstall the plugin first — board data is not lost.
+**Version policy**: the current `0.7.x` line gets proactive security fixes; the previous `0.6.x` line is best-effort (upgrading to `0.7.x` is recommended); GitHub Releases keeps only the latest three version pages, so install historical versions from the plugin-market version list or a Git tag with an exact version. See [SECURITY.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/SECURITY.md) and [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级). Cross-minor upgrades need an exact version; if the entry disappears after a DSH major upgrade, reinstall the plugin first — board data is not lost.
 
 ## FAQ
 
@@ -114,7 +122,7 @@ A: Press `Cmd+R` to reload the window; if it is still missing, fully quit and re
 A: Make sure "AI 联网研判" is enabled in settings and that a model is configured in DSH Settings → Models; board Settings → "AI 研判模型" can also pin a specific model. Old DSH builds without the native model service always use the rules engine.
 
 **Q: How do I update to a specific version?**
-A: Third-party plugins have no automatic upgrade: uninstall the old version → install the exact target version (for example `dsh-super-kanban@0.6.1`, or pick it in the market version list) → reload the window. See [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级).
+A: Third-party plugins have no automatic upgrade: uninstall the old version → install the exact target version (for example `dsh-super-kanban@0.7.0`, or pick it in the market version list) → reload the window. See [INSTALL.md](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#3-更新插件升级).
 
 **Q: Where is the data? Is it lost after uninstalling?**
 A: `~/.dsh/storages/super-kanban/` (`state.json` / `sessions-cache.json` / `backups/`). Uninstalling the plugin does not delete it; to wipe it completely see the [troubleshooting guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md#卸载与数据保留).

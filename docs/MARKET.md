@@ -19,7 +19,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 | 分发物 | 地址 / 名称 | 状态 |
 | --- | --- | --- |
-| 市场索引（Discover 用） | `https://topmindspace.github.io/dsh-super-kanban/index.json` | 已上线（GitHub Pages，经典「从分支部署」：`main` 分支 `/docs`；Release 后由 workflow 自动更新索引并提交） |
+| 市场索引（Discover 用） | `https://topmindspace.github.io/dsh-super-kanban/index.json` | 已上线（GitHub Pages，经典「从分支部署」：`main` 分支 `/docs`；发布前生成索引并与版本一起提交） |
 | npm 包 | `dsh-super-kanban`（npm latest） | 由 GitHub Actions 在打 tag 时自动发布（需仓库 Secret `NPM_TOKEN`） |
 | Git 仓库 | `https://github.com/topmindspace/dsh-super-kanban` | 公开 |
 | 本地/手动安装 | 仓库内 `./install.sh` | 可用 |
@@ -51,7 +51,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 ### 方式 B：npm 包名
 
-DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.6.1`，升级时推荐）→ 安装 → 启用 → 刷新。
+DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.7.0`，升级时推荐）→ 安装 → 启用 → 刷新。
 
 ### 方式 C：Git 仓库
 
@@ -76,8 +76,8 @@ DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 n
 注意：
 
 - 插件页安装 npm/市场来源会用 `pnpm add --save-exact`，把**精确版本**写入 profile 依赖；所以升级需要重新安装目标版本，而不是只点一下刷新。
-- 手动使用范围依赖时，`^0.5.0` 只解析 0.5.x。升级到 0.6.x 请安装目标精确版本。
-- 市场索引由 Release workflow 在发布成功后自动重新生成并提交 `docs/index.json`（维护者也可手动 `npm run market:index`）；索引未刷新时，详情页看不到新版本。
+- 手动使用范围依赖时，`^0.6.0` 只解析 0.6.x。升级到 0.7.x 可安装目标精确版本。
+- 维护者在发版推送前提交 `docs/index.json`，GitHub Pages 随主分支部署。等待索引部署完成后，刷新发现页即可看到新版本。
 
 更完整的用户升级/验证/回滚步骤见 [INSTALL.md](INSTALL.md#3-更新插件升级)。
 

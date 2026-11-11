@@ -684,6 +684,46 @@ test("task.polishPrompt uses the resolved route and counts one AI call", async (
   assert.equal(state.usage.calls, 1);
 });
 
+test("failed scans and explicit calls share the daily budget across reload and backup restore", async (t) => {
+  const host = makeHost({ scripts: [errorScript("AUTH"), errorScript("AUTH"), errorScript("AUTH")] });
+  const { service, home } = await setup(t, {
+    sessionIds: ["sess-01", "sess-02"], host,
+    state: { settings: { dailyAiCallLimit: 10 }, usage: { ...emptyUsage(), calls: 8 } },
+  });
+  const backup = (await call(service, { route: "/export" })).json;
+  const scan = await runScan(service);
+  assert.equal(scan.scan.aiBudgetUsed, 2);
+  assert.equal(scan.scan.aiCalls, 0);
+  assert.equal(scan.scan.aiDeferredReason, "daily");
+  assert.match(scan.scan.message, /10\/10/);
+  assert.equal(scan.usage.budgetUsed, 10);
+  assert.equal(scan.usage.calls, 8);
+  const preview = await command(service, "backup.preview", { backup });
+  assert.equal((await command(service, "backup.restore", { backup, ...preview.json.data })).status, 200);
+  await command(service, "task.polishPrompt", { prompt: "额度已用完" });
+  assert.equal(host.streams.length, 2);
+  await command(service, "settings.update", { patch: { dailyAiCallLimit: 11 } });
+  const polish = await command(service, "task.polishPrompt", { prompt: "还剩一次" });
+  assert.equal(polish.json.data.polished, false);
+  assert.equal(host.streams.length, 3);
+  const state = JSON.parse(fs.readFileSync(path.join(home, "storages", "super-kanban", "state.json"), "utf8"));
+  assert.equal(state.usage.budgetUsed, 11);
+  assert.equal(state.usage.calls, 8);
+});
+
+test("the scan deadline releases a hung model request and applies the local verdict", async (t) => {
+  const stuck = deferredScript(okScript());
+  const host = makeHost({ scripts: [stuck.script] });
+  const { service } = await setup(t, { sessionIds: ["sess-01"], host, serviceOptions: { aiScanMaxMs: 35 } });
+  t.after(() => stuck.resolve());
+  const state = await runScan(service);
+  assert.equal(state.scan.aiDeferredReason, "time");
+  assert.equal(state.scan.aiBudgetUsed, 1);
+  assert.equal(state.scan.aiCalls, 0);
+  assert.equal(state.tasks[0].ai.engine, "rules");
+  assert.equal(host.streams[0].signal.aborted, true);
+});
+
 /* ------------------------------------------------------------------ */
 /* Settings                                                           */
 /* ------------------------------------------------------------------ */

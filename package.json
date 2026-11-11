@@ -1,7 +1,7 @@
 {
   "name": "dsh-super-kanban",
-  "version": "0.6.1",
-  "description": "Local task board for DeepSeek Harness. Triage session requests, group related sessions, review deliverables and continue work from a shared task card.",
+  "version": "0.7.0",
+  "description": "AI project board for DeepSeek Harness with live session status, task schedules, deliverable review and quick chat.",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -23,6 +23,7 @@
     "dsh-plugin",
     "kanban",
     "task-tracking",
+    "project-management",
     "ai-agent",
     "session",
     "productivity"

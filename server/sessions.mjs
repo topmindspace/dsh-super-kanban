@@ -521,22 +521,27 @@ export function createSessionSource({ dshHome } = {}) {
    * Entries are only stored for successfully parsed logs.
    */
   const parsedCache = new Map();
+  let workspaceRegistryCache = null;
 
   function readWorkspaceRegistry() {
     const file = path.join(home, "storages", "workspace.json");
     const diagnostics = [];
     let registry = { workspaces: [], sessionWorkspace: new Map() };
     try {
+      const stat = fs.statSync(file);
+      const signature = `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+      if (workspaceRegistryCache?.signature === signature) return workspaceRegistryCache.value;
       const raw = JSON.parse(fs.readFileSync(file, "utf8"));
       if (!raw || typeof raw !== "object" || Array.isArray(raw) || !raw.tables || typeof raw.tables !== "object") {
         diagnostics.push({ kind: "workspace-registry", message: "workspace.json has an unexpected shape" });
         return { workspaces: [], sessionWorkspace: new Map(), diagnostics };
       }
       const table = raw.tables.workspaces && typeof raw.tables.workspaces === "object" ? raw.tables.workspaces : {};
-      const order = Array.isArray(raw.global?.workspaceIds) ? raw.global.workspaceIds : Object.keys(table);
+      const order = Array.isArray(raw.global?.workspaceIds) ? new Set(raw.global.workspaceIds) : Object.keys(table);
       const workspaces = [];
       const sessionWorkspace = new Map();
       for (const id of order) {
+        if (typeof id !== "string" || !Object.hasOwn(table, id)) continue;
         const entry = table[id];
         if (!entry || typeof entry.path !== "string" || !entry.path) continue;
         const workspace = {
@@ -552,6 +557,7 @@ export function createSessionSource({ dshHome } = {}) {
         for (const sessionId of workspace.sessionIds) sessionWorkspace.set(sessionId, workspace);
       }
       registry = { workspaces, sessionWorkspace };
+      workspaceRegistryCache = { signature, value: { ...registry, diagnostics } };
     } catch (error) {
       diagnostics.push({
         kind: "workspace-registry",
@@ -1396,6 +1402,7 @@ export function createSessionSource({ dshHome } = {}) {
 
   return {
     discover,
+    readWorkspaceRegistry,
     loadParsed,
     sessionLiveness,
     metaFromParsed,

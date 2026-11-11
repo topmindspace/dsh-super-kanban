@@ -19,10 +19,8 @@
  * resolved lazily from `ctx`, and `createLlmAnalyzer({ ctx })` never throws
  * when the service is absent (analysis then degrades to the rules engine).
  */
-import { llmOf } from "./native-llm.mjs";
-
-const TIMEOUT_MS = 60_000;
-const MAX_OUTPUT_TOKENS = 4096;
+import { llmOf, streamOnce, TIMEOUT_MS, MAX_OUTPUT_TOKENS } from "./native-llm.mjs";
+import { setTimeout as delayFor } from "node:timers/promises";
 const POLISH_OUTPUT_TOKENS = 800;
 const MAX_ATTEMPTS = 3;
 const MAX_RETRY_DELAY_MS = 10_000;
@@ -37,7 +35,6 @@ const RETRYABLE_CODES = new Set([
   "MALFORMED_RESPONSE",
   "UNKNOWN",
   "llm-failed",
-  "timeout",
   "empty-response",
   "stream-closed",
 ]);
@@ -150,118 +147,12 @@ export function buildUserText(digest, existingTasks) {
 }
 
 /**
- * Map DSH TokenUsage onto the three fields the board stores.
- *
- * `totalTokens` is optional in the contract: adapters that omit it must not be
- * recorded as input+output only — DSH's TokenUsage also reports cache reads and
- * cache writes (disjoint from `inputTokens`), and dropping them under-counts the
- * board's token usage/cost display.
- */
-function normalizeUsage(usage) {
-  const input = Number(usage?.inputTokens) || 0;
-  const output = Number(usage?.outputTokens) || 0;
-  const cacheRead = Number(usage?.cacheReadTokens) || 0;
-  const cacheWrite = Number(usage?.cacheWriteTokens) || 0;
-  const total = Number.isFinite(Number(usage?.totalTokens))
-    ? Number(usage.totalTokens)
-    : input + output + cacheRead + cacheWrite;
-  return {
-    promptTokens: input,
-    completionTokens: output,
-    totalTokens: Math.max(0, total),
-  };
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, Math.max(0, ms));
-  });
-}
-
-/**
- * Prepare one call, picking the model's least reasoning effort and a sane
- * output cap. Falls back to a plain stream when the adapter has no prepareCall.
- */
-async function prepareCall({ llm, provider, model, signal, maxTokens = MAX_OUTPUT_TOKENS }) {
-  if (typeof llm.prepareCall !== "function") return null;
-  try {
-    const call = await llm.prepareCall({ provider, model }, signal, (controls, modelInfo) => {
-      const effort = modelInfo?.reasoning?.efforts?.[0]?.id;
-      const modelDefault = Number(modelInfo?.defaultMaxTokens);
-      const cap = Number.isFinite(modelDefault) && modelDefault > 0 ? Math.min(maxTokens, modelDefault) : maxTokens;
-      const next = { ...controls, maxTokens: cap };
-      return effort === undefined ? next : { ...next, reasoningEffort: effort };
-    });
-    return call && typeof call.stream === "function" ? call : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * One provider attempt: accumulate text deltas, capture usage and the terminal
- * finish. Never throws for provider outcomes — they become `{ok:false, code}`.
- */
-async function streamOnce({ llm, provider, model, system, messages, signal, maxTokens = MAX_OUTPUT_TOKENS }) {
-  if (signal?.aborted) return { ok: false, code: "aborted" };
-  const controller = new AbortController();
-  let timedOut = false;
-  const onOuterAbort = () => controller.abort();
-  signal?.addEventListener("abort", onOuterAbort, { once: true });
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, TIMEOUT_MS);
-  if (typeof timer.unref === "function") timer.unref();
-  let text = "";
-  let usage = null;
-  let finish = null;
-  let thrown = null;
-  try {
-    const call = await prepareCall({ llm, provider, model, signal: controller.signal, maxTokens });
-    const config = call ? { ...call.config } : { provider, model, maxTokens };
-    const options = { ...config, messages, system, signal: controller.signal };
-    const iterable = call ? call.stream(options) : llm.stream(options);
-    for await (const chunk of iterable) {
-      if (!chunk || typeof chunk !== "object") continue;
-      if (chunk.type === "text-delta") text += chunk.text;
-      else if (chunk.type === "usage") usage = normalizeUsage(chunk.usage);
-      else if (chunk.type === "finish") finish = chunk.reason;
-    }
-  } catch (error) {
-    thrown = error;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onOuterAbort);
-  }
-  if (signal?.aborted) return { ok: false, code: "aborted" };
-  if (timedOut) return { ok: false, code: "timeout", message: `LLM timed out after ${TIMEOUT_MS}ms` };
-  if (thrown) return { ok: false, code: "llm-failed", message: String(thrown?.message || thrown) };
-  if (!finish) return { ok: false, code: "stream-closed", message: "LLM stream ended without a terminal finish" };
-  if (finish.kind === "aborted") return { ok: false, code: "aborted" };
-  if (finish.kind === "error") {
-    const providerCode = String(finish.failure?.code || "UNKNOWN");
-    return {
-      ok: false,
-      code: providerCode,
-      providerCode,
-      message: String(finish.failure?.message || providerCode),
-      retryAfterMs: Number(finish.failure?.providerRetryAfterMs) || 0,
-    };
-  }
-  if (finish.kind === "max-tokens") return { ok: false, code: "truncated", message: "output truncated by maxTokens" };
-  if (finish.kind === "tool-calls") return { ok: false, code: "tool-calls", message: "unexpected tool call" };
-  if (!text.trim()) return { ok: false, code: "empty-response", message: "provider returned empty content" };
-  return { ok: true, text, usage: usage || normalizeUsage(null) };
-}
-
-/**
  * Create the board's LLM analyzer bound to the host context.
  * @param {object} options
  * @param {object} options.ctx Cordis host context (may expose `llm` / `logger`).
  * @param {object} [options.logger] logger override (tests).
  */
-export function createLlmAnalyzer({ ctx, logger } = {}) {
+export function createLlmAnalyzer({ ctx, logger, reserveUnit = () => true } = {}) {
   const log = logger || ctx?.logger || console;
   let budget = { limit: 40, calls: 0, attempts: 0, tokens: 0 };
 
@@ -277,10 +168,11 @@ export function createLlmAnalyzer({ ctx, logger } = {}) {
    *   model:string, provider:string} | {ok:false, error:string, code:string}>}
    */
   async function analyze({ provider, model, digest, existingTasks, signal } = {}) {
+    if (signal?.aborted) return { ok: false, error: "aborted", code: "aborted" };
     const llm = llmOf(ctx);
     if (!llm) return { ok: false, error: "llm service unavailable", code: "llm-unavailable" };
     if (!provider || !model) return { ok: false, error: "provider and model are required", code: "no-route" };
-    if (budget.calls >= budget.limit) return { ok: false, error: "scan-call-budget-exhausted", code: "budget" };
+    if (budget.calls >= budget.limit || !reserveUnit()) return { ok: false, error: "scan-call-budget-exhausted", code: "budget" };
 
     const messages = [{ role: "user", content: [{ type: "text", text: buildUserText(digest, existingTasks) }] }];
     const correctionMessage = {
@@ -307,7 +199,12 @@ export function createLlmAnalyzer({ ctx, logger } = {}) {
           const retryable = RETRYABLE_CODES.has(outcome.code);
           if (retryable && attempt < MAX_ATTEMPTS - 1) {
             const delay = Number(outcome.retryAfterMs) > 0 ? Math.min(Number(outcome.retryAfterMs), MAX_RETRY_DELAY_MS) : 800 * (attempt + 1);
-            await sleep(delay);
+            try {
+              await delayFor(delay, undefined, { signal });
+            } catch (error) {
+              if (error?.name !== "AbortError") throw error;
+              return { ok: false, error: "aborted", code: "aborted" };
+            }
             continue;
           }
           break;
@@ -337,12 +234,13 @@ export function createLlmAnalyzer({ ctx, logger } = {}) {
    * same budget and returns ok:false instead of throwing when unavailable.
    */
   async function polish({ provider, model, prompt, signal } = {}) {
+    if (signal?.aborted) return { ok: false, error: "aborted", code: "aborted" };
     const text = typeof prompt === "string" ? prompt.trim() : "";
     if (!text) return { ok: false, error: "prompt-required", code: "invalid-input" };
     const llm = llmOf(ctx);
     if (!llm) return { ok: false, error: "llm service unavailable", code: "llm-unavailable" };
     if (!provider || !model) return { ok: false, error: "provider and model are required", code: "no-route" };
-    if (budget.calls >= budget.limit) return { ok: false, error: "call-budget-exhausted", code: "budget" };
+    if (budget.calls >= budget.limit || !reserveUnit()) return { ok: false, error: "call-budget-exhausted", code: "budget" };
     budget.calls += 1;
     const outcome = await streamOnce({
       llm,

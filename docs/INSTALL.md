@@ -7,7 +7,7 @@
 - 市场索引：<https://topmindspace.github.io/dsh-super-kanban/index.json>
 - 许可证：[MIT](../LICENSE)
 
-> 文档按 **0.6.x** 系列编写；具体可用版本以 DSH 插件页显示与 npm latest 为准。遇到问题请先看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+> 文档按 **0.7.x** 系列编写；具体可用版本以 DSH 插件页显示与 npm latest 为准。遇到问题请先看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
 ## 0. 前置条件
 
@@ -23,7 +23,7 @@
 
 ## 1. 安装（四种方式）
 
-> 每种方式都支持**安装特定版本**；下例用当前版本 `0.6.1`，换成你的目标版本号即可。
+> 每种方式都支持**安装特定版本**；下例用当前版本 `0.7.0`，换成你的目标版本号即可。
 > 安装后可用 [2.3 节](#23-命令行查看实际安装版本)的命令验证实际版本。
 
 ### 方式 A：插件市场索引（推荐）
@@ -38,7 +38,7 @@
    ```
 
 3. 打开 **Super Kanban** 的详情页：这里会列出该插件在索引中的**全部可用版本**（按新→旧排列）；
-4. **安装特定版本**：在版本列表里选择精确版本（如 `0.6.1`）→ **安装** → **启用**；选定哪个就安装哪个，第三方插件不会自动升级；
+4. **安装特定版本**：在版本列表里选择精确版本（如 `0.7.0`）→ **安装** → **启用**；选定哪个就安装哪个，第三方插件不会自动升级；
 5. 回到主窗口按 `Cmd+R` 刷新。左侧栏出现「任务看板」即安装成功。
 
 > 市场索引来自第三方（本仓库 `docs/`）。DSH 会在安装前提示信任风险，请确认来源为本仓库后再继续。
@@ -49,7 +49,7 @@
 1. DSH → 插件 → **添加插件**；
 2. 输入包名：
    - 不带版本：`dsh-super-kanban`（安装 npm latest）；
-   - 带版本：`dsh-super-kanban@0.6.1`（**推荐写精确版本**，见第 3 节）；
+   - 带版本：`dsh-super-kanban@0.7.0`（**推荐写精确版本**，见第 3 节）；
 3. 安装 → 启用 → 刷新窗口。
 
 适合能访问 npm registry 的用户。插件无第三方运行时依赖。
@@ -57,7 +57,7 @@
 **安装特定版本**（命令行等价写法，先完全退出 DSH）：
 
 ```bash
-dsh plugin --profile desktop add dsh-super-kanban@0.6.1
+dsh plugin --profile desktop add dsh-super-kanban@0.7.0
 ```
 
 ### 方式 C：Git 仓库
@@ -74,7 +74,7 @@ dsh plugin --profile desktop add dsh-super-kanban@0.6.1
 > ```bash
 > git clone https://github.com/topmindspace/dsh-super-kanban.git
 > cd dsh-super-kanban
-> git checkout v0.6.1        # 换成目标 Release 的 tag
+> git checkout v0.7.0        # 换成目标 Release 的 tag
 > ./install.sh -y
 > ```
 
@@ -84,14 +84,14 @@ dsh plugin --profile desktop add dsh-super-kanban@0.6.1
 
 **D1. 插件页选择本地目录**：DSH → 插件 → 添加插件 → 选择本仓库根目录 → 安装 → 启用 → 刷新。
 
-**安装特定版本**：先在克隆目录 `git checkout v0.6.1`（换成目标 tag），再在插件页选择该目录安装。
+**安装特定版本**：先在克隆目录 `git checkout v0.7.0`（换成目标 tag），再在插件页选择该目录安装。
 
 **D2. 命令行安装**（把工作区链接进 DSH profile）：
 
 ```bash
 git clone https://github.com/topmindspace/dsh-super-kanban.git
 cd dsh-super-kanban
-git checkout v0.6.1        # 安装特定版本：固定到目标 Release；跟随 main 则省略此行
+git checkout v0.7.0        # 安装特定版本：固定到目标 Release；跟随 main 则省略此行
 ./install.sh -y            # 交互式运行可去掉 -y
 ```
 
@@ -118,7 +118,7 @@ DSH 插件页安装 **npm/市场来源** 的包时，会把**精确版本**写�
 ```jsonc
 // ~/.dsh/profiles/desktop/package.json
 "dependencies": {
-  "dsh-super-kanban": "0.6.1",                    // 插件页/npm 安装：精确版本
+  "dsh-super-kanban": "0.7.0",                    // 插件页/npm 安装：精确版本
   // 或
   "dsh-super-kanban": "link:/path/to/checkout"    // 源码/本地目录安装
 }
@@ -169,14 +169,14 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 | 输出 | 含义 |
 | --- | --- |
-| `0.6.1` | 精确版本（插件页/npm 安装的典型结果） |
-| `^0.6.0` | 可安装 0.6.x 补丁版本 |
-| `^0.5.0` | 只解析 0.5.x，升级到 0.6.x 请用精确版本 |
+| `0.7.0` | 精确版本（插件页/npm 安装的典型结果） |
+| `^0.7.0` | 可安装 0.7.x 补丁版本 |
+| `^0.6.0` | 解析 0.6.x，升级到 0.7.x 请用精确版本 |
 | `link:/path/to/checkout` | 源码安装，版本跟随该目录，无需按版本升级 |
 
 ### 2.4 npm 安装路径与范围依赖
 
-插件页从 npm 或市场安装时记录精确版本，例如 `0.6.1`。如果手动用了 `^0.5.0`，依赖解析会留在 0.5.x。升级到 0.6.x 时，按第 3 节安装目标精确版本。
+插件页从 npm 或市场安装时记录精确版本，例如 `0.7.0`。如果手动用了 `^0.6.0`，依赖解析会留在 0.6.x。升级到 0.7.x 时，按第 3 节安装目标精确版本。
 
 ## 3. 更新插件（升级）
 
@@ -201,18 +201,18 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 3. **完全退出 DSH**（不是只关窗口）。插件文件被占用时安装可能失败或残留旧文件。
 4. 按安装来源升级：
 
-   **A. 市场（发现）**：插件 → 已安装 → Super Kanban → **卸载** → 插件 → 发现 → 打开 Super Kanban 详情 → 在版本列表里**选择目标版本**（如 `0.6.1`）→ **安装** → **启用**。
+   **A. 市场（发现）**：插件 → 已安装 → Super Kanban → **卸载** → 插件 → 发现 → 打开 Super Kanban 详情 → 在版本列表里**选择目标版本**（如 `0.7.0`）→ **安装** → **启用**。
 
-   **B. npm**：插件 → 已安装 → Super Kanban → **卸载** → 添加插件 → 输入**精确版本** `dsh-super-kanban@0.6.1` → 安装 → 启用。
+   **B. npm**：插件 → 已安装 → Super Kanban → **卸载** → 添加插件 → 输入**精确版本** `dsh-super-kanban@0.7.0` → 安装 → 启用。
 
-   **C. Git**：插件 → 已安装 → 卸载 → 添加插件 → 重新粘贴仓库地址（DSH 会 pin 到当前 commit）→ 安装 → 启用。要**指定版本**，先按方式 C 的 tag 流程 `git checkout v0.6.1`，再用方式 D 的本地目录安装。
+   **C. Git**：插件 → 已安装 → 卸载 → 添加插件 → 重新粘贴仓库地址（DSH 会 pin 到当前 commit）→ 安装 → 启用。要**指定版本**，先按方式 C 的 tag 流程 `git checkout v0.7.0`，再用方式 D 的本地目录安装。
 
    **D. 源码 / 本地目录**：
 
    ```bash
    cd /path/to/dsh-super-kanban
    git fetch --tags
-   git checkout v0.6.1     # 用目标 Release 的 tag；跟随 main 则用 git pull
+   git checkout v0.7.0     # 用目标 Release 的 tag；跟随 main 则用 git pull
    ./install.sh -y         # 重新链接（首次安装已 link 的可省略，但仍建议刷新 profile）
    ```
 
@@ -223,10 +223,11 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 | 当前依赖规格 | 可安装版本 |
 | --- | --- |
 | `^0.5.0` | `>=0.5.0 <0.6.0` |
-| `^0.6.0` | `>=0.6.1 <0.7.0` |
-| `0.6.1` | 仅 `0.6.1` |
+| `^0.6.0` | `>=0.6.0 <0.7.0` |
+| `^0.7.0` | `>=0.7.0 <0.8.0` |
+| `0.7.0` | 仅 `0.7.0` |
 
-从 0.5.x 升级时，卸载旧版后安装目标精确版本，例如 `dsh-super-kanban@0.6.1`。刷新窗口后按第 2 节核对实际运行版本。
+从 0.6.x 升级时，卸载旧版后安装目标精确版本，例如 `dsh-super-kanban@0.7.0`。刷新窗口后按第 2 节核对实际运行版本。
 
 ### 3.4 高级：命令行升级（可选）
 
@@ -234,7 +235,7 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 ```bash
 # 安装/升级到精确版本（dsh plugin 会把参数转发给 profile 里的 pnpm）
-dsh plugin --profile desktop add dsh-super-kanban@0.6.1
+dsh plugin --profile desktop add dsh-super-kanban@0.7.0
 
 # 卸载
 dsh plugin --profile desktop remove dsh-super-kanban
@@ -253,7 +254,7 @@ dsh plugin --profile desktop remove dsh-super-kanban
 
 ## 4. 回滚到旧版本
 
-升级前可在「维护」导出看板备份。回滚到旧版本时，旧版可能忽略新增的验收条件、关系或回收站记录。
+回滚前在 **维护 → 导出备份** 保存 0.7.x 的完整数据。0.6.x 读取旧版字段并可能在写入时丢弃项目、任务备注和到期日。重新安装 0.7.x 后，可在维护视图恢复这份备份。
 
 1. 备份数据：
 
@@ -263,9 +264,9 @@ dsh plugin --profile desktop remove dsh-super-kanban
 
 2. 完全退出 DSH；
 3. 卸载当前版本（插件页或 `dsh plugin --profile desktop remove dsh-super-kanban`）；
-4. 安装目标旧版本的**精确版本**（例如从当前 `0.6.1` 回滚到 `0.5.2`）：
-   - 插件页：市场详情页的版本列表里选择旧版本（如 `0.5.2`）安装；或添加插件时输入 `dsh-super-kanban@0.5.2`；
-   - 源码：`git checkout v0.5.2 && ./install.sh -y`。
+4. 安装目标旧版本的**精确版本**（例如从 `0.7.0` 回滚到 `0.6.1`）：
+   - 插件页：在市场详情页选择 `0.6.1`，或添加 `dsh-super-kanban@0.6.1`。
+   - 源码：`git checkout v0.6.1 && ./install.sh -y`。
 5. 启用 → 刷新窗口 → 按第 2 节验证。
 
 > 回滚后如果插件报告数据文件损坏：插件会自动把损坏文件移到 `~/.dsh/storages/super-kanban/backups/` 并重建。也可以手动恢复备份目录，或删除 `state.json` 让看板重新扫描生成。
@@ -338,8 +339,8 @@ dsh plugin --profile web add dsh-super-kanban@^0.4.0
 node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh-dev/profiles/web/package.json', 'utf8')).dependencies['dsh-super-kanban']"
 node -p "require(require('os').homedir() + '/.dsh-dev/profiles/web/node_modules/dsh-super-kanban/package.json').version"
 
-# 3) 换成精确版本重装，确认界面换成 v0.6.1
-dsh plugin --profile web add dsh-super-kanban@0.6.1
+# 3) 换成精确版本重装，确认界面换成 v0.7.0
+dsh plugin --profile web add dsh-super-kanban@0.7.0
 ```
 
 > 桌面版 profile（`desktop`）由桌面 App 持有：命令行操作前**完全退出 DSH**，否则会提示 profile 被占用或安装失败。

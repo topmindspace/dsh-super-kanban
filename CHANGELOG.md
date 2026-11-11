@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-11
+
+### 新增
+
+- 项目可跨 DSH 工作区。支持项目和任务备注、到期日、批量归属、按工作区自动归入未来任务，以及项目归档与恢复。
+- 日程按到期时间整理未完成的任务。从项目卡可进入该项目的日程，任务详情可直接编辑备注和到期日。
+- 快聊用 DSH 默认模型流式回答短问答或翻译，支持停止和复制。
+
+### 优化与修复
+
+- 全页与右栏使用 DSH 原生实时状态，提供运行提示和筛选。开启自动扫描后，会话轮次结束可提前触发增量更新。
+- 保存后丢弃迟到的旧读取。跨窗口编辑时自动合并不同字段的改动，同一字段冲突时保留草稿供用户确认。
+- 扫描可提前取消，迟到的研判结果遵守任务删除和会话排除设置。模型超时后释放扫描，失败请求计入当日研判预算。
+- 整板恢复保留仍有效的合并撤销，并校验项目引用。恢复较早的备份会保留当日已消耗的预算。
+
 ## [0.6.1] - 2026-11-10
 
 ### 新增
@@ -396,7 +411,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.7.0
 [0.6.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.6.1
 [0.6.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.6.0
 [0.5.2]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.5.2

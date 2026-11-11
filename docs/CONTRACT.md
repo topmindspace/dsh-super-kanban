@@ -35,7 +35,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   "workspaceId": "workspace-id",
   "workspaceTitle": "示例工作区",
   "workspacePath": "/path/to/workspace",
-  "sessions": [                          // 来源会话（≥1）
+  "sessions": [                          // 来源会话，手动任务可为空
     { "id": "session-...", "title": "来源会话标题", "seqEnd": 128, "evidenceCount": 6 }
   ],
   "primarySessionId": "session-...",
@@ -110,13 +110,12 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   （该条内容无法定位到具体会话事件时；**永不为 0**）；带 `time` 的条目（evidence / artifacts）此时 `time` 为 0。
   客户端只在 `seq` 有效时显示 `#N` 徽标。
 - `ai`：AI/规则每次研判都会写入（规则引擎为 `engine:"rules"`）；`confidence` 为 0–1，`analyzedAt` 为研判时间。
-  详情抽屉据此展示研判块；当来源会话在研判之后又有新活动——`sessionContext.lastActivityAt`（缺失时取
-  `task.lastActivityAt`）晚于 `ai.analyzedAt + 5 分钟`——时提示「可能已过期」，没有新活动时旧研判仍然有效。
+  详情抽屉据此展示研判块。`sessionContext.lastActivityAt`（缺失时取 `task.lastActivityAt`）晚于 `ai.analyzedAt` 时提示「可能已过期」。
 - `ai.provider`（v0.5，additive）：LLM 研判实际使用的 DSH 模型提供方 id（来自 `GET /ai/models` 的 `providers[].id`）；
   `engine:"rules"` 时恒为 `null`、`ai.model` 恒为 `""`（规则引擎不再用旧 `settings.model` 填充）。
   旧任务可能没有该字段，客户端按「无 provider」降级展示；下次研判后由 Host 补齐。
 - 旧 `settings.model` 字段已 **deprecated**：仅为旧状态 / 旧客户端兼容保留，**不权威、不用于研判，UI 不再展示**；
-  模型真值来自 `settings.aiProvider/aiModel`（空 = 跟随 DSH 默认模型）。计划在 v0.6 移除。
+  模型选择来自 `settings.aiProvider/aiModel`（空 = 跟随 DSH 默认模型）。
 - v1 → v2 迁移：`keyFacts ← evidence 前 3`、`subtasks ← milestones`、`artifacts = []`、`sessionContext ← 首个 session`、`evidence` 截断 8 条。
 
 ### 2.1 文本与裁剪上限（Host 单一来源）
@@ -162,7 +161,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
     "total": 10, "archived": 0,
     "byStatus": { "backlog": 2, "in_progress": 3, "blocked": 1, "done": 4 },
     "doneRate": 0.4,
-    "activeSessions": 4,
+    "activeSessions": 4,                 // 缓存中最近 24 小时内有活动的会话数
     "avgProgress": 55,
     "aiAnalyzed": 10,
     "issues": 3
@@ -181,6 +180,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
     // v0.5 新增，全部可选 / additive；旧客户端可忽略
     "aiDue": 5,                              // 本轮需要 AI 研判的会话数
     "aiBudget": 5,                           // 本次解析后的预算（按 aiBudgetMode）
+    "aiBudgetUsed": 4,                       // 本轮已消耗的研判预算单位，包含失败
     "aiAttempts": 3,                         // 本次实际 provider attempt 次数（含内部重试）
     "aiPending": 2,                          // 本次未拿到 AI 结论、下次继续的会话数（含失败待重试）
     "aiDeferredReason": null,                // null|"budget"|"time"|"daily"
@@ -205,6 +205,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   "usage": {
     "date": "YYYY-MM-DD",                   // 用户本地日历日（不是 UTC 日）
     "calls": 3,
+    "budgetUsed": 4,                         // 当日已消耗单位，包含失败与润色
     "tokens": 5120,
     "lastScan": { "calls": 0, "tokens": 0, "durationMs": 0, "digestBytesAvg": 0 }
   }
@@ -232,14 +233,14 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 
 `scan.message` 的口径（Host 保证）：
 
-- 所有「已用/上限」都是**扫描后**数字（`usage.calls` 已含本次成功调用）；
+- 扫描结论的「已用/上限」使用扫描后的 `usage.budgetUsed`；
 - 只要本轮仍有会话没拿到 AI 结论，就必须出现「剩余 N 个会话…继续」；`N` 与 `scan.aiPending` 一致；
 - 文案不包含 session id / 会话标题，是给人看的自然语言，不承诺机器可解析；
 - `scan.aiCalls` = 成功调用数（与 message 的「AI N 次」一致）；`scan.aiAttempts` = 实际 attempt 数（含内部重试）。
 
 `usage.date` 跟随用户本地日历日：每日 AI 调用计数与 `dailyAiCallLimit` 在**本地午夜**滚动重置；
-设置页显示的「今日」数字与预算判断都使用该字段。`usage.calls` / `usage.tokens` 只累计**成功**的 analyze
-（失败 attempt 的 tokens 不计入）；失败 analyze 仍占用 1 个预算单位（见 §5.3）。
+设置页用 `usage.budgetUsed` 显示今日研判预算。旧数据缺失该字段时从 `usage.calls` 初始化。
+`usage.calls` 和 `usage.tokens` 统计成功的研判与润色。恢复旧备份时保留当日预算和用量的较高值。
 
 ### GET `/ai/models`
 
@@ -371,6 +372,28 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 
 > 浏览器半导出时通过 `fetch("/export")` 取回同一份 JSON，另存为 `super-kanban-YYYY-MM-DD.json`（ISO 日期，如 `super-kanban-2026-11-05.json`）；HTTP 头里的文件名只用于直接下载该路由的客户端。
 
+### 项目与规划字段
+
+- `GET /state` 和导出的 `state` 含 `projects[]`，每项为 `{ id, name, notes, dueDate, workspaceId, archived, updatedAt }`。兼容 v2 旧数据，缺少项目时按空列表加载。
+- `project.create` 接受 `{ name, notes?, dueDate?, workspaceId? }`。`project.update` 接受 `{ id, patch, expectedUpdatedAt? }`，`patch` 可同时修改规划字段与 `archived`。项目名称最多 60 字。
+- 到期日是当地日历日期，格式 `YYYY-MM-DD`。备注为纯文本，项目和任务各最多 4,000 字。可用 `null` 或空字符串清除到期日。
+- `task.create` 载荷和 `task.update` 的 `patch` 接受 `projectId`、`dueDate`、`notes`。`task.batch` 支持 `projectId`，传 `null` 移出项目。用户保存后由扫描更新研判字段。
+- 工作区最多有一个生效的项目绑定。绑定决定该工作区未来新建的自动任务的初始归属。归档项目保留任务和规划信息，并停止自动归入。
+- 合并任务时保留两边的备注与最早的到期日。两个非空项目归属不同时，先显式调整归属再合并。
+
+### POST `/chat`
+
+Owner 以 `application/json` 提交 `{ mode, input }`。模式为 `ask`、`translate-zh` 或 `translate-en`，输入为 1–4,000 字。调用 DSH 默认模型。成功建立请求后响应类型为 `application/x-ndjson`，每行一个 JSON 事件。
+
+| 事件 | 字段 | 含义 |
+| --- | --- | --- |
+| `start` | `model` | 已选择模型 |
+| `delta` | `text` | 追加的回答文本 |
+| `done` | | 回答已完整结束 |
+| `error` | `message` | 流内失败，客户端可保留已到达的文本 |
+
+同一宿主同时接受一个请求，前一次模型调用仍在清理时也返回 409。缺少默认模型服务时返回 503。请求限时 45 秒，客户端断开时取消模型调用。发送内容仅为模式指令及当前输入，回答保存在打开的弹窗内，调用独立于扫描用量。
+
 ### 工作视图与维护接口
 
 `GET /state` 增加 `storage` 和 `maintenance`，分别提供写入健康状态、最近保存时间、会话读取失败数量、回收站与忽略清单。任务可携带 `attention`、`completionBasis`、`relations`、`resolvedIssues`、`pinned`。字段采用增量扩展，旧状态仍可读取。
@@ -385,10 +408,10 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 - `task.linkSession` 接受 `{ id, sessionId, primary?, continuation?, remove? }`。续做会话被设为主会话，旧会话可继续补充产物与证据。
 - `task.relate` 接受 `{ id, taskId, type, remove? }`。类型为 `parent`、`depends_on`、`related`，父子与依赖关系分别检查循环。
 - `task.issue` 接受 `{ id, text, resolve? }`。手动记录的问题和已解决的同名问题在后台刷新后保留。
-- `task.batch` 接受 `{ ids, archived?, priority? }`，单次最多 200 项。 `task.pin` 接受 `{ id, pinned }`。
+- `task.batch` 接受 `{ ids, archived?, priority?, projectId? }`，单次最多 200 项。 `task.pin` 接受 `{ id, pinned }`。
 - `task.merge` 接受 `{ id, sourceId }`。删除和合并记录可用 `task.restore` 恢复。合并后的目标被再次编辑时，接口返回冲突以保护新修改。
-- `backup.preview` 接受 `{ backup }`，返回当前和待恢复的任务数量、`expectedSavedAt` 与 `backupHash`。
-- `backup.restore` 接受 `{ backup, expectedSavedAt, backupHash }`。文件内容或看板版本变化时返回 409，恢复前先保留当前看板快照。浏览器支持最高 15 MiB 的备份文件，使用独立的 `POST /backup` 入口。
+- `backup.preview` 接受 `{ backup }`，返回当前和待恢复的任务及项目数量、`expectedSavedAt` 与 `backupHash`。
+- `backup.restore` 接受 `{ backup, expectedSavedAt, backupHash }`。文件内容或看板版本变化时返回 409，恢复前先保留当前看板快照。恢复后的任务和项目使用新的版本；备份中仍匹配目标版本的合并记录可以继续撤销。浏览器支持最高 15 MiB 的备份文件，使用独立的 `POST /backup` 入口。
 - `storage.retry` 重试保存。用户写入失败返回 HTTP 503 / `storage-unavailable`，且内存回滚。
 
 手动子任务上限为 100 项，自动提取的摘要子任务最多 12 项。产物按交付类型和时间排序，任务可保留最多 24 项。
@@ -406,7 +429,7 @@ data: {"reason":"init"|"scan"|"task"|"settings","tasksChanged":2}
 ```
 
 - 连接建立时会先发一帧 `scan`（当前扫描状态）与一帧 `changed`，`reason:"init"`。
-- 断线后的重连由使用方自行处理；浏览器半当前只轮询 `/state`。
+- 浏览器由 `EventSource` 自动重连，并保留 `/state` 轮询兜底。
 
 ## 4. 浏览器半边要求
 
@@ -510,9 +533,8 @@ if (target) ctx.get("sidebarRight").toggleFullscreen(target);
   失败 attempt 的 tokens 不计入。
 - 每日上限**不是硬成本 / 硬请求上限**：一次 analyze 最多 3 次 provider attempt（含内部重试），最坏出站请求 / 费用
   可达预算单位的 3×（默认每日最坏 450 次 attempt）；文档与界面不得宣称「日成本硬上限」。
-- **AI 阶段墙钟 600 秒（10 分钟）**：这是**停止派发**的时间点，不是整个扫描的硬时长——到点后不再派发新批次，
-  在途批次完成（受单次请求 60 秒超时约束）后停止，因此扫描总时长可能略超 10 分钟；未研判会话标记为「下次继续」，
-  `scan.message` 记为「本次 AI 阶段已达 10 分钟上限」。
+- **AI 阶段墙钟 600 秒（10 分钟）**。到点停止派发并取消在途请求，继续应用本地结果。单次模型调用也有 60 秒期限。
+  未研判会话标记为「下次继续」，扫描结论显示超时原因。
 - **优先级**：从未做过 AI 研判的欠账 > 本轮有变化 > 最近活跃时间降序 > 会话 id 兜底（确定性）。
 - **失败冷却 300 秒（5 分钟）**：会话级 analyze 失败后记录 `llmError` / `aiErrorAt`，冷却期内本轮不再尝试，
   避免每轮扫描反复烧预算；用户取消（abort）不写错误、不冷却。

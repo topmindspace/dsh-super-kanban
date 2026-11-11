@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { normalizeRelations } from "./task-relations.mjs";
+import { normalizeProjects, normalizeTaskPlanning, NOTES_LIMIT, PROJECT_NAME_LIMIT } from "./projects.mjs";
 
 export const STORE_VERSION = 2;
 
@@ -59,6 +60,8 @@ export const TEXT_LIMITS = Object.freeze({
   title: TITLE_TEXT_LIMIT,
   goal: GOAL_TEXT_LIMIT,
   acceptanceCriteria: ACCEPTANCE_TEXT_LIMIT,
+  notes: NOTES_LIMIT,
+  projectName: PROJECT_NAME_LIMIT,
   tags: TAG_LIMIT,
   tagText: TAG_TEXT_LIMIT,
   subtasks: SUBTASK_LIMIT,
@@ -156,6 +159,7 @@ export function emptyUsage() {
   return {
     date: todayKey(),
     calls: 0,
+    budgetUsed: 0,
     tokens: 0,
     lastScan: { calls: 0, tokens: 0, durationMs: 0, digestBytesAvg: 0 },
   };
@@ -169,6 +173,7 @@ export function rolloverUsage(usage, now = Date.now()) {
     return {
       date,
       calls: 0,
+      budgetUsed: 0,
       tokens: 0,
       lastScan: { calls: 0, tokens: 0, durationMs: 0, digestBytesAvg: 0 },
     };
@@ -176,6 +181,7 @@ export function rolloverUsage(usage, now = Date.now()) {
   return {
     date,
     calls: Math.max(0, Number(base.calls) || 0),
+    budgetUsed: Math.max(0, Number(base.calls) || 0, Number(base.budgetUsed) || 0),
     tokens: Math.max(0, Number(base.tokens) || 0),
     lastScan: {
       calls: Math.max(0, Number(base.lastScan?.calls) || 0),
@@ -200,6 +206,7 @@ export function emptyScanState() {
     // v3 additive observability fields (old clients ignore them).
     aiDue: 0,
     aiBudget: 0,
+    aiBudgetUsed: 0,
     aiAttempts: 0,
     aiPending: 0,
     aiDeferredReason: null, // null | "budget" | "time" | "daily"
@@ -213,6 +220,7 @@ export function createEmptyState() {
     version: STORE_VERSION,
     savedAt: new Date().toISOString(),
     tasks: [],
+    projects: [],
     settings: { ...DEFAULT_SETTINGS },
     usage: emptyUsage(),
     ignoredSessions: [],
@@ -305,8 +313,9 @@ export function normalizeMilestoneRecord(item) {
 }
 
 /** Keep task payloads bounded before persisting/serving them (v2 caps). */
-export function truncateTask(task) {
+export function truncateTask(task, projectIds) {
   if (!task) return task;
+  normalizeTaskPlanning(task, projectIds);
   if (Array.isArray(task.evidence)) {
     task.evidence = task.evidence
       .filter((item) => item && typeof item === "object")
@@ -345,9 +354,7 @@ export function truncateTask(task) {
   } else {
     task.artifacts = [];
   }
-  if (Array.isArray(task.history) && task.history.length > HISTORY_LIMIT) {
-    task.history = task.history.slice(-HISTORY_LIMIT);
-  }
+  task.history = Array.isArray(task.history) ? task.history.filter(isRecord).slice(-HISTORY_LIMIT) : [];
   if (!Array.isArray(task.lockedFields)) task.lockedFields = [];
   if (Array.isArray(task.tags)) {
     task.tags = task.tags
@@ -377,12 +384,14 @@ export function truncateTask(task) {
   } else {
     task.milestones = [];
   }
-  if (!Array.isArray(task.sessions)) task.sessions = [];
+  task.sessions = Array.isArray(task.sessions)
+    ? task.sessions.filter((session) => isRecord(session) && typeof session.id === "string" && session.id)
+    : [];
   task.relations = normalizeRelations(task.relations, task.id);
   task.resolvedIssues = Array.isArray(task.resolvedIssues) ? task.resolvedIssues.filter((item) => typeof item === "string").slice(-50) : [];
   if (typeof task.title === "string") task.title = clipText(task.title, TITLE_TEXT_LIMIT);
   task.acceptanceCriteria = clipText(typeof task.acceptanceCriteria === "string" ? task.acceptanceCriteria.trim() : "", ACCEPTANCE_TEXT_LIMIT);
-  if (task.goal && typeof task.goal === "object") {
+  if (isRecord(task.goal)) {
     task.goal.text = clipText(task.goal.text, GOAL_TEXT_LIMIT);
     if (!["active", "done", "none"].includes(task.goal.status)) task.goal.status = task.goal.text ? "active" : "none";
     if (!["session", "task"].includes(task.goal.source)) task.goal.source = "task";
@@ -390,7 +399,7 @@ export function truncateTask(task) {
     const text = typeof task.goal === "string" ? task.goal : "";
     task.goal = { text: clipText(text, GOAL_TEXT_LIMIT), status: text ? "active" : "none", source: "task" };
   }
-  if (!task.sessionContext || typeof task.sessionContext !== "object") task.sessionContext = null;
+  if (!isRecord(task.sessionContext)) task.sessionContext = null;
   return task;
 }
 
@@ -672,10 +681,11 @@ export function createStore({ dshHome, logger } = {}) {
     return { state, cache, diagnostics };
   }
 
-  function copyFields(target, raw) {
+  function copyFields(target, raw, projects = normalizeProjects(raw.projects)) {
     // Hand-edited/partially corrupted JSON must never crash the board later:
     // keep only records with the shape the rest of the service assumes.
     target.tasks = taskList(raw.tasks);
+    target.projects = projects;
     if (isRecord(raw.settings)) {
       target.settings = normalizeAiRoutePair({
         ...DEFAULT_SETTINGS,
@@ -686,13 +696,25 @@ export function createStore({ dshHome, logger } = {}) {
     if (Array.isArray(raw.ignoredSessions)) target.ignoredSessions = stringList(raw.ignoredSessions);
     if (Array.isArray(raw.suppressedSessions)) target.suppressedSessions = stringList(raw.suppressedSessions);
     if (Array.isArray(raw.deletedLog)) target.deletedLog = raw.deletedLog.filter(isRecord);
-    if (Array.isArray(raw.recovery)) target.recovery = raw.recovery.filter((entry) => isRecord(entry) && typeof entry.task?.id === "string").slice(-50);
     if (Array.isArray(raw.workspaces)) target.workspaces = raw.workspaces.filter(isRecord);
     if (Array.isArray(raw.activity)) target.activity = raw.activity.filter(isRecord);
     if (isRecord(raw.scan)) target.scan = { ...emptyScanState(), ...raw.scan };
     if (typeof raw.savedAt === "string" && Number.isFinite(Date.parse(raw.savedAt))) target.savedAt = raw.savedAt;
     target.usage = rolloverUsage(raw.usage);
-    for (const task of target.tasks) truncateTask(task);
+    const projectIds = new Set(target.projects.map((project) => project.id));
+    for (const task of target.tasks) truncateTask(task, projectIds);
+    if (Array.isArray(raw.recovery)) {
+      target.recovery = raw.recovery.filter((entry) => isRecord(entry) && recoverableTask(entry.task) &&
+        (entry.kind !== "merge" || (recoverableTask(entry.beforeTarget) && typeof entry.targetUpdatedAt === "string"))).slice(-50);
+      for (const entry of target.recovery) {
+        truncateTask(entry.task, projectIds);
+        if (entry.kind === "merge") truncateTask(entry.beforeTarget, projectIds);
+      }
+    }
+  }
+
+  function recoverableTask(task) {
+    return isRecord(task) && typeof task.id === "string" && task.id && typeof task.title === "string" && task.title.trim();
   }
 
   function saveState(state) {
@@ -718,16 +740,24 @@ export function createStore({ dshHome, logger } = {}) {
     if (!isRecord(raw) || raw.version !== STORE_VERSION || !Array.isArray(raw.tasks) || !isRecord(raw.settings)) {
       throw new TypeError("请选择当前看板导出的备份文件");
     }
+    const projects = normalizeProjects(raw.projects);
+    if (Object.hasOwn(raw, "projects") && (!Array.isArray(raw.projects) || projects.length !== raw.projects.length ||
+        projects.some((project, index) => project.workspaceId !== (raw.projects[index].workspaceId || null)))) {
+      throw new TypeError("备份中有无效项目、重复项目或重复的工作区绑定");
+    }
+    const projectIds = new Set(projects.map((project) => project.id));
     const ids = new Set();
     for (const task of raw.tasks) {
-      if (!isRecord(task) || typeof task.id !== "string" || !task.id || ids.has(task.id) ||
-          typeof task.title !== "string" || !task.title.trim()) {
+      if (!recoverableTask(task) || ids.has(task.id)) {
         throw new TypeError("备份中有无效或重复的任务");
+      }
+      if (task.projectId != null && task.projectId !== "" && !projectIds.has(task.projectId)) {
+        throw new TypeError("备份中的任务关联了缺失的项目");
       }
       ids.add(task.id);
     }
     const restored = createEmptyState();
-    copyFields(restored, raw);
+    copyFields(restored, raw, projects);
     restored.scan = emptyScanState();
     return restored;
   }

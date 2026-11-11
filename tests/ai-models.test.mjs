@@ -251,23 +251,23 @@ test("DSH model events invalidate the catalog cache and the default selection is
   assert.equal(host.listModelCalls.length, 6, "llm/adapters-updated must invalidate the cache");
 });
 
-test("stop() disposes the catalog event subscriptions", async (t) => {
+test("stop() disposes the catalog and session event subscriptions", async (t) => {
   const host = makeHost();
   const { service } = await setup(t, { host });
   await getCatalog(service);
   assert.deepEqual(
     host.onHandlers.map((entry) => entry.event),
-    ["llm/adapters-updated", "llm/models-updated"],
+    ["llm/adapters-updated", "llm/models-updated", "session/event"],
   );
   await stopService(service);
-  assert.equal(host.disposed(), 2);
+  assert.equal(host.disposed(), 3);
 });
 
 /* ------------------------------------------------------------------ */
 /* Failure isolation + timeouts                                        */
 /* ------------------------------------------------------------------ */
 
-test("one provider failure is isolated into failures[]", async (t) => {
+test("one provider failure is isolated without exposing its raw diagnostic", async (t) => {
   const host = makeHost({ models: { "minimax-cn": new Error("credential unavailable"), "deepseek-account": [{ id: "deepseek-flash" }] } });
   const { service } = await setup(t, { host });
   const { status, json } = await getCatalog(service);
@@ -278,7 +278,8 @@ test("one provider failure is isolated into failures[]", async (t) => {
     { id: "minimax-cn", name: "MiniMax CN", modelCount: 0 },
   ]);
   assert.deepEqual(json.models, [{ provider: "deepseek-account", id: "deepseek-flash", name: "deepseek-flash" }]);
-  assert.deepEqual(json.failures, [{ provider: "minimax-cn", name: "MiniMax CN", message: "credential unavailable" }]);
+  assert.deepEqual(json.failures, [{ provider: "minimax-cn", name: "MiniMax CN", message: "读取模型目录失败" }]);
+  assert.doesNotMatch(JSON.stringify(json), /credential unavailable/);
 });
 
 test("a hanging provider is cut off by the catalog timeout without hiding the others", async (t) => {
@@ -297,7 +298,7 @@ test("a hanging provider is cut off by the catalog timeout without hiding the ot
     { id: "fast", name: "fast", modelCount: 1 },
   ]);
   assert.deepEqual(json.models, [{ provider: "fast", id: "fast-model", name: "fast-model" }]);
-  assert.deepEqual(json.failures, [{ provider: "slow", name: "slow", message: "catalog-timeout" }]);
+  assert.deepEqual(json.failures, [{ provider: "slow", name: "slow", message: "读取模型目录超时" }]);
 });
 
 /* ------------------------------------------------------------------ */
