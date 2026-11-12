@@ -1207,20 +1207,22 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     if (state.ignoredSessions.includes(meta.id)) return false;
     if (state.suppressedSessions.includes(meta.id)) return false;
     if (meta.workspaceId && (state.settings.excludeWorkspaces || []).includes(meta.workspaceId)) return false;
-    const tooOld = meta.lastActivityAt && meta.lastActivityAt < cutoff;
-    return !tooOld || Boolean(findTaskBySession(meta.id));
+    const activityAt = Number(meta.lastActivityAt) || 0;
+    return !activityAt || activityAt >= cutoff || source.sessionLiveness(meta);
+  }
+
+  function activeCutoff() {
+    return Date.now() - state.settings.initialDays * DAY;
   }
 
   function promptCandidateTasks(meta) {
     const bound = findTaskBySession(meta.id);
-    const result = [];
-    if (bound) result.push(bound);
-    for (const task of state.tasks) {
-      if (result.length >= 6) break;
-      if (task.origin === "manual" || task.archived) continue;
-      if (result.includes(task)) continue;
-      if (meta.workspaceId && task.workspaceId === meta.workspaceId) result.push(task);
-    }
+    const cutoff = activeCutoff();
+    const recent = meta.workspaceId ? state.tasks
+      .filter((task) => task !== bound && !task.archived && task.origin !== "manual" &&
+        task.workspaceId === meta.workspaceId && task.lastActivityAt >= cutoff)
+      .sort((left, right) => right.lastActivityAt - left.lastActivityAt) : [];
+    const result = bound ? [bound, ...recent.slice(0, 2)] : recent.slice(0, 3);
     return result.map((task) => ({
       id: task.id,
       title: task.title,
@@ -1446,7 +1448,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     state.scan.message = `发现 ${discoverySessions.length} 个会话，开始分析…`;
     broadcastScan(true);
 
-    const cutoff = Date.now() - (state.settings.initialDays || 30) * DAY;
+    const cutoff = mode === "full" ? 0 : activeCutoff();
     const childSummaries = new Map();
     let lowValueSkipped = 0;
     let aiBudgetExhausted = false;
@@ -1467,6 +1469,18 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         const changed = !cached || cached.sigKey !== discovered.sigKey;
         let meta = hydrationSafe(discovered);
         let parsed = null;
+        const activityAt = Math.max(Number(discovered.lastActivityAt) || 0, Number(meta?.lastActivityAt) || 0);
+        // A changed log may contain a new turn even while the projection cache
+        // is stale. Unchanged historical logs only need their compact metadata.
+        const latest = changed ? Math.max(activityAt, discovered.sig.mtimeMs) : activityAt || discovered.sig.mtimeMs;
+        if (latest < cutoff && !source.sessionLiveness(meta || discovered)) {
+          state.scan.historicalSkipped += 1;
+          if (meta) {
+            if (!cached) cache.sessions[discovered.id] = { sigKey: discovered.sigKey, meta, unparsed: true };
+            sessionsById.set(discovered.id, meta);
+          }
+          continue;
+        }
         const preEligible = meta ? isEligibleForAutoTask(meta, cutoff) : false;
         // "aiMissing" re-parses a session that never got an AI verdict. Only
         // worth the parse when an AI service exists; otherwise every incremental
@@ -1475,7 +1489,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         const forceMainParse =
           preEligible && (mode === "full" || changed || !findTaskBySession(discovered.id) || aiMissing ||
             typeof meta.hasOpenTurn !== "boolean" || source.sessionLiveness(meta) !== meta.isLive);
-        if (changed || forceMainParse) {
+        if (changed || cached?.unparsed || forceMainParse) {
           try {
             const result = parseDiscovered(discovered);
             parsed = result.parsed;
@@ -1497,7 +1511,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
             continue;
           }
         } else if (meta) {
-          cache.sessions[discovered.id] = { sigKey: discovered.sigKey, meta };
+          cache.sessions[discovered.id] = { ...cached, sigKey: discovered.sigKey, meta };
         }
         if (!meta) continue;
         const cachedMeta = cached?.meta || null;
@@ -1762,12 +1776,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         aiPending: state.scan.aiPending,
         aiFailureCount,
       });
+      if (state.scan.historicalSkipped) state.scan.message += ` · 跳过 ${state.scan.historicalSkipped} 个历史会话`;
     }
     broadcastScan(true);
     // Cache entries for sessions that were never parsed keep their old meta.
     for (const discovered of discoverySessions) {
       if (!cache.sessions[discovered.id]) {
-        cache.sessions[discovered.id] = { sigKey: discovered.sigKey, meta: hydrateMeta(discovered) };
+        cache.sessions[discovered.id] = { sigKey: discovered.sigKey, meta: hydrateMeta(discovered), unparsed: true };
       }
     }
     pruneCache(discoverySessions);

@@ -4,11 +4,11 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.8.x | ✅ (current release line) |
-| 0.7.x | 🟡 (previous line, best-effort fixes) |
-| < 0.7 | ❌ (end of support) |
+| 0.9.x | ✅ (current release line) |
+| 0.8.x | 🟡 (previous line, best-effort fixes) |
+| < 0.8 | ❌ (end of support) |
 
-Security fixes land on `0.8.x`. The `0.7.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
+Security fixes land on `0.9.x`. The `0.8.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
 
 ## Reporting a vulnerability
 

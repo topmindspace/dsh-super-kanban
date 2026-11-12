@@ -17,7 +17,7 @@
 ### 安装
 
 - **插件市场** · 在 DSH 的 **插件 → 发现** 添加索引源 `https://topmindspace.github.io/dsh-super-kanban/index.json`，打开 **Super Kanban**，选择版本并安装。找不到「发现」时，按[安装指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐)开启实验性插件市场。
-- **npm** · 在 **插件 → 添加插件** 输入 `dsh-super-kanban@0.8.0`。这里以 `0.8.0` 为例，可换成目标版本。
+- **npm** · 在 **插件 → 添加插件** 输入 `dsh-super-kanban@0.9.0`。这里以 `0.9.0` 为例，可换成目标版本。
 - **Git 或本地目录** · 在插件页添加仓库地址或选择本地目录。需要固定版本时，先检出对应标签，再按[源码安装步骤](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本)安装。
 
 安装后启用插件并刷新 DSH。[验证版本、升级、回滚与卸载](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)
@@ -25,9 +25,9 @@
 ### 第一次使用
 
 1. 从左侧栏打开 **任务看板**，或从会话右上角打开右侧栏看板。
-2. 在设置中确认扫描范围，然后点击 **扫描**。首次默认扫描最近 30 天，结果可在扫描按钮提示或「维护」中查看。
+2. 在设置中确认活跃周期，然后点击 **扫描**。默认扫描最近 30 天有活动的会话，结果可在扫描按钮提示或「维护」中查看。
 3. 在 **待处理** 打开需要介入的会话，或进入任务详情查看验收条件和主交付物。
-4. 选择 **继续此任务** 或 **验收产出**。检查生成的草稿，放入关联会话或新会话后由你发送。
+4. 核对交付物后点 **确认验收**。还需要补做时，点 **继续此任务**，检查草稿并放入关联会话或新会话，由你发送。
 
 ## 功能特色
 
@@ -35,12 +35,12 @@
 
 - **AI 自动整理任务** · 增量扫描提取任务目标、进展、阻塞和交付物，用来创建或更新任务卡。同一任务可关联多条会话。开启自动扫描后，会话轮次结束可提前触发更新。
 - **实时状态与待处理** · 筛选正在运行的任务，集中查看待审批、待回答、待审阅、阻塞和待验收事项，直接跳转到对应会话。
-- **全页与右侧栏** · 在全页看板查看全局进度，也可在聊天旁打开紧凑看板。按工作区筛选，通过列表、层级和产出视图查看同一批任务。
+- **全局、右侧与悬浮** · 从会话页头或看板工具栏切换形态。可选常驻悬浮入口显示待验收、待处理和运行中的摘要，可直接查看交付物、打开准确的会话、确认验收或继续工作。
 - **长列与快捷操作** · 各列独立滚动，每页最多显示 30 张卡。「已完成」可折叠，折叠后仍可拖入任务。右键或点「⋯」即可移动、置顶和归档任务。
 
 ### 规划与交付
 
-- **跨工作区项目与日程** · 添加项目和任务备注、设置到期日，查看完成率、受阻和逾期事项。支持批量分配任务，也可将工作区绑定到项目，让后续自动生成的任务直接归入。项目归档后仍可查看和恢复。
+- **工作区项目、时间线与日程** · 已纳入看板的工作区自动出现在项目页，自建项目可组织多个工作区的任务。用时间线回看状态、会话进展和交付，用日程跟进到期事项。近期和历史可以随时切换。
 - **手动整理与恢复** · 新建、拖拽、置顶和批量归档任务，锁定字段以保留人工编辑。支持任务依赖、显式合并、回收站和备份恢复。
 - **交付证据与人工验收** · 在详情查看目标、验收条件、主交付物和来源会话。可预览产物、复制路径或在文件管理器中定位，验收后保留确认记录。
 - **带上下文续做** · 将验收条件、关键决策、未完成事项和产物生成草稿，可放入关联会话或同工作区的新会话。
@@ -84,7 +84,7 @@
 
 ## 文档与贡献
 
-- **使用** · [安装、升级与卸载](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md) · [常见问题与排障](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
+- **使用** · [安装、升级与卸载](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md) · [日常使用](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/WORKFLOWS.md) · [常见问题与排障](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
 - **版本** · [更新日志](https://github.com/topmindspace/dsh-super-kanban/blob/main/CHANGELOG.md) · [产品路线图](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ROADMAP.md)
 - **开发** · [贡献指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) · [开发指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md) · [架构](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md) · [接口契约](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md)
 

@@ -176,6 +176,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
     "state": "idle|running|done|error",
     "startedAt": "ISO|null", "finishedAt": "ISO|null",
     "processed": 10, "total": 10,
+    "historicalSkipped": 0,                  // 增量扫描未读取的历史会话数
     "newTasks": 0, "updatedTasks": 2, "aiCalls": 3, "tokens": 5120,
     // v0.5 新增，全部可选 / additive；旧客户端可忽略
     "aiDue": 5,                              // 本轮需要 AI 研判的会话数
@@ -195,7 +196,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
     "aiProvider": "",                       // 与 aiModel 成对，空串表示跟随 DSH 默认
     "aiModel": "",
     "aiBudgetMode": "auto",                 // v0.5：auto（默认）=min(待研判, 每日剩余)；fixed=用 maxAiCallsPerScan
-    "initialDays": 30,
+    "initialDays": 30,                       // 近期视图与增量扫描的滚动活跃周期，1–365 天
     "maxTasksPerSession": 3,                // 单会话单次扫描最多产出的自动卡数
     "excludeWorkspaces": [],
     "lastScanAt": "ISO|null",
@@ -293,7 +294,7 @@ DSH 模型变更事件可使缓存失效。`?refresh=1` 可主动刷新，距上
 | `session.ignore` / `session.unignore` | `{sessionId}` | 跳过或恢复自动扫描，在会话关系与维护视图操作 |
 | `settings.update` | `{patch: {...settings}}` | 更新扫描、预算等设置。旧模型字段和预算兼容见 §6 |
 | `settings.model` | `{provider, model}` | 原子保存模型对，均为空串时跟随 DSH 默认。返回 `{settings, aiRoute}`。缺字段、格式错误或半对返回 400 |
-| `scan.start` | `{mode: "incremental"\|"full"}` | 触发扫描（扫描运行中或显式 AI 任务进行中返回 `409 busy`，见下） |
+| `scan.start` | `{mode: "incremental"\|"full"}` | 增量按活跃周期扫描；全量显式扫描历史，仍遵守工作区范围、忽略清单和预算。繁忙时返回 `409 busy` |
 | `scan.cancel` | `{}` | 取消扫描 |
 
 `op` 必须是命令表自身的属性：`"constructor"`、`"__proto__"` 等非自有属性名一律返回 `400 unknown-op`。
@@ -369,6 +370,7 @@ DSH 模型变更事件可使缓存失效。`?refresh=1` 可主动刷新，距上
 ### 项目与规划字段
 
 - `GET /state` 和导出的 `state` 含 `projects[]`，每项为 `{ id, name, notes, dueDate, workspaceId, archived, updatedAt }`。兼容 v2 旧数据，缺少项目时按空列表加载。
+- 工作区项目由客户端按 `workspaces[]` 和任务的 `workspaceId` 派生。自建项目沿用 `projectId`，同一任务可同时出现在所属工作区和自建项目视图。项目时间线使用任务历史、证据和交付物已有时间戳，并按会话、类型和事件序号合并重复来源。
 - `project.create` 接受 `{ name, notes?, dueDate?, workspaceId? }`。`project.update` 接受 `{ id, patch, expectedUpdatedAt? }`，`patch` 可同时修改规划字段与 `archived`。项目名称最多 60 字。
 - 到期日是当地日历日期，格式 `YYYY-MM-DD`。备注为纯文本，项目和任务各最多 4,000 字。可用 `null` 或空字符串清除到期日。
 - `task.create` 载荷和 `task.update` 的 `patch` 接受 `projectId`、`dueDate`、`notes`。`task.batch` 支持 `projectId`，传 `null` 移出项目。用户保存后由扫描更新研判字段。
@@ -437,6 +439,7 @@ data: {"reason":"init"|"scan"|"task"|"settings","tasksChanged":2}
 
 - 注册 `main` 面板（key=`super-kanban`）与 `sidebar.panellist` 入口（id=`super-kanban`，label「任务看板」）。
 - 注册右侧栏 tab 类型与 `sidebar.right.pane.tab` slot；注册会话头部快捷入口（`conversation.session.header.utilities`）。
+- 注册 `shell.overlay` 窗口级悬浮入口，显示配置与默认形态保存在本地浏览器偏好。
 - 打开会话使用 `ctx.get("uiWorkspace")?.openSession(sessionId)`。
 - 只允许同源 fetch；不得访问外部网络、不得加载外部字体 / 图片。
 - 样式只使用 DSH 设计 token（`--dsw-alias-*` 等）与插件自有 CSS 变量，深浅色自适应。

@@ -8,6 +8,10 @@
 | --- | --- |
 | ![项目管理](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/projects.png) | ![项目日程](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/project-schedule.png) |
 
+| 项目时间线 / Project timeline | 悬浮任务摘要 / Floating summary |
+| --- | --- |
+| ![项目时间线中的人工验收与来源会话](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/project-timeline.png) | ![悬浮摘要中的交付物、验收条件和操作](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/floating-summary.png) |
+
 | 看板（深色） / Board (dark) | 任务详情 / Task details |
 | --- | --- |
 | ![看板深色](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-dark.png) | ![任务详情](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-light.png) |

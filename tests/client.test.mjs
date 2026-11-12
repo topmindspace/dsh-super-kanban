@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../client.js", import.meta.url), "utf8");
 
-function loadClient(services, { snapshot, view = "attention", clipboard, fetch, onState, inspect = false } = {}) {
+function loadClient(services, { snapshot, view = "attention", filters, prefs, clipboard, fetch, onState, browser, inspect = false } = {}) {
   const registrations = new Map();
   let nextState = snapshot ? { initial: null, value: snapshot } : null;
   let nextId = 0;
@@ -17,7 +17,7 @@ function loadClient(services, { snapshot, view = "attention", clipboard, fetch, 
       if (nextState && initial === nextState.initial) {
         const { value } = nextState;
         nextState = null;
-        return [value, () => {}];
+        return [value, (next) => onState?.(next)];
       }
       return [typeof initial === "function" ? initial() : initial, (value) => onState?.(value)];
     },
@@ -31,14 +31,20 @@ function loadClient(services, { snapshot, view = "attention", clipboard, fetch, 
   let plugin;
   const context = {
     window: { __ModuleLoader__: { load({ factory }) { plugin = factory(() => React); } } },
-    localStorage: { getItem: (key) => snapshot && key === "dsh-super-kanban:view:page" ? view : null },
+    localStorage: { getItem: (key) => ({
+      "dsh-super-kanban:view:page": snapshot ? view : null,
+      "dsh-super-kanban:filters": filters ? JSON.stringify(filters) : null,
+      "dsh-super-kanban:prefs": prefs ? JSON.stringify(prefs) : null,
+    })[key] },
     navigator: { clipboard },
     document: { baseURI: "http://plugin.local/" },
     fetch, URL,
     AbortSignal,
     setTimeout,
+    ...browser,
   };
-  const script = inspect ? source.replace("return { apply, inject:", "return { apply, useBoardData, command, draftChanges, chatContext, inject:") : source;
+  const script = inspect ? source.replace("return { apply, inject:",
+    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, subscribeBoardRefresh, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
     get: (name) => services[name],
@@ -211,7 +217,8 @@ test("the main toolbar keeps views and filters in one row and scan details in th
   const view = board.type(board.props);
   const toolbar = [...elements(view)].find((node) => node.props?.className === "sk-slimbar");
   assert.ok([...elements(toolbar)].some((node) => node.props?.["aria-label"] === "任务视图"));
-  assert.ok([...elements(toolbar)].some((node) => node.props?.["aria-label"] === "按工作区筛选"));
+  assert.ok([...elements(toolbar)].some((node) => node.props?.["aria-label"] === "按项目筛选"));
+  assert.ok([...elements(toolbar)].some((node) => node.props?.["aria-label"] === "任务时间范围"));
   const scan = [...elements(view)].find((node) => node.props?.["aria-label"] === "扫描会话");
   assert.match(scan.props.title, /低价值跳过 1/);
   assert.doesNotMatch(renderedText(view), /低价值跳过 1/);
@@ -264,11 +271,240 @@ test("the conversation shortcut passes the scoped session through sidebar naviga
     openTab(kind, options) { opens.push([kind, options.params.sessionId]); },
   } });
   const header = registrations.get("conversation.session.header.utilities");
-  header.render({ sessionId: "selected-session" }).props.onClick();
+  const headerView = header.render({ sessionId: "selected-session" });
+  [...elements(headerView)].find((node) => node.props?.["aria-label"] === "打开右侧看板").props.onClick();
   assert.deepEqual(opens, [["super-kanban", "selected-session"]]);
   const sidebar = registrations.get("sidebar.right.pane.tab");
   const view = sidebar.render({ useTabInfo: () => ({ tab: { navigation: { params: { sessionId: "selected-session" } } } }) });
   assert.equal(view.children[0].props.sessionId, "selected-session");
+});
+
+test("the conversation header can open all surfaces and remember its preferred target", () => {
+  const seen = [];
+  const { registrations } = loadClient({ layout: { selectPanel: (id) => seen.push(id) } },
+    { prefs: { sideEntry: false } });
+  const header = registrations.get("conversation.session.header.utilities");
+  const first = header.render({ sessionId: "session" });
+  const button = [...elements(first)].find((node) => node.props?.["aria-label"] === "打开全局看板");
+  button.props.onClick();
+  const picker = [...elements(first)].find((node) => node.props?.label === "切换看板形态");
+  assert.deepEqual(Array.from(elements(picker.type(picker.props))).filter((node) => node.type === "option").map((node) => node.props.value),
+    ["page", "side", "float"]);
+  picker.props.onChange("float");
+  assert.deepEqual(seen, ["super-kanban"]);
+  const next = header.render({});
+  assert.ok([...elements(next)].some((node) => node.props?.["aria-label"] === "打开悬浮小面板"));
+  const overlay = registrations.get("shell.overlay").render({}).children[0];
+  assert.equal(overlay.type(overlay.props).props.open, true);
+});
+
+test("floating summaries share the acceptance rule and exclude historical and archived cards", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const now = Date.now();
+  const ready = (id, fields = {}) => ({ id, status: "in_progress", attention: "acceptance", acceptanceCriteria: "检查产物",
+    primarySessionId: id, origin: "auto", lastActivityAt: now - 1000, ...fields });
+  const items = [ready("accept"), ready("active"), ready("approval"), ready("archived", { archived: true }),
+    ready("past", { lastActivityAt: now - 40 * 86_400_000, createdAt: new Date(now).toISOString() }),
+    ready("accepted", { status: "done", completionBasis: "user" })];
+  const summary = plugin.floatingSummary(items, new Map([
+    ["active", { running: true }], ["approval", { pendingInteraction: { kind: "approval" } }],
+  ]), 30, now);
+  assert.deepEqual(Array.from(summary.acceptance, (row) => row.task.id), ["accept"]);
+  assert.deepEqual(Array.from(summary.attention, (row) => row.task.id), ["accept", "approval"]);
+  assert.deepEqual(Array.from(summary.running, (row) => row.task.id), ["active"]);
+});
+
+test("floating acceptance orders by delivery time even after a recent manual edit", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const now = Date.now();
+  const task = (id, time, history = []) => ({ id, status: "in_progress", attention: "acceptance", lastActivityAt: time, history,
+    artifacts: [{ kind: "deliverable", path: "result.md", time }] });
+  const recent = task("recent-delivery", now - 2000);
+  const edited = task("older-delivery", now - 3000, [{ by: "user", at: new Date(now - 1000).toISOString() }]);
+  const result = plugin.floatingSummary([edited, recent], new Map(), 30, now);
+  assert.deepEqual(Array.from(result.acceptance, ({ task }) => task.id), ["recent-delivery", "older-delivery"]);
+});
+
+test("floating review and continuation use the delivery source while title modifiers use the primary session", async () => {
+  const opened = [];
+  const resources = [];
+  const changes = [];
+  const task = { id: "ready", title: "待验收任务", status: "in_progress", attention: "acceptance",
+    primarySessionId: "primary", workspaceTitle: "工作区一", acceptanceCriteria: "检查报告",
+    sessions: [{ id: "primary" }, { id: "delivery" }],
+    artifacts: [{ kind: "deliverable", path: "report.md", sessionId: "delivery" }] };
+  const { host, registrations } = loadClient({
+    uiWorkspace: { openSession: (id) => opened.push(id) },
+    sidebarRight: { screen: () => ({ sessionId: "delivery" }), openResource: (address) => resources.push(address) },
+  }, {
+    snapshot: { tasks: [task] },
+    onState: (value) => changes.push(value),
+  });
+  host.openSurface("float");
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const view = panel.type(panel.props);
+  assert.match(renderedText(view), /工作区一.*report\.md.*检查报告/);
+  const buttons = Array.from(elements(view)).filter((node) => node.type === "button");
+  buttons.find((button) => renderedText(button) === "继续").props.onClick({ currentTarget: {} });
+  const choice = changes.find((value) => value?.id === "ready");
+  assert.equal(choice.sessionId, "delivery");
+  buttons.find((button) => renderedText(button) === task.title).props.onClick({ metaKey: true });
+  buttons.find((button) => renderedText(button) === task.title).props.onClick({ altKey: true });
+  buttons.find((button) => renderedText(button) === "打开来源").props.onClick();
+  assert.deepEqual(opened, ["primary", "primary", "delivery"]);
+  await buttons.find((button) => renderedText(button) === "查看交付物").props.onClick();
+  assert.deepEqual(resources, ["dsh-resource://file/session/delivery/report.md"]);
+});
+
+test("floating running preview shows three cards and offers to show the rest", () => {
+  const tasks = Array.from({ length: 4 }, (_, id) => ({ id: String(id), title: `运行任务 ${id}`, primarySessionId: String(id), status: "in_progress" }));
+  const statuses = new Map(tasks.map((task) => [task.id, { running: true }]));
+  const changes = [];
+  const { host, registrations } = loadClient({}, {
+    snapshot: { tasks }, prefs: { floatSummaries: ["running"] }, onState: (value) => changes.push(value),
+  });
+  host.openSurface("float");
+  const entry = registrations.get("shell.overlay").render({ useSessionStatus: (select) => select(statuses) }).children[0];
+  const withStatus = entry.type(entry.props);
+  const panel = withStatus.type(withStatus.props);
+  const view = panel.type(panel.props);
+  assert.equal(Array.from(elements(view)).filter((node) => node.type === "article").length, 3);
+  Array.from(elements(view)).find((node) => node.type === "button" && renderedText(node) === "查看全部 4 项").props.onClick();
+  assert.deepEqual(changes, [4]);
+});
+
+test("floating pending requests and running actions open their exact sessions", () => {
+  const task = { id: "task", title: "多会话任务", status: "in_progress", primarySessionId: "idle", sessions: [
+    { id: "idle", title: "主会话" }, { id: "approval", title: "部署会话" },
+    { id: "question", title: "设计会话" }, { id: "worker", title: "执行会话" },
+  ] };
+  const statuses = new Map([
+    ["approval", { pendingInteraction: { kind: "approval" } }],
+    ["question", { pendingInteraction: { kind: "question" } }],
+    ["worker", { running: true }],
+  ]);
+  const opens = [];
+  const buttonsFor = (category) => {
+    const { host, registrations } = loadClient({ uiWorkspace: { openSession: (id) => opens.push(id) } }, {
+      snapshot: { tasks: [task] }, prefs: { floatSummaries: [category] },
+    });
+    host.openSurface("float");
+    const entry = registrations.get("shell.overlay").render({ useSessionStatus: (select) => select(statuses) }).children[0];
+    const withStatus = entry.type(entry.props);
+    const panel = withStatus.type(withStatus.props);
+    return [...elements(panel.type(panel.props))].filter((node) => node.type === "button");
+  };
+  const requests = buttonsFor("attention").filter((node) => node.props["aria-label"]?.startsWith("打开会话："));
+  assert.equal(requests.length, 2);
+  for (const button of requests) button.props.onClick();
+  buttonsFor("running").find((button) => renderedText(button) === "打开运行会话").props.onClick();
+  assert.deepEqual(opens, ["approval", "question", "worker"]);
+});
+
+test("the recent schedule keeps unfinished dated tasks even after the activity cutoff", () => {
+  const lastActivityAt = Date.now() - 45 * 86_400_000;
+  const { registrations } = loadClient({}, { view: "schedule", snapshot: { tasks: [
+    { id: "planned", title: "跨月交付", status: "in_progress", origin: "auto", lastActivityAt, dueDate: "2099-01-01" },
+    { id: "inactive", title: "旧的未排期任务", status: "in_progress", origin: "auto", lastActivityAt },
+  ] } });
+  const root = registrations.get("main").render({}).children[0];
+  const schedule = [...elements(root.type(root.props))].find((node) => node.props?.mode === "schedule");
+  assert.deepEqual(Array.from(schedule.props.tasks, ({ id }) => id), ["planned"]);
+});
+
+test("floating acceptance sends the task revision and refreshes a conflicting snapshot", async () => {
+  const task = { id: "ready", title: "待验收任务", status: "in_progress", attention: "acceptance",
+    acceptanceCriteria: "检查结果", updatedAt: "revision" };
+  const requests = [];
+  const changes = [];
+  const { host, registrations } = loadClient({}, {
+    snapshot: { tasks: [task] },
+    onState: (value) => changes.push(value),
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return options.body ? { ok: false, status: 409, json: async () => ({ ok: false, error: "revision-conflict" }) } :
+        { ok: true, json: async () => ({ ok: true, tasks: [{ ...task, status: "done", completionBasis: "user" }] }) };
+    },
+  });
+  host.openSurface("float");
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const button = [...elements(panel.type(panel.props))].find((node) => node.type === "button" && renderedText(node) === "确认验收");
+  await button.props.onClick();
+  assert.deepEqual(requests, [
+    ["/super-kanban/api/command", { op: "task.accept", payload: { id: "ready", expectedUpdatedAt: "revision" } }],
+    ["/super-kanban/api/state", null],
+  ]);
+  assert.ok(changes.includes("任务已更新，请查看最新状态后再确认。"));
+  assert.ok(changes.some((value) => value?.tasks?.[0]?.completionBasis === "user"));
+});
+
+test("mounted board surfaces share refresh notifications even for local changes without SSE", async () => {
+  let opens = 0;
+  let closes = 0;
+  const events = new Map();
+  const timers = new Map();
+  const { plugin } = loadClient({}, { inspect: true,
+    fetch: async () => ({ ok: true, json: async () => ({ ok: true }) }), browser: {
+    EventSource: class {
+      constructor() { opens += 1; }
+      addEventListener(name, listener) { events.set(name, listener); }
+      close() { closes += 1; }
+    },
+    document: { baseURI: "http://plugin.local/", hidden: false, addEventListener() {}, removeEventListener() {} },
+    setTimeout(callback, delay) { const key = Symbol(); timers.set(key, { callback, delay }); return key; },
+    clearTimeout(key) { timers.delete(key); },
+  } });
+  const loads = [];
+  const first = plugin.subscribeBoardRefresh(() => loads.push("page"));
+  const second = plugin.subscribeBoardRefresh(() => loads.push("float"));
+  assert.equal(opens, 1);
+  events.get("changed")();
+  const fireRefresh = () => {
+    const [key, timer] = [...timers].find(([, timer]) => timer.delay === 180);
+    timers.delete(key);
+    timer.callback();
+  };
+  fireRefresh();
+  assert.deepEqual(loads, ["page", "float"]);
+  await plugin.command("task.move", { id: "one", status: "done" });
+  fireRefresh();
+  assert.deepEqual(loads, ["page", "float", "page", "float"]);
+  first();
+  assert.equal(closes, 0);
+  second();
+  assert.equal(closes, 1);
+});
+
+test("a workspace timeline includes custom project tasks and deduplicates shared source evidence", () => {
+  const now = Date.now();
+  const source = { time: now - 1000, seq: 8, sessionId: "exact-source", kind: "deliverable", text: "核验报告" };
+  const tasks = [
+    { id: "workspace-task", title: "工作区任务", workspaceId: "ws-one", projectId: "virtual", status: "in_progress", evidence: [source],
+      artifacts: [{ kind: "deliverable", sessionId: "exact-source", seq: 8, time: now - 1000, path: "duplicate.md" },
+        { kind: "deliverable", sessionId: "file-source", seq: 10, time: now - 3000, path: "checklist.md" }] },
+    { id: "linked-task", title: "关联任务", workspaceId: "ws-one", status: "done", evidence: [source],
+      history: [{ at: new Date(now - 2000).toISOString(), kind: "status", note: "确认验收" },
+        { at: new Date(now - 4000).toISOString(), kind: "edit", note: "解决问题：补齐构建权限" }] },
+    { id: "other", title: "其他工作区任务", workspaceId: "ws-two", projectId: "virtual", status: "done", evidence: [source] },
+  ];
+  const opened = [];
+  const { registrations } = loadClient({ uiWorkspace: { openSession: (id) => opened.push(id) } }, {
+    snapshot: { tasks, workspaces: [{ id: "ws-one", title: "工作区一" }], projects: [{ id: "virtual", name: "自建项目" }] },
+    view: "timeline", filters: { workspace: "ws-one" },
+  });
+  const root = registrations.get("main").render({}).children[0];
+  const timeline = [...elements(root.type(root.props))].find((node) => node.props?.range === "recent");
+  const content = timeline.type(timeline.props);
+  const body = renderedText(content);
+  assert.match(body, /工作区一 · 时间线.*核验报告.*已验收.*关联任务/);
+  assert.match(body, /checklist\.md.*解决问题：补齐构建权限/);
+  assert.equal(body.match(/核验报告/g).length, 1);
+  assert.doesNotMatch(body, /其他工作区任务|duplicate\.md/);
+  [...elements(content)].filter((node) => node.type === "button" && renderedText(node) === "打开来源会话")
+    .forEach((button) => button.props.onClick());
+  assert.deepEqual(opened, ["exact-source", "file-source"]);
 });
 
 test("attention counts tasks and opens each exact pending session even when the primary is idle", () => {

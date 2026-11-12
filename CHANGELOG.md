@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-12
+
+### 新增
+
+- 会话页头和看板工具栏可切换全局、右侧和悬浮三种形态。常驻悬浮入口可选择左右位置、圆形角标／胶囊／状态条、摘要类别和空闲隐藏。新待验收任务到达时，入口给出轻提示。
+- 悬浮摘要集中显示待验收、待处理和运行中的任务。可以查看交付物、打开准确的来源会话、就地确认验收，或编辑草稿继续工作。多条待审批或待回答会话各有独立入口。
+- 项目视图自动显示工作区项目，并支持跨工作区的自建项目。每个项目可直接打开看板、日程和时间线。时间线按本地日期汇总任务变更、会话证据和交付，并合并重复来源。
+
+### 改进
+
+- 近期视图和增量扫描共用滚动活跃周期，默认 30 天。旧任务保留在历史视图，手动、置顶、运行中、待会话交互和未完成的排期任务继续可见。会话产生新活动后自动回到范围内，也可按需扫描全部历史。
+- AI 研判保留已关联任务作为上下文，其他候选按同工作区的会话活动时间优先，减少陈旧任务干扰。全局、右侧和悬浮形态共用刷新连接，修改后同步刷新并丢弃过期响应。
+- 补齐日常工作流、升级路径、扫描与验收说明，并同步中英文 README、插件市场页面和接口契约。
+
 ## [0.8.0] - 2026-11-11
 
 ### 新增
@@ -424,7 +438,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.8.0
 [0.7.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.7.0
 [0.6.1]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.6.1

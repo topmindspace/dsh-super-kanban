@@ -116,7 +116,9 @@ store.saveState()              原子写（tmp + rename）；经 SSE 通知刷�
 - **模型解析**。每次扫描的 AI 阶段、单卡重判、润色和快聊共用解析逻辑。已保存模型优先，否则实时读取 DSH 默认。模型不可用时，扫描走本地规则。
 - **解析缓存**：`loadParsed` 的有界 LRU(6) 以「文件签名 + 文件 stat + 解析相关 meta 指纹」为键，抽屉轮询/重判/待办导入复用解析结果，文件或元数据变化时重新解析，失败不缓存。
 - **刷新成本**：浏览器每 4s（扫描中 1.2s）轮询 `/state`，但只在轻量 `stateSignature`（任务 id/updatedAt/status/archived + scan/settings/usage/stats/activity/workspaces）变化时才重渲染，避免大 evidence 数组的重复序列化。
-  全页与右侧栏共享同一轮读取。写入成功或收到变更事件后开启新一轮，迟到的旧响应会被丢弃。
+  全页、右侧栏和悬浮面板在同一窗口共享轮询、SSE 和在途读取。写入成功或收到变更事件后开启新一轮，迟到的旧响应会被丢弃。
+- **活跃周期** · 增量发现保留轻量会话元数据，跳过周期外未变化的日志、研判和自动关联。旧卡和既有摘要仍可查看。新轮次使会话重新进入周期，手动全量扫描覆盖全部历史。
+- **研判上下文** · 已关联任务优先进入摘要。额外候选仅来自同一工作区，按最近会话活动排序，并受活跃周期及摘要预算限制。
   显式或默认 provider 不可用时不自动换模型，直接规则降级并在扫描结论说明；无 `ctx.llm` 的旧 DSH 同样规则降级。
   请求不传 `sessionId`、不传 tools / 图片。
 - **预算**：单次预算按 `aiBudgetMode` 解析（`auto` = min(待研判会话, 每日剩余)；`fixed` = min(单次上限 5–150, 每日剩余)）。
@@ -193,7 +195,8 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 | `sidebar.panellist` | 左侧栏「任务看板」入口 |
 | `sidebarRightTabs.register` | 右侧栏看板 tab 类型（`kind = "super-kanban"`） |
 | `sidebar.right.pane.tab` slot | 右侧栏看板内容 |
-| `conversation.session.header.utilities` | 会话头部「打开任务看板」按钮 |
+| `conversation.session.header.utilities` | 会话头部快捷入口和形态切换 |
+| `shell.overlay` | 窗口级悬浮入口及任务摘要面板 |
 
 ### 状态与数据流
 
@@ -279,7 +282,7 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 - **profile 依赖规格决定升级行为**：
   - 插件页/npm 安装写入**精确版本**（`pnpm add --save-exact`）；
   - 源码/本地目录安装写入 `link:`；
-  - 手工写成范围时，`^0.7.0` 只覆盖 0.7.x。升级到 0.8.x 时使用目标精确版本。
+  - 手工写成范围时，`^0.8.0` 只覆盖 0.8.x。升级到 0.9.x 时使用目标精确版本。
 - **升级动作由 DSH 完成**：第三方插件没有自动升级，也没有官方「更新」按钮；升级 = 卸载旧版 → 安装目标版本，然后刷新窗口（客户端 bundle 有缓存，必要时完全退出 DSH）。
 - 用户侧步骤、版本验证与排障见 [INSTALL.md](INSTALL.md) 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)；插件数据（`state.json`）与插件版本解耦（存储格式版本见 `store.mjs`）。
 

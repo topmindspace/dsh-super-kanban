@@ -20,7 +20,14 @@ window.__ModuleLoader__.load({
     const SIDE_KIND = "super-kanban";
     const SIDE_ID = "dsh-super-kanban/panel";
     const PREFS_KEY = "dsh-super-kanban:prefs";
-    const DEFAULT_PREFS = Object.freeze({ fullEntry: true, sideEntry: true });
+    const SURFACES = { page: "全局看板", side: "右侧看板", float: "悬浮小面板" };
+    const FLOAT_STYLES = { badge: "圆形角标", pill: "紧凑胶囊", bar: "状态条" };
+    const FLOAT_SUMMARIES = { acceptance: "待验收", attention: "待处理", running: "运行中" };
+    const ACTIVITY_RANGES = { recent: "近期", history: "历史", all: "全部时间" };
+    const DEFAULT_PREFS = Object.freeze({
+      surface: "side", floatEnabled: false, floatStyle: "pill", floatPosition: "right",
+      floatSummaries: ["acceptance", "running"], floatHideEmpty: true,
+    });
 
     /* ---------------------- v0.5：AI 模型 / 预算常量 ---------------------- */
 
@@ -46,7 +53,7 @@ window.__ModuleLoader__.load({
     const STATUS_ORDER = ["backlog", "in_progress", "blocked", "done"];
     const COLUMN_PAGE_SIZE = 30;
     const TASK_DRAG_TYPE = "application/x-dsh-super-kanban-task";
-    const VIEW_MODES = { attention: "待处理", board: "看板", schedule: "日程", list: "列表", projects: "项目", hierarchy: "层级", artifacts: "产出", maintenance: "维护" };
+    const VIEW_MODES = { attention: "待处理", board: "看板", projects: "项目", timeline: "时间线", schedule: "日程", list: "列表", hierarchy: "层级", artifacts: "产出", maintenance: "维护" };
     const RELATION_LABELS = { parent: "父任务", depends_on: "依赖任务", related: "相关任务" };
     const ATTENTION_LABELS = { waiting_user: "待你确认", review: "待确认进度", acceptance: "待验收", interrupted: "执行中断" };
     const INTERACTION_LABELS = { approval: "待审批", question: "待回答", "plan-review": "待审阅方案" };
@@ -96,7 +103,7 @@ window.__ModuleLoader__.load({
       if (primaryId && !sessions.has(primaryId)) sessions.set(primaryId, task.sessionContext?.title);
       const primary = primaryId ? statuses.get(primaryId) : null;
       const pendingSessions = [];
-      let runningSessions = 0;
+      const runningSessionIds = [];
       for (const [id, title] of sessions) {
         const native = statuses.get(id);
         const pending = native?.pendingInteraction;
@@ -105,13 +112,14 @@ window.__ModuleLoader__.load({
           const label = Object.hasOwn(INTERACTION_LABELS, kind) ? INTERACTION_LABELS[kind] : "待处理请求";
           pendingSessions.push({ id, title: title || "来源会话", label });
         } else if (native?.running === true) {
-          runningSessions++;
+          runningSessionIds.push(id);
         }
       }
       return {
         ...task,
         pendingSessions,
-        runningSessions,
+        runningSessions: runningSessionIds.length,
+        runningSessionIds,
         sessionContext: primaryId
           ? { ...context, sessionId: primaryId, title: context?.title || sessions.get(primaryId),
               isLive: primary?.running === true && !primary?.pendingInteraction }
@@ -168,6 +176,32 @@ window.__ModuleLoader__.load({
       if (task.sessionContext?.isLive && task.sessionContext.estimated) return "可能运行中";
       const running = task.runningSessions ?? (task.sessionContext?.isLive ? 1 : 0);
       return running > 1 ? `${running} 个会话运行中` : running ? "会话运行中" : "";
+    }
+
+    function isAccepted(task) {
+      return task.status === "done" && task.completionBasis === "user";
+    }
+
+    function canAcceptTask(task, artifact = primaryArtifactOf(artifactsOf(task))) {
+      return !task.archived && (isAccepted(task) || (!task.pendingSessions?.length && !taskRunningLabel(task) &&
+        Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done")));
+    }
+
+    function taskActivityAt(task) {
+      const sessionActivity = timeValue(task.lastActivityAt) || timeValue(task.createdAt);
+      return Math.max(sessionActivity,
+        ...(task.history || []).filter((entry) => entry?.by === "user").map((entry) => timeValue(entry.at)));
+    }
+
+    function activityCutoff(days, now = Date.now()) {
+      return now - (Number(days) || 30) * 86_400_000;
+    }
+
+    function isHistoricalTask(task, cutoff) {
+      const at = taskActivityAt(task);
+      return at > 0 && at < cutoff && task.origin !== "manual" && !task.pinned &&
+        !(task.dueDate && task.status !== "done" && !task.archived) &&
+        !taskRunningLabel(task) && !task.pendingSessions?.length;
     }
     /** 用户可锁定、避免被 AI 研判覆盖的任务字段（与 Host task.update 的 lockFields 对齐）。 */
     const EDITABLE_FIELDS = Object.freeze(["title", "goal", "status", "priority", "progress"]);
@@ -308,10 +342,12 @@ window.__ModuleLoader__.load({
     }
 
     /** 时间字段兼容 ISO 字符串 / epoch ms（Host 的 task.history[].at 是 ISO）；非法值交给 relTime 显示「—」。 */
+    function timeValue(value) {
+      return (typeof value === "number" && Number.isFinite(value) ? value : Date.parse(value)) || 0;
+    }
+
     function relTimeValue(value) {
-      if (typeof value === "number") return relTime(value);
-      const parsed = Date.parse(value);
-      return relTime(Number.isFinite(parsed) ? parsed : 0);
+      return relTime(timeValue(value));
     }
 
     function shortTime(ms) {
@@ -902,36 +938,62 @@ window.__ModuleLoader__.load({
       return WS_COLORS[hash % WS_COLORS.length];
     }
 
-    /** 显示与入口偏好：{ fullEntry, sideEntry }，默认两者都开。 */
+    function normalizePrefs(value = {}) {
+      const selected = Array.isArray(value.floatSummaries) ? value.floatSummaries : [];
+      const floatSummaries = Object.keys(FLOAT_SUMMARIES).filter((id) => selected.includes(id));
+      return {
+        surface: Object.hasOwn(SURFACES, value.surface) ? value.surface : value.sideEntry === false ? "page" : DEFAULT_PREFS.surface,
+        floatEnabled: value.floatEnabled === true,
+        floatStyle: Object.hasOwn(FLOAT_STYLES, value.floatStyle) ? value.floatStyle : DEFAULT_PREFS.floatStyle,
+        floatPosition: value.floatPosition === "left" ? "left" : "right",
+        floatSummaries: floatSummaries.length ? floatSummaries : DEFAULT_PREFS.floatSummaries,
+        floatHideEmpty: value.floatHideEmpty !== false,
+      };
+    }
+
     function readPrefs() {
       try {
-        const raw = localStorage.getItem(PREFS_KEY);
-        if (!raw) return { ...DEFAULT_PREFS };
-        const parsed = JSON.parse(raw);
-        return { fullEntry: parsed.fullEntry !== false, sideEntry: parsed.sideEntry !== false };
+        return normalizePrefs(JSON.parse(localStorage.getItem(PREFS_KEY)) || {});
       } catch {
         return { ...DEFAULT_PREFS };
       }
     }
 
-    function writePrefs(next) {
+    let uiPrefs = readPrefs();
+    const prefsListeners = new Set();
+    const floatListeners = new Set();
+    const pageTaskListeners = new Set();
+    let floatOpen = false;
+    let requestedPageTask = null;
+
+    function updatePrefs(patch) {
+      uiPrefs = normalizePrefs({ ...uiPrefs, ...patch });
       try {
-        localStorage.setItem(PREFS_KEY, JSON.stringify({ fullEntry: next.fullEntry !== false, sideEntry: next.sideEntry !== false }));
+        localStorage.setItem(PREFS_KEY, JSON.stringify(uiPrefs));
       } catch {
         /* localStorage may be unavailable */
       }
+      for (const listener of prefsListeners) listener(uiPrefs);
     }
 
-    function prefsMode(prefs) {
-      if (prefs.fullEntry && prefs.sideEntry) return "both";
-      if (prefs.fullEntry) return "page";
-      return "side";
+    function useUiPrefs() {
+      const [prefs, setPrefs] = React.useState(() => uiPrefs);
+      React.useEffect(() => {
+        prefsListeners.add(setPrefs);
+        setPrefs(uiPrefs);
+        return () => prefsListeners.delete(setPrefs);
+      }, []);
+      return prefs;
     }
 
-    function modePrefs(mode) {
-      if (mode === "page") return { fullEntry: true, sideEntry: false };
-      if (mode === "side") return { fullEntry: false, sideEntry: true };
-      return { fullEntry: true, sideEntry: true };
+    function setFloatingOpen(open) {
+      floatOpen = open;
+      for (const listener of floatListeners) listener(open);
+    }
+
+    function SurfacePicker({ value, onChange, className, label = "看板形态" }) {
+      return h("select", { className, value, title: label, "aria-label": label, onChange: (event) => onChange(event.target.value) },
+        Object.entries(SURFACES).map(([id, text]) => h("option", { key: id, value: id }, text)));
     }
 
     /* ================================ icons =============================== */
@@ -1001,7 +1063,7 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 /* ---------- tokens & page ---------- */
-.sk-page{--sk-line:var(--dsw-alias-border-l2,rgba(0,0,0,.10));--sk-line-soft:var(--dsw-alias-border-l1,rgba(0,0,0,.045));
+.sk-page,.sk-floating{--sk-line:var(--dsw-alias-border-l2,rgba(0,0,0,.10));--sk-line-soft:var(--dsw-alias-border-l1,rgba(0,0,0,.045));
   --sk-line-strong:var(--dsw-alias-border-l3,rgba(0,0,0,.12));--sk-surface:var(--dsw-alias-bg-layer-1,#fff);
   --sk-surface-2:color-mix(in srgb,var(--dsw-alias-bg-module-platform,#f5f6f7) 52%,var(--dsw-alias-bg-base,#fff));
   --sk-surface-3:color-mix(in srgb,var(--dsw-alias-bg-module-platform,#f5f6f7) 82%,var(--dsw-alias-bg-base,#fff));
@@ -1016,8 +1078,8 @@ window.__ModuleLoader__.load({
   --sk-hover:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06));--sk-active:var(--dsw-alias-interactive-bg-active,rgba(38,49,72,.10));
   --sk-shadow-lift:0 0 0 .5px color-mix(in srgb,var(--sk-ink) 9%,transparent),0 6px 18px rgba(0,0,0,.07);
   --sk-mask:color-mix(in srgb,var(--dsw-alias-bg-mask-3,#0000007a) 46%,transparent);
-  --sk-ease:var(--ds-ease-in-out,cubic-bezier(.4,0,.2,1));--sk-dur:var(--ds-transition-duration,.2s);
-  box-sizing:border-box;height:100%;display:flex;flex-direction:column;gap:12px;overflow:hidden;
+  --sk-ease:var(--ds-ease-in-out,cubic-bezier(.4,0,.2,1));--sk-dur:var(--ds-transition-duration,.2s);}
+.sk-page{box-sizing:border-box;height:100%;display:flex;flex-direction:column;gap:12px;overflow:hidden;
   color:var(--sk-ink);background:var(--dsw-alias-bg-base,#fff);position:relative;
   padding:calc(var(--dsh-frame-top-clearance,0px) + 22px) 26px 16px;
   font-family:var(--dsh-font-family-text-default,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif);
@@ -1211,13 +1273,6 @@ window.__ModuleLoader__.load({
 .sk-narrow-add{flex:none;display:flex;align-items:center;justify-content:center;gap:6px;height:32px;border:1px dashed var(--sk-line);border-radius:9px;
   background:transparent;color:var(--sk-ink-3);font:inherit;font-size:11.5px;cursor:pointer;transition:background .15s,color .15s}
 .sk-narrow-add:hover{background:var(--sk-hover);color:var(--sk-ink)}
-/* 入口三选一 */
-.sk-entry-options{display:flex;gap:6px;flex-wrap:wrap}
-.sk-entry-option{flex:1;min-width:0;padding:8px 10px;border:1px solid var(--sk-line);border-radius:9px;background:var(--sk-surface);
-  color:var(--sk-ink-2);font:inherit;font-size:11.5px;line-height:1.35;text-align:left;cursor:pointer;transition:background .15s,border-color .15s,color .15s}
-.sk-entry-option:hover{background:var(--sk-hover);color:var(--sk-ink)}
-.sk-entry-option.is-on{border-color:color-mix(in srgb,var(--sk-accent) 45%,transparent);background:color-mix(in srgb,var(--sk-accent) 8%,transparent);color:var(--sk-ink);font-weight:600}
-.sk-entry-option small{display:block;font-size:9.5px;font-weight:400;color:var(--sk-ink-3);margin-top:2px;line-height:1.35}
 /* 工具栏筛选弹层 */
 .sk-filter-wrap{position:relative;display:flex;align-items:center;flex:none}
 .sk-filter-popover{position:absolute;top:calc(100% + 6px);right:0;z-index:45;width:288px;padding:12px;border-radius:12px;background:var(--sk-surface);border:1px solid var(--sk-line-strong);box-shadow:var(--sk-shadow-lift);display:flex;flex-direction:column;gap:10px;animation:skPop .16s cubic-bezier(.2,.8,.3,1)}
@@ -1472,9 +1527,6 @@ window.__ModuleLoader__.load({
 .sk-switch{background:color-mix(in srgb,var(--sk-ink) 18%,transparent)}
 .sk-switch.on{background:color-mix(in srgb,var(--sk-ink) 78%,transparent)}
 .sk-switch i{background:var(--dsw-alias-switch-thumb,#fff)}
-.sk-entry-option{border-color:var(--sk-line);border-radius:8px;font-size:12px;padding:8px 10px}
-.sk-entry-option.is-on{border-color:var(--sk-line-strong);background:color-mix(in srgb,var(--sk-ink) 6%,transparent);color:var(--sk-ink);font-weight:400}
-.sk-entry-option small{font-size:11px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
 .sk-usage{background:transparent;border:0.5px solid var(--sk-line-soft);border-radius:8px;font-size:11px;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
 .sk-ws-pick .sk-chip{border:none;background:transparent;color:color-mix(in srgb,var(--sk-ink) 62%,transparent);font-size:12px;height:28px;padding:0 8px;border-radius:6px}
 .sk-ws-pick .sk-chip.on{background:color-mix(in srgb,var(--sk-ink) 8%,transparent);color:var(--sk-ink);font-weight:500}
@@ -1829,6 +1881,63 @@ button.sk-task-row-main{cursor:pointer}
 .sk-iconbtn-v3.sk-chat-trigger{display:inline-flex;align-items:center;justify-content:center;width:auto;gap:5px;padding:0 7px;white-space:nowrap;font-size:12px}
 .sk-tier-narrow .sk-slimbar .sk-count{display:none}
 .sk-tier-narrow .sk-slimbar{flex-wrap:wrap}
+.sk-surface-picker,.sk-activity-picker{max-width:110px;font-size:12px}
+.sk-host-header{display:inline-flex;align-items:center;gap:2px;--sk-ink:var(--dsw-alias-label-primary,#0f1115);
+  --sk-ink-2:var(--dsw-alias-label-secondary,#61666b);--sk-hover:var(--dsw-alias-interactive-bg-hover,#edf1f6);
+  --sk-line:var(--dsw-alias-border-l2,#d8dce3)}
+.sk-host-surface-picker{max-width:108px;height:28px;border:0;border-radius:5px;
+  background:transparent;color:var(--dsw-alias-label-secondary,#61666b);font:inherit;font-size:11px;cursor:pointer}
+.sk-host-surface-picker option{background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115)}
+.sk-float-options{min-width:0;display:flex;flex-wrap:wrap;gap:8px 16px;margin:0;padding:8px 10px;border:1px solid var(--sk-line);border-radius:8px}
+.sk-float-options label{display:flex;gap:5px;align-items:center}
+.sk-project-section{margin:14px 0 20px}
+.sk-project-section>h3{font-size:13px;margin:0 0 9px;color:var(--sk-ink-2)}
+.sk-timeline h2{font-size:17px;margin:8px 0 16px}
+.sk-timeline-day{margin-bottom:18px}
+.sk-timeline-day h3{font-size:12px;color:var(--sk-ink-2);margin:0 0 6px}
+.sk-timeline-day ol{list-style:none;margin:0;padding:0 0 0 13px;border-inline-start:1px solid var(--sk-line)}
+.sk-timeline-day li{position:relative;display:grid;justify-items:start;gap:4px;padding:7px 0 11px;min-width:0}
+.sk-timeline-links{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap;min-width:0}
+.sk-timeline-day li::before{content:"";position:absolute;inset-inline-start:-17px;top:13px;width:7px;height:7px;border-radius:50%;background:var(--sk-accent)}
+.sk-timeline-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--sk-ink-2);font-size:11px}
+.sk-timeline-meta time{font-variant-numeric:tabular-nums}
+.sk-timeline-task,.sk-float-task{font-weight:650;text-align:start;overflow-wrap:anywhere}
+.sk-timeline-day p{margin:0;color:var(--sk-ink-2);white-space:pre-line;overflow-wrap:anywhere}
+.sk-floating{position:fixed;inset:auto;bottom:max(14px,env(safe-area-inset-bottom));right:16px;display:grid;justify-items:end;gap:8px;
+  margin:0;padding:0;border:0;background:transparent;overflow:visible;
+  max-width:calc(100vw - 32px);z-index:50;pointer-events:auto;color:var(--sk-ink);font:13px/1.45 var(--dsh-font-family-text-default,system-ui,sans-serif)}
+.sk-floating[popover]:not(:popover-open){display:none}
+[inert] .sk-floating{visibility:hidden}
+.sk-floating.is-left{right:auto;left:16px;justify-items:start}
+.sk-floating *{box-sizing:border-box}
+.sk-floating button{font-family:inherit}
+.sk-floating :focus-visible{outline:2px solid var(--sk-accent);outline-offset:2px}
+.sk-float-trigger{display:flex;align-items:center;justify-content:center;gap:8px;max-width:100%;min-height:36px;padding:6px 11px;
+  border:1px solid var(--sk-line);border-radius:24px;background:var(--sk-surface);color:var(--sk-ink);
+  box-shadow:0 4px 14px #0002;cursor:pointer;font-variant-numeric:tabular-nums}
+.sk-float-trigger:hover,.sk-float-trigger[aria-expanded=true]{background:var(--sk-surface-2)}
+.sk-float-trigger.is-badge{width:44px;height:44px;padding:4px;flex-direction:column;gap:0;line-height:1.1;font-size:11px}
+.sk-float-trigger.is-bar{border-radius:10px;gap:10px;flex-wrap:wrap}
+.sk-float-trigger.is-bar b{color:var(--sk-accent)}
+.sk-float-mark{display:flex}
+@media (prefers-reduced-motion:no-preference){
+  .sk-float-mark.is-new{animation:sk-float-arrival .46s ease-out}
+  @keyframes sk-float-arrival{0%,100%{transform:scale(1)}45%{transform:scale(1.22);color:var(--sk-accent)}}
+}
+.sk-float-panel{width:min(365px,calc(100vw - 32px));max-height:min(510px,calc(100dvh - 90px));display:flex;flex-direction:column;
+  border:1px solid var(--sk-line);border-radius:14px;background:var(--sk-surface);box-shadow:0 12px 36px #0003;overflow:hidden}
+.sk-float-panel header,.sk-float-panel footer{padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sk-float-panel h2{font-size:14px;margin:0}
+.sk-float-panel footer{border-top:1px solid var(--sk-line);color:var(--sk-ink-2);font-size:12px;flex-wrap:wrap}
+.sk-float-panel footer button{margin-inline-start:auto}
+.sk-float-metrics{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 8px;border-bottom:1px solid var(--sk-line)}
+.sk-float-metrics [aria-pressed=true]{border-color:var(--sk-accent);color:var(--sk-accent)}
+.sk-float-content{min-height:0;overflow:auto;overscroll-behavior:contain;padding:2px 12px 8px}
+.sk-float-content p{margin:5px 0;color:var(--sk-ink-2);overflow-wrap:anywhere}
+.sk-float-criteria{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line}
+.sk-float-row{padding:9px 0;border-bottom:1px solid var(--sk-line)}
+.sk-float-row:last-child{border-bottom:0}
+.sk-floating .sk-modal-mask{padding:12px}
 @media (prefers-reduced-motion:reduce){
   .sk-run-label::before,.sk-session-line .sk-live-dot.is-live{animation:none!important}
 }
@@ -2023,6 +2132,7 @@ button.sk-task-row-main{cursor:pointer}
 
     function invalidateBoardState() {
       stateGeneration += 1;
+      boardRefresh?.notify();
     }
 
     function requestBoardState() {
@@ -2034,6 +2144,54 @@ button.sk-task-row-main{cursor:pointer}
         sharedStateRequest = entry;
       }
       return sharedStateRequest;
+    }
+
+    const boardSubscribers = new Map();
+    let boardRefresh = null;
+
+    function subscribeBoardRefresh(load) {
+      boardSubscribers.set(load, false);
+      if (!boardRefresh) {
+        let timer;
+        let eventTimer;
+        const refresh = () => {
+          if (!document.hidden) for (const subscriber of boardSubscribers.keys()) subscriber(true);
+        };
+        const schedule = () => {
+          clearTimeout(timer);
+          if (document.hidden || !boardSubscribers.size) return;
+          const delay = [...boardSubscribers.values()].some(Boolean) ? POLL_SCAN_MS : POLL_MS;
+          timer = setTimeout(() => { refresh(); schedule(); }, delay);
+        };
+        const visible = () => { refresh(); schedule(); };
+        const notify = () => {
+          if (document.hidden || eventTimer) return;
+          eventTimer = setTimeout(() => { eventTimer = null; refresh(); }, 180);
+        };
+        const stream = typeof EventSource === "function" ? new EventSource(new URL(`${API}/events`, document.baseURI)) : null;
+        stream?.addEventListener("changed", invalidateBoardState);
+        stream?.addEventListener("scan", notify);
+        document.addEventListener("visibilitychange", visible);
+        boardRefresh = {
+          notify,
+          schedule,
+          dispose() {
+            clearTimeout(timer);
+            clearTimeout(eventTimer);
+            stream?.close();
+            document.removeEventListener("visibilitychange", visible);
+          },
+        };
+      }
+      boardRefresh.schedule();
+      return () => {
+        boardSubscribers.delete(load);
+        if (boardSubscribers.size) boardRefresh.schedule();
+        else {
+          boardRefresh.dispose();
+          boardRefresh = null;
+        }
+      };
     }
 
     function useBoardData() {
@@ -2085,54 +2243,12 @@ button.sk-task-row-main{cursor:pointer}
         load(false);
       }, [load]);
 
-      // 轮询：空闲 4s，扫描中 1.2s；页面隐藏时停止请求并把节奏放慢，重新可见时立即补一次。
+      const scanning = data?.scan?.state === "running";
+      React.useEffect(() => subscribeBoardRefresh(load), [load]);
       React.useEffect(() => {
-        let timer = null;
-        let cancelled = false;
-        const running = Boolean(data && data.scan && data.scan.state === "running");
-        const nextDelay = () => {
-          if (typeof document !== "undefined" && document.hidden) return 30_000;
-          return running ? POLL_SCAN_MS : POLL_MS;
-        };
-        const tick = () => {
-          if (cancelled) return;
-          const hidden = typeof document !== "undefined" && document.hidden;
-          if (!hidden) load(true);
-          timer = setTimeout(tick, nextDelay());
-        };
-        const onVisibility = () => {
-          if (cancelled) return;
-          clearTimeout(timer);
-          if (!document.hidden) load(true);
-          timer = setTimeout(tick, nextDelay());
-        };
-        timer = setTimeout(tick, nextDelay());
-        document.addEventListener("visibilitychange", onVisibility);
-        return () => {
-          cancelled = true;
-          clearTimeout(timer);
-          document.removeEventListener("visibilitychange", onVisibility);
-        };
-      }, [data && data.scan && data.scan.state, load]);
-
-      React.useEffect(() => {
-        if (typeof EventSource !== "function") return undefined;
-        const stream = new EventSource(new URL(`${API}/events`, document.baseURI));
-        let timer;
-        const invalidate = () => {
-          if (document.hidden || timer) return;
-          timer = setTimeout(() => { timer = null; load(true); }, 180);
-        };
-        stream.addEventListener("changed", () => {
-          invalidateBoardState();
-          invalidate();
-        });
-        stream.addEventListener("scan", invalidate);
-        return () => {
-          clearTimeout(timer);
-          stream.close();
-        };
-      }, [load]);
+        boardSubscribers.set(load, scanning);
+        boardRefresh.schedule();
+      }, [load, scanning]);
 
       const applyLocalState = React.useCallback((update) => {
         // The next server snapshot must reconcile any local change, even if it
@@ -2441,7 +2557,7 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     /** 「继续此任务」弹窗：模板提示词可编辑 → 放入会话 / 新会话 / 复制。 */
-    function ContinueTaskModal({ task, initialTarget, initialPurpose, initialSessionId, ctxProps, workspaces, pushToast, onClose, onDone }) {
+    function ContinueTaskModal({ task, initialTarget, initialPurpose, initialSessionId, ctxProps, workspaces, pushToast, feedback, returnFocus, onClose, onDone }) {
       const host = (ctxProps && ctxProps.host) || {};
       const session = sessionContextOf(task);
       const [target, setTarget] = React.useState(initialTarget === "newSession" || !session.sessionId ? "newSession" : "session");
@@ -2572,7 +2688,8 @@ button.sk-task-row-main{cursor:pointer}
       const disabled = loading || !!busy || !prompt.trim() || (target === "newSession" ? !workspaceId : !sessionId);
       const polishTooLong = prompt.trim().length > PROMPT_POLISH_LIMIT;
       const dialogRef = React.useRef(null);
-      useDialogFocus(dialogRef, onClose);
+      const titleId = React.useId();
+      useDialogFocus(dialogRef, onClose, returnFocus);
       useBodyScrollLock();
 
       return h(
@@ -2585,9 +2702,9 @@ button.sk-task-row-main{cursor:pointer}
             ref: dialogRef,
             role: "dialog",
             "aria-modal": "true",
-            "aria-labelledby": "sk-continue-title",
+            "aria-labelledby": titleId,
           },
-          h("h3", { id: "sk-continue-title" }, h(Icon, { name: "play", size: 15 }), "继续此任务"),
+          h("h3", { id: titleId }, h(Icon, { name: "play", size: 15 }), "继续此任务"),
           h(
             "div",
             { className: "sk-modal-body" },
@@ -2632,6 +2749,7 @@ button.sk-task-row-main{cursor:pointer}
                   },
                 }),
             note ? h("div", { className: "sk-note-tiny", role: "status", "aria-live": "polite" }, note) : null,
+            feedback ? h("div", { className: "sk-note-tiny", role: "status" }, feedback) : null,
             polishTooLong ? h("div", { className: "sk-note-tiny" }, "超过 3000 字的草稿可直接放入会话。精简后可使用 AI 润色。") : null,
           ),
           h(
@@ -2845,9 +2963,8 @@ button.sk-task-row-main{cursor:pointer}
       const otherArtifacts = artifacts.filter((item) => item !== primaryArtifact);
       const pending = task.pendingSessions || [];
       const ready = signal?.label === "待验收";
-      const accepted = task.status === "done" && task.completionBasis === "user";
-      const canAccept = !task.archived && (accepted || (!pending.length && !taskRunningLabel(task) &&
-        (task.acceptanceCriteria || primaryArtifact?.kind === "deliverable" || task.status === "done")));
+      const accepted = isAccepted(task);
+      const canAccept = canAcceptTask(task, primaryArtifact);
       const nextSteps = Array.isArray(task.nextSteps) ? task.nextSteps : [];
       const aiInfo = aiInfoOf(task);
       // 新旧兼容：有 provider 时显示「provider 显示名 / model」；旧任务只有 model 时保持单模型名样式。
@@ -3294,7 +3411,7 @@ button.sk-task-row-main{cursor:pointer}
                           `来源 · ${task.sessions.find((item) => item.id === primaryArtifact.sessionId).title || "关联会话"}`) : null) : null,
                       canAccept ? h("div", { className: "sk-overview-actions" },
                         h("button", { type: "button", className: "sk-btn", onClick: acceptTask, "aria-disabled": accepted || acceptBusy,
-                          "aria-busy": acceptBusy || undefined }, accepted ? "已人工验收" : acceptBusy ? "正在确认…" : "验收通过")) : null),
+                          "aria-busy": acceptBusy || undefined }, accepted ? "已人工验收" : acceptBusy ? "正在确认…" : "确认验收")) : null),
                     aiInfo
                       ? h(
                           "details",
@@ -3500,7 +3617,7 @@ button.sk-task-row-main{cursor:pointer}
               : h(
                   React.Fragment,
                   null,
-                  h("button", { type: "button", className: "sk-btn primary", onClick: () => startContinue("session", ready ? "verify" : task.status === "blocked" ? "unblock" : "continue") }, ready ? "验收产出" : "继续此任务"),
+                  h("button", { type: "button", className: "sk-btn primary", onClick: () => startContinue("session", ready ? "verify" : task.status === "blocked" ? "unblock" : "continue") }, ready ? "生成核验草稿" : "继续此任务"),
                   h("button", { type: "button", className: "sk-btn ghost", onClick: openSession, disabled: !session.sessionId }, "打开会话"),
                   h("span", { className: "sk-grow" }),
                   h(QuickMenuButton, { label: "更多继续操作", expanded: Boolean(footerAnchor), onOpen: setFooterAnchor }),
@@ -3829,8 +3946,8 @@ button.sk-task-row-main{cursor:pointer}
         };
       });
       const [saving, setSaving] = React.useState(false);
-      // 入口偏好先暂存，取消不会写入；只有「保存设置」才真正落盘（需要刷新窗口生效）。
-      const [entryDraft, setEntryDraft] = React.useState(() => prefsMode(prefs));
+      const originalPrefs = React.useRef(prefs);
+      const [entryDraft, setEntryDraft] = React.useState(() => prefs);
       const dialogRef = React.useRef(null);
       useDialogFocus(dialogRef, onClose);
       useBodyScrollLock();
@@ -3840,8 +3957,7 @@ button.sk-task-row-main{cursor:pointer}
       // S1：禁止 || 回退（0 / 空串会被误判）；Host 钳制 5–150，非法值才用默认。
       const fixedLimitValue = Number(draft.maxAiCallsPerScan);
       const fixedLimit = Number.isFinite(fixedLimitValue) ? fixedLimitValue : AI_MAX_CALLS_DEFAULT;
-      const entryMode = entryDraft;
-      const chooseEntry = (mode) => setEntryDraft(mode);
+      const changeEntry = (patch) => setEntryDraft((current) => ({ ...current, ...patch }));
       const toggleWorkspace = (id) => {
         setDraft((value) => {
           const set = new Set(value.excludeWorkspaces);
@@ -3854,9 +3970,10 @@ button.sk-task-row-main{cursor:pointer}
         setSaving(true);
         try {
           await command("settings.update", { patch: draft });
-          const entryChanged = entryDraft !== prefsMode(prefs);
-          if (entryChanged) onPrefsChange(modePrefs(entryDraft));
-          pushToast(entryChanged ? "设置已保存；入口偏好需刷新窗口（Cmd+R）生效" : "设置已保存", "info");
+          const changedPrefs = Object.fromEntries(Object.keys(entryDraft).filter((key) => entryDraft[key] !== originalPrefs.current[key])
+            .map((key) => [key, entryDraft[key]]));
+          if (Object.keys(changedPrefs).length) onPrefsChange(changedPrefs);
+          pushToast("设置已保存", "info");
           await onSave();
         } catch (cause) {
           pushToast(`保存失败：${cause.message}`, "error");
@@ -3916,11 +4033,12 @@ button.sk-task-row-main{cursor:pointer}
             h(
               "div",
               { className: "sk-settings-row" },
-              h("div", { className: "label" }, h("b", null, "初始扫描范围"), h("span", null, "首次纳入最近多少天的会话")),
+              h("div", { className: "label" }, h("b", null, "活跃周期"), h("span", null, "近期视图和增量扫描使用此周期。旧任务保留在历史，会话更新后重新纳入。")),
               h(
                 "select",
-                { className: "sk-select", "aria-label": "初始扫描范围", value: draft.initialDays, onChange: (event) => set({ initialDays: Number(event.target.value) }) },
-                [7, 14, 30, 90].map((days) => h("option", { key: days, value: days }, `最近 ${days} 天`)),
+                { className: "sk-select", "aria-label": "活跃周期", value: draft.initialDays, onChange: (event) => set({ initialDays: Number(event.target.value) }) },
+                [...new Set([7, 14, 30, 90, 180, 365, draft.initialDays])].sort((a, b) => a - b)
+                  .map((days) => h("option", { key: days, value: days }, `最近 ${days} 天`)),
               ),
             ),
             h(
@@ -4006,30 +4124,29 @@ button.sk-task-row-main{cursor:pointer}
             h(
               "div",
               { className: "sk-field" },
-              h("span", { className: "sk-field-label", id: "sk-settings-entry-label" }, "显示与入口"),
-              h(
-                "div",
-                { className: "sk-entry-options", role: "group", "aria-labelledby": "sk-settings-entry-label" },
-                [
-                  { id: "both", label: "两者", desc: "左侧栏全页 + 会话右侧栏" },
-                  { id: "page", label: "仅全局面板", desc: "只注册左侧栏「任务看板」" },
-                  { id: "side", label: "仅会话右侧栏", desc: "只注册会话头部入口" },
-                ].map((option) =>
-                  h(
-                    "button",
-                    {
-                      key: option.id,
-                      type: "button",
-                      "aria-pressed": entryMode === option.id,
-                      className: cx("sk-entry-option", entryMode === option.id && "is-on"),
-                      onClick: () => chooseEntry(option.id),
-                    },
-                    option.label,
-                    h("small", null, option.desc),
-                  ),
-                ),
-              ),
-              h("p", { className: "sub", style: { margin: 0 } }, "修改后需刷新窗口（Cmd+R）生效；当前已注册的入口在本页保持不变。"),
+              h("span", { className: "sk-field-label" }, "显示与入口"),
+              h("label", { className: "sk-settings-row" }, "会话页头默认打开",
+                h(SurfacePicker, { value: entryDraft.surface, className: "sk-select", label: "会话页头默认打开方式",
+                  onChange: (surface) => changeEntry({ surface }) })),
+              h("label", { className: "sk-settings-row" }, "常驻悬浮入口",
+                h("input", { type: "checkbox", checked: entryDraft.floatEnabled,
+                  onChange: (event) => changeEntry({ floatEnabled: event.target.checked }) })),
+              h("label", { className: "sk-settings-row" }, "悬浮样式",
+                h("select", { className: "sk-select", value: entryDraft.floatStyle, onChange: (event) => changeEntry({ floatStyle: event.target.value }) },
+                  Object.entries(FLOAT_STYLES).map(([key, label]) => h("option", { key, value: key }, label)))),
+              h("label", { className: "sk-settings-row" }, "悬浮位置",
+                h("select", { className: "sk-select", value: entryDraft.floatPosition, onChange: (event) => changeEntry({ floatPosition: event.target.value }) },
+                  h("option", { value: "right" }, "右下角"), h("option", { value: "left" }, "左下角"))),
+              h("fieldset", { className: "sk-float-options" }, h("legend", null, "悬浮摘要"),
+                Object.entries(FLOAT_SUMMARIES).map(([id, label]) => {
+                  const checked = entryDraft.floatSummaries.includes(id);
+                  return h("label", { key: id }, h("input", { type: "checkbox", checked,
+                    disabled: checked && entryDraft.floatSummaries.length === 1,
+                    onChange: () => changeEntry({ floatSummaries: checked ? entryDraft.floatSummaries.filter((item) => item !== id) : [...entryDraft.floatSummaries, id] }) }), label);
+                })),
+              h("label", { className: "sk-settings-row" }, "所选摘要都为零时隐藏入口",
+                h("input", { type: "checkbox", checked: entryDraft.floatHideEmpty,
+                  onChange: (event) => changeEntry({ floatHideEmpty: event.target.checked }) })),
             ),
             h(
               "div",
@@ -4062,7 +4179,7 @@ button.sk-task-row-main{cursor:pointer}
                 "button",
                 { type: "button", className: "sk-btn", title: "将按当前 AI 预算研判全部会话", onClick: () => onScan("full") },
                 h(Icon, { name: "refresh", size: 12 }),
-                "立即全量重扫",
+                "扫描全部历史",
               ),
               h("button", { type: "button", className: "sk-btn", onClick: exportJson }, h(Icon, { name: "file", size: 12 }), "导出 JSON"),
             ),
@@ -4085,7 +4202,7 @@ button.sk-task-row-main{cursor:pointer}
     /* ================================ page ================================ */
 
     const FILTERS_KEY = "dsh-super-kanban:filters";
-    const EMPTY_FILTERS = { workspace: "", project: "", running: false, priority: "", source: "", tag: "", query: "", showArchived: false };
+    const EMPTY_FILTERS = { workspace: "", project: "", activity: "recent", running: false, priority: "", source: "", tag: "", query: "", showArchived: false };
 
     function readFilters(surface) {
       try {
@@ -4095,6 +4212,7 @@ button.sk-task-row-main{cursor:pointer}
         return {
           workspace: String(parsed.workspace || ""),
           project: String(parsed.project || ""),
+          activity: Object.hasOwn(ACTIVITY_RANGES, parsed.activity) ? parsed.activity : "recent",
           running: parsed.running === true,
           priority: ["P0", "P1", "P2", "P3"].includes(parsed.priority) ? parsed.priority : "",
           source: ["ai", "manual"].includes(parsed.source) ? parsed.source : "",
@@ -4368,53 +4486,347 @@ button.sk-task-row-main{cursor:pointer}
         h("ul", { className: "sk-task-list" }, sorted.map((task) => row(task))));
     }
 
-    function ProjectsView({ projects, tasks, signals, onOpen, onEdit, onNew, today }) {
-      const groups = new Map();
-      for (const task of tasks) {
-        if (task.archived) continue;
-        const id = task.projectId || "";
+    function ProjectsView({ projects, workspaces, tasks, historicalIds, signals, onOpen, onWorkspace, onEdit, onNew, today }) {
+      const byWorkspace = new Map();
+      const byProject = new Map();
+      const add = (groups, id, task) => {
+        if (!id) return;
         if (!groups.has(id)) groups.set(id, []);
         groups.get(id).push(task);
+      };
+      for (const task of tasks) {
+        if (task.archived) continue;
+        add(byWorkspace, task.workspaceId, task);
+        add(byProject, task.projectId, task);
       }
-      const card = (project) => {
-        const members = groups.get(project.id) || [];
+      const card = (project, isWorkspace = false) => {
+        const group = (isWorkspace ? byWorkspace : byProject).get(project.id) || [];
+        const members = group.filter((task) => !historicalIds.has(task.id));
+        const historical = group.length - members.length;
         const completed = members.filter((task) => task.status === "done").length;
         const waiting = members.filter((task) => signals.has(task.id)).length;
-        const running = members.filter((task) => task.runningSessions > 0).length;
+        const running = members.filter(taskRunningLabel).length;
         const blocked = members.filter((task) => task.status === "blocked").length;
         const overdue = members.filter((task) => task.status !== "done" && task.dueDate && task.dueDate < today).length;
+        const open = (mode, activity) => (isWorkspace ? onWorkspace : onOpen)(project.id, mode, activity);
         return h("article", { key: project.id, className: "sk-project-card" },
           h("h3", null, project.name),
           h("p", { className: "sk-project-metrics" },
-            [members.length ? `${completed}/${members.length} 已完成` : "暂无任务", blocked ? `${blocked} 项受阻` : "",
+            [members.length ? `近期 ${completed}/${members.length} 已完成` : "暂无近期任务", blocked ? `${blocked} 项受阻` : "",
               waiting ? `${waiting} 项待处理` : "", overdue ? `${overdue} 项逾期` : "", running ? `${running} 项运行中` : ""].filter(Boolean).join(" · ")),
           members.length ? h("progress", { value: completed, max: members.length, "aria-label": `${project.name} 完成进度` }) : null,
           project.dueDate ? h("p", { className: "sk-project-metrics" }, dueLabel({ ...project,
             status: members.length > 0 && completed === members.length ? "done" : "backlog" }, today)) : null,
           project.notes ? h("p", { className: "sk-project-note sk-preserve-lines" }, project.notes) : null,
           h("div", { className: "sk-inline-actions" },
-            h("button", { type: "button", className: "sk-btn", onClick: () => onOpen(project.id) }, "查看项目看板"),
+            h("button", { type: "button", className: "sk-btn", "aria-label": `查看项目时间线 ${project.name}`, onClick: () => open("timeline") }, "时间线"),
+            h("button", { type: "button", className: "sk-btn ghost", "aria-label": `查看项目看板 ${project.name}`, onClick: () => open("board") }, "看板"),
             h("button", { type: "button", className: "sk-btn ghost", "aria-label": `查看项目日程 ${project.name}`,
-              onClick: () => onOpen(project.id, "schedule") }, "日程"),
-            h("button", { type: "button", className: "sk-btn ghost", "aria-label": `编辑项目 ${project.name}`, onClick: () => onEdit(project.id) }, "编辑")));
+              onClick: () => open("schedule") }, "日程"),
+            historical ? h("button", { type: "button", className: "sk-btn ghost", onClick: () => open("list", "history") }, `历史 ${historical}`) : null,
+            !isWorkspace ? h("button", { type: "button", className: "sk-btn ghost", "aria-label": `编辑项目 ${project.name}`, onClick: () => onEdit(project.id) }, "编辑") : null));
       };
-      const unassigned = groups.get("")?.length || 0;
+      const defaults = workspaces.filter((workspace) => workspace.included !== false);
+      const custom = projects.filter((project) => !project.archived);
       const archived = projects.filter((project) => project.archived);
       return h("section", { className: "sk-collection sk-projects", "aria-label": "项目管理" },
         h("div", { className: "sk-projects-head" },
           h("h2", null, "项目"),
-          unassigned ? h("button", { type: "button", className: "sk-btn", onClick: () => onOpen("__none", "list") }, `未归属 ${unassigned} 项`) : null,
           h("button", { type: "button", className: "sk-btn primary", onClick: onNew }, "新建项目")),
-        projects.length ? h("div", { className: "sk-project-grid" }, projects.filter((project) => !project.archived).map(card))
-          : h("p", { className: "sk-empty-v3" }, "新建项目，集中查看相关任务、进度和到期日。"),
+        defaults.length ? h("section", { className: "sk-project-section" }, h("h3", null, "工作区项目"),
+          h("div", { className: "sk-project-grid" }, defaults.map((workspace) => card({ id: workspace.id, name: workspace.title }, true)))) : null,
+        h("section", { className: "sk-project-section" }, h("h3", null, "自建项目"),
+          custom.length ? h("div", { className: "sk-project-grid" }, custom.map((project) => card(project)))
+            : h("p", { className: "sk-project-metrics" }, "把一个或多个工作区的任务归到同一个项目。")),
         archived.length ? h("details", { className: "sk-project-archive" },
-          h("summary", null, `已归档项目（${archived.length}）`), h("div", { className: "sk-project-grid" }, archived.map(card))) : null);
+          h("summary", null, `已归档项目（${archived.length}）`), h("div", { className: "sk-project-grid" }, archived.map((project) => card(project)))) : null);
     }
 
-    function ProjectModal({ project, workspaces, defaultWorkspaceId, onClose, onSave, onChanged }) {
+    const TIMELINE_HISTORY = { create: "新建任务", status: "状态变化", progress: "进度更新", archive: "归档变更", merge: "合并任务", edit: "任务更新" };
+    const TIMELINE_EVIDENCE = { user: "需求与反馈", assistant: "会话进展", deliverable: "交付", artifact: "产物", error: "问题", todo: "事项进度" };
+
+    function timelineEvents(tasks, range, cutoff) {
+      const events = [];
+      const seen = new Set();
+      const inRange = (at) => at && (range === "all" || (range === "history" ? at < cutoff : at >= cutoff));
+      for (const task of tasks) {
+        const before = events.length;
+        const historical = isHistoricalTask(task, cutoff);
+        (task.history || []).forEach((item, index) => {
+          const at = timeValue(item.at);
+          const label = item.note === "确认验收" ? "已验收" : TIMELINE_HISTORY[item.kind];
+          if (!label || !inRange(at) || (range === "recent" && historical && item.by === "ai")) return;
+          const detail = item.kind === "status" && STATUS_META[item.to] ? STATUS_META[item.to].label :
+            item.kind === "progress" && typeof item.to === "number" ? `${item.to}%` : item.note || "";
+          events.push({ key: `${task.id}:history:${index}`, at, label, detail, task });
+        });
+        const evidence = task.evidence || [];
+        const deliveries = new Set();
+        let hasSourceEvent = false;
+        for (const item of evidence) {
+          const at = timeValue(item.time);
+          const label = TIMELINE_EVIDENCE[item.kind];
+          const sessionId = item.sessionId || task.primarySessionId;
+          const key = JSON.stringify([sessionId || task.id, item.kind, item.seq || at, item.seq ? "" : item.text]);
+          if (!label || !inRange(at)) continue;
+          hasSourceEvent = true;
+          if (item.kind === "deliverable" && item.seq) deliveries.add(JSON.stringify([sessionId, item.seq]));
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const detail = item.kind === "assistant" || item.kind === "user" ? item.quote || item.text : item.text;
+          events.push({ key, at, label, detail, task, sessionId, sessionTitle: item.sessionTitle });
+        }
+        for (const artifact of artifactsOf(task)) {
+          const at = timeValue(artifact.time);
+          const sessionId = artifact.sessionId || task.primarySessionId;
+          if (artifact.kind !== "deliverable" || !inRange(at)) continue;
+          hasSourceEvent = true;
+          if (deliveries.has(JSON.stringify([sessionId, artifact.seq]))) continue;
+          const key = JSON.stringify([sessionId || task.id, "delivery-file", artifact.seq || at, artifact.path || artifact.name]);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          events.push({ key, at, label: "交付", detail: artifact.name, task, sessionId });
+        }
+        const at = taskActivityAt(task);
+        if (events.length === before && !hasSourceEvent && inRange(at)) {
+          events.push({ key: `${task.id}:activity`, at, label: "最近活动", detail: "", task, sessionId: task.primarySessionId });
+        }
+      }
+      return events.sort((a, b) => b.at - a.at || a.key.localeCompare(b.key));
+    }
+
+    function TimelineView({ tasks, range, cutoff, title, onOpen, onSession }) {
+      const [limit, setLimit] = React.useState(40);
+      const events = React.useMemo(() => timelineEvents(tasks, range, cutoff), [tasks, range, cutoff]);
+      const days = new Map();
+      for (const item of events.slice(0, limit)) {
+        const day = localDateKey(item.at);
+        if (!days.has(day)) days.set(day, []);
+        days.get(day).push(item);
+      }
+      return h("section", { className: "sk-collection sk-timeline", "aria-label": "项目时间线" },
+        h("h2", null, title ? `${title} · 时间线` : "项目时间线"),
+        !events.length ? h("p", { className: "sk-empty-v3" }, "这个范围内还没有可展示的进展。") : null,
+        [...days].map(([day, entries]) => h("section", { key: day, className: "sk-timeline-day" },
+          h("h3", null, day),
+          h("ol", null, entries.map((item) => h("li", { key: item.key },
+            h("div", { className: "sk-timeline-meta" },
+              h("time", { dateTime: new Date(item.at).toISOString() }, new Date(item.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })),
+              h("span", null, item.label), item.task.workspaceTitle ? h("span", null, item.task.workspaceTitle) : null),
+            h("div", { className: "sk-timeline-links" },
+              h("button", { type: "button", className: "sk-text sk-timeline-task", onClick: () => onOpen(item.task.id) }, item.task.title),
+              item.sessionId ? h("button", { type: "button", className: "sk-text",
+                title: item.sessionTitle || undefined, "aria-label": item.sessionTitle ? `打开来源会话：${item.sessionTitle}` : undefined,
+                onClick: () => onSession(item.sessionId) }, "打开来源会话") : null),
+            item.detail ? h("p", null, item.detail) : null))))),
+        events.length > limit ? h("button", { type: "button", className: "sk-btn", onClick: () => setLimit((current) => current + 40) }, "显示更多记录") : null);
+    }
+
+    function acceptanceEvidenceAt({ task, artifact }) {
+      const deliveredAt = artifact?.kind === "deliverable" ? timeValue(artifact.time) : 0;
+      return deliveredAt || timeValue(task.lastActivityAt) || timeValue(task.sessionContext?.lastActivityAt);
+    }
+
+    function floatingSummary(tasks, statuses, days, now = Date.now()) {
+      const projected = tasks.filter((task) => !task.archived).map((task) => withSessionStatus(task, statuses, now));
+      const index = new Map(projected.map((task) => [task.id, task]));
+      const cutoff = activityCutoff(days, now);
+      const rows = projected.filter((task) => !isHistoricalTask(task, cutoff)).map((task) => ({
+        task, signal: taskSignal(task, index, now), artifact: primaryArtifactOf(artifactsOf(task)),
+      }));
+      rows.sort((a, b) => taskActivityAt(b.task) - taskActivityAt(a.task) || a.task.id.localeCompare(b.task.id));
+      return {
+        acceptance: rows.filter(({ task, signal, artifact }) => signal?.label === "待验收" && !isAccepted(task) && canAcceptTask(task, artifact))
+          .sort((a, b) => acceptanceEvidenceAt(b) - acceptanceEvidenceAt(a)),
+        attention: rows.filter(({ signal }) => signal),
+        running: rows.filter(({ task }) => taskRunningLabel(task)),
+      };
+    }
+
+    function FloatingPanel({ host, prefs, open, sessionStatuses }) {
+      const { data, loading, error, reload } = useBoardData();
+      const [category, setCategory] = React.useState(prefs.floatSummaries[0]);
+      const [limit, setLimit] = React.useState(0);
+      const [continuation, setContinuation] = React.useState(null);
+      const continuationTrigger = React.useRef(null);
+      const [busyId, setBusyId] = React.useState("");
+      const [message, setMessage] = React.useState("");
+      const busy = React.useRef(false);
+      const [pulse, setPulse] = React.useState(0);
+      const previousAcceptance = React.useRef(null);
+      const root = React.useRef(null);
+      const heading = React.useRef(null);
+      const titleId = React.useId();
+      const panelId = React.useId();
+      const [now, setNow] = React.useState(Date.now);
+      React.useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), 60_000);
+        return () => clearInterval(timer);
+      }, []);
+      const summary = React.useMemo(() => floatingSummary(data?.tasks || [], sessionStatuses, data?.settings?.initialDays, now),
+        [data?.tasks, sessionStatuses, data?.settings?.initialDays, now]);
+      const metrics = prefs.floatSummaries.map((id) => ({ id, label: FLOAT_SUMMARIES[id], count: summary[id].length }));
+      React.useEffect(() => {
+        if (!data) return;
+        const current = prefs.floatSummaries.includes("acceptance") ? new Set(summary.acceptance.map(({ task }) => task.id)) : null;
+        const previous = previousAcceptance.current;
+        if (current && previous && [...current].some((id) => !previous.has(id))) setPulse((value) => value + 1);
+        previousAcceptance.current = current;
+      }, [data, prefs.floatSummaries, summary.acceptance]);
+      React.useEffect(() => {
+        if (open) return;
+        setLimit(0);
+        setContinuation(null);
+      }, [open]);
+      const selected = metrics.some((item) => item.id === category) ? category : metrics[0].id;
+      const continueTask = continuation && data?.tasks?.find((task) => task.id === continuation.id && !task.archived);
+      React.useEffect(() => {
+        if (continuation && !continueTask) setContinuation(null);
+      }, [continuation, continueTask]);
+      const visibleMetrics = metrics.filter(({ count }) => count > 0);
+      const showTrigger = open || (prefs.floatEnabled && (!prefs.floatHideEmpty || visibleMetrics.length > 0 || Boolean(error)));
+      const topLayer = typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.showPopover === "function";
+      React.useLayoutEffect(() => {
+        const node = root.current;
+        if (!topLayer || !showTrigger || !node) return undefined;
+        node.showPopover();
+        return () => { if (node.matches(":popover-open")) node.hidePopover(); };
+      }, [showTrigger, topLayer]);
+      React.useLayoutEffect(() => {
+        if (!open) return undefined;
+        const previousFocus = document.activeElement;
+        heading.current?.focus({ preventScroll: true });
+        const closeOutside = (event) => {
+          if (!root.current?.contains(event.target)) setFloatingOpen(false);
+        };
+        const closeOnEscape = (event) => {
+          if (event.target?.closest?.(".sk-continue-modal")) return;
+          if (event.key === "Escape" && !event.defaultPrevented && root.current?.contains(document.activeElement)) {
+            event.preventDefault();
+            event.stopPropagation();
+            setFloatingOpen(false);
+          }
+        };
+        document.addEventListener("pointerdown", closeOutside);
+        document.addEventListener("keydown", closeOnEscape, true);
+        return () => {
+          document.removeEventListener("pointerdown", closeOutside);
+          document.removeEventListener("keydown", closeOnEscape, true);
+          if (root.current?.contains(document.activeElement) && previousFocus?.isConnected) previousFocus.focus();
+        };
+      }, [open]);
+      const accept = async (task) => {
+        if (busy.current || !canAcceptTask(task) || isAccepted(task)) return;
+        busy.current = true;
+        heading.current?.focus({ preventScroll: true });
+        setBusyId(task.id);
+        setMessage("");
+        try {
+          await command("task.accept", { id: task.id, expectedUpdatedAt: task.updatedAt });
+          await reload(true);
+          setMessage(`已验收「${task.title}」`);
+        } catch (cause) {
+          setMessage(cause.status === 409 ? "任务已更新，请查看最新状态后再确认。" : `验收失败：${cause.message}`);
+          if (cause.status === 409) await reload(true);
+        } finally {
+          busy.current = false;
+          setBusyId("");
+        }
+      };
+      const navigate = (action, id) => {
+        if (action?.(id)) setFloatingOpen(false);
+        else setMessage("当前环境无法打开该入口。");
+      };
+      if (!showTrigger) return null;
+      const counts = metrics.map(({ label, count }) => `${label} ${count}`).join("，");
+      const rows = summary[selected];
+      const visibleLimit = limit || (selected === "running" ? 3 : 6);
+      return h("div", { ref: root, className: cx("sk-floating", "is-" + prefs.floatPosition), popover: topLayer ? "manual" : undefined },
+        open ? h("section", { id: panelId, className: "sk-float-panel", role: "dialog", "aria-labelledby": titleId, inert: Boolean(continueTask) },
+          h("header", null, h("h2", { ref: heading, tabIndex: -1, id: titleId }, "任务摘要"),
+            h("button", { type: "button", className: "sk-btn ghost", "aria-label": "关闭任务摘要", onClick: () => setFloatingOpen(false) }, "关闭")),
+          h("div", { className: "sk-float-metrics", role: "group", "aria-label": "任务摘要类别" },
+            metrics.map(({ id, label, count }) => h("button", { key: id, type: "button", className: "sk-btn", "aria-pressed": selected === id,
+              onClick: () => { setCategory(id); setLimit(0); } }, label, " ", count))),
+          h("div", { className: "sk-float-content" },
+            error ? h("p", { role: "alert" }, "连接异常。", h("button", { type: "button", className: "sk-text", onClick: () => reload(false) }, "重试")) : null,
+            !rows.length ? h("p", null, loading ? "正在加载任务…" : `暂无${FLOAT_SUMMARIES[selected]}任务。`) : null,
+            rows.slice(0, visibleLimit).map(({ task, signal, artifact }) => {
+              const mainSession = task.primarySessionId || sessionContextOf(task).sessionId;
+              const pending = task.pendingSessions || [];
+              const source = selected === "running" ? task.runningSessionIds?.[0] || mainSession :
+                signal?.sessionId || artifact?.sessionId || mainSession;
+              const ready = signal?.label === "待验收" && !isAccepted(task) && canAcceptTask(task, artifact);
+              const deliverable = artifact?.kind === "deliverable" ? artifact : null;
+              const at = ready ? acceptanceEvidenceAt({ task, artifact: deliverable }) : 0;
+              return h("article", { key: task.id, className: "sk-float-row" },
+                h("button", { type: "button", className: "sk-text sk-float-task", onClick: (event) =>
+                  mainSession && (event.metaKey || event.altKey) ? navigate(host.openSession, mainSession) : navigate(host.openTask, task.id) }, task.title),
+                h("p", null, [task.workspaceTitle, selected === "running" ? taskRunningLabel(task) : signal?.label,
+                  deliverable?.name || signal?.text, at ? relTime(at) : ""].filter(Boolean).join(" · ")),
+                ready && task.acceptanceCriteria ? h("p", { className: "sk-float-criteria", title: task.acceptanceCriteria }, "验收条件 · ", task.acceptanceCriteria) : null,
+                h("div", { className: "sk-inline-actions" },
+                  source && (selected === "running" || !pending.length) ? h("button", { type: "button", className: "sk-btn ghost",
+                    onClick: () => navigate(host.openSession, source) },
+                    selected === "running" ? "打开运行会话" : "打开来源") : null,
+                  ready && deliverable?.path && (deliverable.sessionId || mainSession) && host.openResource
+                    ? h("button", { type: "button", className: "sk-btn ghost", onClick: async () => {
+                        if (await host.openResource(deliverable.sessionId || mainSession, deliverable.path)) setFloatingOpen(false);
+                        else setMessage("无法预览交付物，请打开来源会话。");
+                      } }, "查看交付物") : null,
+                  ready ? h("button", { type: "button", className: "sk-btn ghost", disabled: Boolean(busyId || error),
+                    onClick: (event) => {
+                      continuationTrigger.current = event.currentTarget;
+                      setMessage("");
+                      setContinuation({ id: task.id, sessionId: deliverable?.sessionId || mainSession });
+                    } }, "继续") : null,
+                  ready
+                    ? h("button", { type: "button", className: "sk-btn", disabled: Boolean(busyId || error),
+                        onClick: () => accept(task) }, busyId === task.id ? "正在验收…" : "确认验收") : null),
+                renderSessionActions(pending, (id) => navigate(host.openSession, id)));
+            }),
+            rows.length > visibleLimit ? h("button", { type: "button", className: "sk-btn",
+              onClick: () => setLimit(selected === "running" ? rows.length : visibleLimit + 6) },
+              selected === "running" ? `查看全部 ${rows.length} 项` : "显示更多任务") : null),
+          h("footer", null, h("span", { role: "status" }, message),
+            h("button", { type: "button", className: "sk-text", onClick: () => navigate(host.openPage) }, "打开全局看板"))) : null,
+        h("button", { type: "button", className: cx("sk-float-trigger", "is-" + prefs.floatStyle),
+          title: counts, "aria-label": `任务摘要，${counts}`, "aria-expanded": open, "aria-controls": open ? panelId : undefined, disabled: Boolean(continueTask),
+          onClick: () => setFloatingOpen(!open) },
+          h("span", { key: pulse, className: cx("sk-float-mark", pulse > 0 && "is-new") }, h(Icon, { name: "board", size: 17 })),
+          prefs.floatStyle === "badge" ? h("span", null, (visibleMetrics[0] || metrics[0]).count) :
+            prefs.floatStyle === "pill" ? h("span", null, metrics.map(({ label, count }) => `${label} ${count}`).join(" · ")) :
+            metrics.map(({ id, label, count }) => h("span", { key: id }, label, " ", h("b", null, count)))),
+        open && continueTask ? h(ContinueTaskModal, {
+          task: continueTask, initialTarget: "session", initialPurpose: "verify", initialSessionId: continuation.sessionId,
+          ctxProps: { host }, workspaces: data?.workspaces, pushToast: setMessage, feedback: message,
+          returnFocus: continuationTrigger,
+          onClose: () => setContinuation(null), onDone: () => { setFloatingOpen(false); void reload(true); },
+        }) : null);
+    }
+
+    function FloatingEntry({ host, useSessionStatus }) {
+      const prefs = useUiPrefs();
+      const [open, setOpen] = React.useState(() => floatOpen);
+      React.useEffect(() => {
+        floatListeners.add(setOpen);
+        setOpen(floatOpen);
+        return () => floatListeners.delete(setOpen);
+      }, []);
+      if (!prefs.floatEnabled && !open) return null;
+      const props = { host, prefs, open };
+      return typeof useSessionStatus === "function" ? h(FloatingWithStatus, { ...props, useSessionStatus }) : h(FloatingPanel, props);
+    }
+
+    function FloatingWithStatus({ useSessionStatus, ...props }) {
+      const sessionStatuses = useSessionStatus((snapshot) => snapshot);
+      return h(FloatingPanel, { ...props, sessionStatuses });
+    }
+
+    function ProjectModal({ project, workspaces, onClose, onSave, onChanged }) {
       const values = {
         name: project?.name || "", notes: project?.notes || "", dueDate: project?.dueDate || "",
-        workspaceId: project?.workspaceId || (!project ? defaultWorkspaceId : ""), archived: project?.archived === true,
+        workspaceId: project?.workspaceId || "", archived: project?.archived === true,
       };
       const base = React.useRef({ values, revision: project?.updatedAt });
       const [draft, setDraft] = React.useState(values);
@@ -4462,13 +4874,13 @@ button.sk-task-row-main{cursor:pointer}
               value: draft.name, maxLength: TEXT_LIMITS.projectName, onChange: set("name") })),
             h("div", { className: "sk-planning-fields" },
               h("label", { className: "sk-field" }, "到期日", h("input", { className: "sk-input", type: "date", value: draft.dueDate, onChange: set("dueDate") })),
-              h("label", { className: "sk-field" }, "自动归入的工作区",
+              h("label", { className: "sk-field" }, "自动归入来源（可选）",
                 h("select", { className: "sk-select", value: draft.workspaceId, onChange: set("workspaceId") },
                   h("option", { value: "" }, "不自动归入"),
                   draft.workspaceId && !workspaces.some((workspace) => workspace.id === draft.workspaceId)
                     ? h("option", { value: draft.workspaceId }, "原工作区（不可用）") : null,
                   workspaces.map((workspace) => h("option", { key: workspace.id, value: workspace.id }, workspace.title))))),
-            h("p", { className: "sub" }, "绑定后，该工作区未来由扫描新建的任务会进入这个项目。已有任务可在列表中批量归入。"),
+            h("p", { className: "sub" }, "自建项目可以组织不同工作区的任务。选定来源后，该工作区未来自动建卡时也会归入此项目。"),
             h("label", { className: "sk-field" }, "项目备注", h("textarea", { className: "sk-textarea", rows: 4,
               maxLength: TEXT_LIMITS.notes, value: draft.notes, onChange: set("notes") })),
             project ? h("label", { className: "sk-inline-actions" }, h("input", { type: "checkbox", checked: draft.archived,
@@ -4765,7 +5177,7 @@ button.sk-task-row-main{cursor:pointer}
           h("p", null, data.storage?.writable === false ? "存储暂不可写" : "存储可用",
             data.storage?.savedAt ? ` · 最近保存 ${relTimeValue(data.storage.savedAt)}` : ""),
           h("div", { className: "sk-batchbar" },
-            h("button", { className: "sk-btn", type: "button", onClick: () => startScan("full"), disabled: data.scan?.state === "running" }, "全量重扫"),
+            h("button", { className: "sk-btn", type: "button", onClick: () => startScan("full"), disabled: data.scan?.state === "running" }, "扫描全部历史"),
             data.storage?.writable === false ? h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => run(() => command("storage.retry"), "看板已保存") }, "重试保存") : null,
             h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => run(downloadExport, "已导出看板备份") }, "导出备份")),
           h("label", { className: "sk-field" }, "选择备份以预览",
@@ -4811,7 +5223,7 @@ button.sk-task-row-main{cursor:pointer}
       const ctxProps = props || {};
       const surface = ctxProps.surface === "side" ? "side" : "page";
       const host = ctxProps.host || {};
-      const [prefs, setPrefs] = React.useState(readPrefs);
+      const prefs = useUiPrefs();
       const rootRef = React.useRef(null);
       const observerRef = React.useRef(null);
       const [rootWidth, setRootWidth] = React.useState(0);
@@ -4885,7 +5297,7 @@ button.sk-task-row-main{cursor:pointer}
       const [settingsOpen, setSettingsOpen] = React.useState(false);
       const [draggingId, setDraggingId] = React.useState(null);
       const [scanBusy, setScanBusy] = React.useState(false);
-      const [nowTick, setNowTick] = React.useState(0);
+      const [nowTick, setNowTick] = React.useState(Date.now);
       const [filterOpen, setFilterOpen] = React.useState(false);
       const [moreAnchor, setMoreAnchor] = React.useState(null);
       const [quickTask, setQuickTask] = React.useState(null);
@@ -4910,7 +5322,7 @@ button.sk-task-row-main{cursor:pointer}
       React.useEffect(() => { setQuickTask(null); }, [mode, sideStatus, filters, currentOnly]);
 
       React.useEffect(() => {
-        const timer = setInterval(() => setNowTick((value) => value + 1), 30_000);
+        const timer = setInterval(() => setNowTick(Date.now()), 30_000);
         return () => clearInterval(timer);
       }, []);
 
@@ -4918,6 +5330,7 @@ button.sk-task-row-main{cursor:pointer}
         const onKey = (event) => {
           if (event.defaultPrevented) return;
           const target = event.target;
+          if (target?.closest?.(".sk-floating")) return;
           const root = rootRef.current;
           const activeSurface = target?.closest?.(".sk-page");
           if (!root || (activeSurface && activeSurface !== root) || (!activeSurface && surface === "side")) return;
@@ -4996,6 +5409,7 @@ button.sk-task-row-main{cursor:pointer}
       const aiRoute = data?.aiRoute;
       const scan = (data && data.scan) || { state: "idle" };
       const workspaces = (data && data.workspaces) || [];
+      const selectedWorkspace = workspaces.find((workspace) => workspace.id === filters.workspace);
       const stats = (data && data.stats) || { byStatus: {}, doneRate: 0, total: 0 };
       const usage = usageOf(data);
       const activeFilterCount = [filters.priority, filters.source, filters.tag, filters.showArchived, filters.running, projects.length && filters.workspace, isNarrow && filters.query.trim()].filter(Boolean).length;
@@ -5022,14 +5436,16 @@ button.sk-task-row-main{cursor:pointer}
         });
       }, [data, workspaceFilterIds, tags, workspaces.length, tasks.length, projects]);
 
-      const visible = React.useMemo(() => {
+      const cutoff = activityCutoff(settings.initialDays, nowTick);
+      const historicalIds = React.useMemo(() => new Set(tasks.filter((task) => isHistoricalTask(task, cutoff)).map((task) => task.id)), [tasks, cutoff]);
+      const filteredTasks = React.useMemo(() => {
         const terms = filters.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
         return tasks.filter((task) => {
           if (!filters.showArchived && task.archived) return false;
           if (sessionId && currentOnly && task.primarySessionId !== sessionId && !task.sessions?.some((item) => item.id === sessionId)) return false;
           if (filters.workspace && task.workspaceId !== filters.workspace) return false;
           if (filters.project && (task.projectId || "__none") !== filters.project) return false;
-          if (filters.running && !(task.runningSessions > 0)) return false;
+          if (filters.running && !taskRunningLabel(task)) return false;
           if (filters.priority && task.priority !== filters.priority) return false;
           if (filters.tag && !(task.tags || []).includes(filters.tag)) return false;
           if (filters.source === "ai" && task.origin === "manual") return false;
@@ -5060,6 +5476,8 @@ button.sk-task-row-main{cursor:pointer}
           return true;
         });
       }, [tasks, filters, sessionId, currentOnly]);
+      const visible = React.useMemo(() => filteredTasks.filter((task) => filters.activity === "all" ||
+        historicalIds.has(task.id) === (filters.activity === "history")), [filteredTasks, filters.activity, historicalIds]);
 
       const byStatus = React.useMemo(() => {
         const map = { backlog: [], in_progress: [], blocked: [], done: [] };
@@ -5082,20 +5500,35 @@ button.sk-task-row-main{cursor:pointer}
         return result;
       }, [tasks, taskIndex, nowTick]);
       const attentionCount = visible.filter((task) => signals.has(task.id)).length;
-      const runningCount = visible.filter((task) => task.runningSessions > 0).length;
+      const runningCount = visible.filter(taskRunningLabel).length;
       const emptyProject = selectedProject && !selectedProject.archived &&
         !tasks.some((task) => task.projectId === selectedProject.id && !task.archived);
-      const openProject = (id, nextMode = "board") => {
-        setFilters({ ...EMPTY_FILTERS, project: id });
+      const openScope = (scope, nextMode, activity) => {
+        setFilters({ ...EMPTY_FILTERS, ...scope, activity });
         setCurrentOnly(false);
-        const statuses = new Set(tasks.filter((task) => !task.archived && task.projectId === id).map(statusOf));
+        const statuses = new Set(tasks.filter((task) => !task.archived &&
+          (activity === "all" || historicalIds.has(task.id) === (activity === "history")) &&
+          (scope.workspace ? task.workspaceId === scope.workspace : (task.projectId || "__none") === scope.project)).map(statusOf));
         setSideStatus(statuses.has("in_progress") ? "in_progress" : STATUS_ORDER.find((status) => statuses.has(status)) || "backlog");
         setMode(nextMode);
       };
+      const openProject = (id, mode = "board", activity = "recent") => openScope({ project: id }, mode, activity);
+      const openWorkspaceProject = (id, mode = "timeline", activity = "recent") => openScope({ workspace: id }, mode, activity);
       const openAttentionSession = (id) => {
         if (!host.openSession?.(id)) pushToast("无法打开来源会话", "error");
       };
       const drawerTask = drawerId ? taskIndex.get(drawerId) : null;
+      React.useEffect(() => {
+        if (surface !== "page" || !data) return undefined;
+        const open = () => {
+          if (!requestedPageTask) return;
+          setDrawerId(requestedPageTask);
+          requestedPageTask = null;
+        };
+        pageTaskListeners.add(open);
+        open();
+        return () => pageTaskListeners.delete(open);
+      }, [surface, Boolean(data)]);
       const liveHandoff = pendingHandoff?.expires > Date.now() ? pendingHandoff : null;
       const attachHandoff = async () => {
         if (!liveHandoff || !sessionId) return;
@@ -5111,8 +5544,8 @@ button.sk-task-row-main{cursor:pointer}
       };
       // S9：任务被删除后 drawerId 残留在 state 里；清理掉，避免后续意外重开或状态陈旧。
       React.useEffect(() => {
-        if (drawerId && !drawerTask) setDrawerId(null);
-      }, [drawerId, drawerTask]);
+        if (data && drawerId && !drawerTask) setDrawerId(null);
+      }, [data, drawerId, drawerTask]);
 
       const scanRunning = scan.state === "running";
       // 运行中 AI 进度：Host 已把 aiBudgetMode 解析成 scan.aiBudget；旧 Host 无该字段时只显示已用次数。
@@ -5281,8 +5714,7 @@ button.sk-task-row-main{cursor:pointer}
         );
       }
 
-      const scopedStats = mode === "schedule" || (!["projects", "maintenance"].includes(mode) &&
-        (filters.project || filters.workspace || (sessionId && currentOnly) || activeFilterCount || filters.query.trim()));
+      const scopedStats = !["projects", "maintenance"].includes(mode);
       const summaryTasks = mode === "schedule" ? visible.filter((task) => !task.archived && task.status !== "done") : visible;
       const statusCounts = scopedStats
         ? summaryTasks.reduce((counts, task) => {
@@ -5317,13 +5749,9 @@ button.sk-task-row-main{cursor:pointer}
         }
       };
 
-      const openSideFromPage = () => {
-        const ok = host.openSide ? host.openSide() : false;
-        if (!ok) pushToast("请先在会话中打开右侧栏，再回到这里", "error");
-      };
-      const openPageFromSide = () => {
-        const ok = host.openPage ? host.openPage() : false;
-        if (!ok) pushToast("当前环境无法切换到全页面板", "error");
+      const switchSurface = (next) => {
+        if (host.openSurface?.(next, sessionId)) updatePrefs({ surface: next });
+        else pushToast("当前环境无法打开此看板形态", "error");
       };
       const boardMenuItems = [
         mode !== "maintenance" && { label: "查看扫描详情", icon: "refresh", run: () => setMode("maintenance") },
@@ -5381,9 +5809,7 @@ button.sk-task-row-main{cursor:pointer}
         h("div", { className: "sk-header-actions" },
           !isNarrow && mode !== "projects" ? searchField : null,
           scanButton, modelButton, chatButton, settingsButton,
-          surface === "side"
-            ? prefs.fullEntry && actionIcon("layout", "在全页面板打开", openPageFromSide)
-            : prefs.sideEntry && actionIcon("panelRight", "在右侧栏打开", openSideFromPage),
+          h(SurfacePicker, { value: surface, onChange: switchSurface, className: "sk-select sk-surface-picker" }),
           mode === "projects" || selectedProject?.archived ? null : surface === "side" || isNarrow
             ? actionIcon("plus", "新建任务", () => setNewTaskStatus("backlog"), "is-primary")
             : newTextButton,
@@ -5408,6 +5834,7 @@ button.sk-task-row-main{cursor:pointer}
       workspaces.filter((workspace) => workspace.included !== false)
         .map((workspace) => h("option", { key: workspace.id, value: workspace.id }, workspace.title)));
       const showProjectFilter = projects.length > 0 || filters.project === "__none";
+      const scopeValue = filters.project || (filters.workspace ? `ws:${filters.workspace}` : "");
 
       return h(
         "div",
@@ -5430,13 +5857,24 @@ button.sk-task-row-main{cursor:pointer}
           h(
             "span",
             { className: "sk-ws-picker" },
-            showProjectFilter ? h("select", { className: "sk-select sk-ws-select", "aria-label": "按项目筛选", value: filters.project,
-              onChange: (event) => setFilters((value) => ({ ...value, project: event.target.value })) },
-              h("option", { value: "" }, "全部项目"), h("option", { value: "__none" }, "未归属"),
-              projects.map((project) => h("option", { key: project.id, value: project.id }, project.name + (project.archived ? "（已归档）" : ""))))
-              : workspaceSelect("sk-select sk-ws-select"),
+            h("select", { className: "sk-select sk-ws-select", "aria-label": "按项目筛选", value: scopeValue,
+              onChange: (event) => {
+                const scope = event.target.value;
+                setFilters((value) => ({ ...value, project: scope.startsWith("ws:") ? "" : scope, workspace: scope.startsWith("ws:") ? scope.slice(3) : "" }));
+                setCurrentOnly(false);
+              } },
+              h("option", { value: "" }, "全部项目"),
+              workspaces.length ? h("optgroup", { label: "工作区项目" }, workspaces.filter((workspace) => workspace.included !== false)
+                .map((workspace) => h("option", { key: workspace.id, value: `ws:${workspace.id}` }, workspace.title))) : null,
+              showProjectFilter ? h("optgroup", { label: "自建项目" },
+                projects.map((project) => h("option", { key: project.id, value: project.id }, project.name + (project.archived ? "（已归档）" : ""))),
+                h("option", { value: "__none" }, "未归入自建项目")) : null),
             h(Icon, { name: "chevronDown", size: 12, className: "sk-ws-caret" }),
           ),
+          !["projects", "maintenance"].includes(mode) ? h("select", { className: "sk-select sk-activity-picker", "aria-label": "任务时间范围",
+            value: filters.activity, title: `近期：最近 ${settings.initialDays || 30} 天`,
+            onChange: (event) => setFilters((value) => ({ ...value, activity: event.target.value })) },
+            Object.entries(ACTIVITY_RANGES).map(([id, label]) => h("option", { key: id, value: id }, label))) : null,
           sessionId ? h("button", { type: "button", className: "sk-slim-icon sk-session-scope", "aria-pressed": currentOnly,
             title: currentOnly ? "当前会话，点击查看全部会话" : "全部会话，点击仅看当前会话",
             onClick: () => setCurrentOnly((value) => !value),
@@ -5547,10 +5985,13 @@ button.sk-task-row-main{cursor:pointer}
               h("button", { type: "button", className: "sk-text", onClick: () => { pendingHandoff = null; setHandoffTick((value) => value + 1); } }, "关闭"))
           : null,
         mode === "projects"
-          ? h(ProjectsView, { projects, tasks, signals, onOpen: openProject, onNew: () => setProjectEditor("new"),
+          ? h(ProjectsView, { projects, workspaces, tasks, historicalIds, signals, onOpen: openProject, onWorkspace: openWorkspaceProject, onNew: () => setProjectEditor("new"),
               onEdit: setProjectEditor, today: localDateKey(Date.now()) })
           : mode === "maintenance"
           ? h(MaintenanceView, { data, reload, pushToast, startScan })
+          : mode === "timeline"
+            ? h(TimelineView, { key: `${scopeValue}:${filters.activity}`, tasks: filteredTasks, range: filters.activity, cutoff,
+                title: selectedProject?.name || selectedWorkspace?.title, onOpen: setDrawerId, onSession: openAttentionSession })
           : mode === "artifacts"
             ? h(ArtifactsView, { tasks: visible, host, desktopFiles, pushToast, onOpen: setDrawerId })
             : mode !== "board"
@@ -5582,7 +6023,7 @@ button.sk-task-row-main{cursor:pointer}
                   "div",
                   { className: "sk-empty-v3" },
                   "看板还是空的，扫描会话后会自动建卡。",
-                  h("button", { type: "button", className: "sk-text", onClick: () => startScan("full") }, "立即扫描"),
+                  h("button", { type: "button", className: "sk-text", onClick: () => startScan("incremental") }, "扫描近期会话"),
                 ),
               )
             : isNarrow
@@ -5638,7 +6079,7 @@ button.sk-task-row-main{cursor:pointer}
           : null,
         projectEditor && (projectEditor === "new" || projects.some((project) => project.id === projectEditor))
           ? h(ProjectModal, { key: projectEditor, project: projects.find((project) => project.id === projectEditor), workspaces,
-              defaultWorkspaceId: filters.workspace || "", onClose: () => setProjectEditor(null),
+              onClose: () => setProjectEditor(null),
               onChanged: () => reload(true),
               onSave: async () => { setProjectEditor(null); pushToast("项目已保存", "info"); await reload(true); } })
           : null,
@@ -5652,10 +6093,7 @@ button.sk-task-row-main{cursor:pointer}
               workspaces,
               prefs,
               usage,
-              onPrefsChange: (next) => {
-                writePrefs(next);
-                setPrefs(next);
-              },
+              onPrefsChange: updatePrefs,
               onClose: () => setSettingsOpen(false),
               onSave: async () => { setSettingsOpen(false); await reload(true); },
               onScan: async (mode) => { setSettingsOpen(false); await startScan(mode); },
@@ -5726,6 +6164,15 @@ button.sk-task-row-main{cursor:pointer}
         const tag = ensureStyle();
         return () => tag.remove();
       }, "super-kanban: styles");
+      ctx.effect(() => {
+        const sync = (event) => {
+          if (event.key !== PREFS_KEY && event.key !== null) return;
+          uiPrefs = readPrefs();
+          for (const listener of prefsListeners) listener(uiPrefs);
+        };
+        window.addEventListener("storage", sync);
+        return () => window.removeEventListener("storage", sync);
+      }, "super-kanban: preferences");
 
       let resourceRequest = 0;
       const hostApi = {
@@ -5795,6 +6242,19 @@ button.sk-task-row-main{cursor:pointer}
             /* layout service unavailable */
           }
           return false;
+        },
+        openTask(id) {
+          if (!hostApi.openPage()) return false;
+          requestedPageTask = id;
+          for (const listener of pageTaskListeners) listener();
+          return true;
+        },
+        openSurface(surface, sessionId) {
+          if (surface === "page") return hostApi.openPage();
+          if (surface === "side") return sessionId ? hostApi.openSideTab(sessionId) : hostApi.openSide();
+          if (surface !== "float") return false;
+          setFloatingOpen(true);
+          return true;
         },
         async prepareSession(workspaceId, prompt) {
           const ui = ctx.get("uiWorkspace");
@@ -5941,8 +6401,6 @@ button.sk-task-row-main{cursor:pointer}
         host: hostApi,
         openSession: (sessionId) => hostApi.openSession(sessionId),
       });
-      const prefs = readPrefs();
-
       // S3：任何 render 异常都被错误边界接住，只坏插件面板。
       const WithSessionStatus = (props) => {
         const sessionStatuses = props.useSessionStatus((snapshot) => snapshot);
@@ -5962,20 +6420,21 @@ button.sk-task-row-main{cursor:pointer}
         return h(Icon, { name: "board", size: size || 18 });
       }
 
-      const HeaderKanbanButton = ({ sessionId }) =>
-        h(
-          "button",
-          {
-            type: "button",
-            className: "sk-header-btn",
-            title: "打开任务看板",
-            "aria-label": "打开任务看板",
-            onClick: () => hostApi.openSideTab(sessionId),
-          },
-          h(Icon, { name: "board", size: 16 }),
-        );
+      const HeaderKanbanButton = ({ sessionId }) => {
+        const prefs = useUiPrefs();
+        const open = (surface) => {
+          if (hostApi.openSurface(surface, sessionId)) return true;
+          return surface !== "page" && hostApi.openPage();
+        };
+        return h("div", { className: "sk-host-header" },
+          h("button", { type: "button", className: "sk-header-btn", title: `打开${SURFACES[prefs.surface]}`,
+            "aria-label": `打开${SURFACES[prefs.surface]}`, onClick: () => open(prefs.surface) },
+            h(Icon, { name: "board", size: 16 })),
+          h(SurfacePicker, { value: prefs.surface, className: "sk-host-surface-picker", label: "切换看板形态",
+            onChange: (surface) => { updatePrefs({ surface }); open(surface); } }));
+      };
 
-      if (prefs.fullEntry) {
+      {
         ctx.slots.inject("main", function* () {
           yield ctx.slots.register({ name: "main", key: PANEL_ID, locale: NS }, PageKanbanBody);
         });
@@ -5993,7 +6452,7 @@ button.sk-task-row-main{cursor:pointer}
         );
       }
 
-      if (prefs.sideEntry) {
+      {
         ctx.effect(
           () =>
             ctx.sidebarRightTabs.register({
@@ -6022,6 +6481,9 @@ button.sk-task-row-main{cursor:pointer}
           ),
         );
       }
+      ctx.slots.inject("shell.overlay", () =>
+        ctx.slots.register({ name: "shell.overlay", id: "super-kanban-summary" },
+          (props) => h(BoardErrorBoundary, null, h(FloatingEntry, { ...props, host: hostApi }))));
     }
 
     return { apply, inject: [

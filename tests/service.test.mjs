@@ -16,7 +16,7 @@ import { EventEmitter } from "node:events";
 
 import { createKanbanService } from "../server/service.mjs";
 import { SESSION_FILE_NAME } from "../server/sessions.mjs";
-import { createStore, TEXT_LIMITS } from "../server/store.mjs";
+import { createEmptyState, createStore, TEXT_LIMITS } from "../server/store.mjs";
 
 // Recent enough for the default initialDays=30 eligibility window, old enough
 // that the session is not treated as live.
@@ -53,7 +53,7 @@ function writeFileDeep(file, content) {
  */
 function seedSessionHome(
   home,
-  { sessionId = "sess-alpha", workspaceId = "ws-demo", title = "Fix login flow", todo = "freshPending", artifactPath = "README.md" } = {},
+  { sessionId = "sess-alpha", workspaceId = "ws-demo", title = "Fix login flow", todo = "freshPending", artifactPath = "README.md", time = T0 } = {},
 ) {
   const workspaceDir = path.join(home, "workspace-demo");
   fs.mkdirSync(workspaceDir, { recursive: true });
@@ -70,19 +70,19 @@ function seedSessionHome(
           { content: "补充测试", status: "pending" },
         ];
   const todoSeq = todo === "stalePending" ? 2 : 6;
-  const todoTime = todo === "stalePending" ? T0 + 1500 : T0 + 5000;
+  const todoTime = todo === "stalePending" ? time + 1500 : time + 5000;
 
   const events = [
-    event("session", 1, T0, { id: sessionId, createdAt: T0, cwd: workspaceDir }),
-    event("session/title", 3, T0 + 1000, { title, source: { kind: "provider" } }),
-    event("user/message", 3, T0 + 2000, { content: [{ type: "text", text: "修复登录流程并补测试" }] }),
-    event("turn/start", 4, T0 + 3000, { turn: 1 }),
-    event("assistant/message", 5, T0 + 4000, { message: { content: [{ type: "text", text: "已修复登录流程" }] } }),
+    event("session", 1, time, { id: sessionId, createdAt: time, cwd: workspaceDir }),
+    event("session/title", 3, time + 1000, { title, source: { kind: "provider" } }),
+    event("user/message", 3, time + 2000, { content: [{ type: "text", text: "修复登录流程并补测试" }] }),
+    event("turn/start", 4, time + 3000, { turn: 1 }),
+    event("assistant/message", 5, time + 4000, { message: { content: [{ type: "text", text: "已修复登录流程" }] } }),
     event("todo/write", todoSeq, todoTime, { todos }),
-    event("tool/call", 7, T0 + 6000, { name: "write", callId: "call-1", arguments: JSON.stringify({ path: artifactPath }) }),
-    event("tool/result", 8, T0 + 7000, { toolCallId: "call-1", message: { content: [{ type: "text", text: "written" }] } }),
-    event("deliverables/presented", 9, T0 + 8000, { files: [{ path: artifactPath, description: "说明" }] }),
-    event("turn/end", 10, T0 + 9000, { turn: 1, reason: { kind: "completed" } }),
+    event("tool/call", 7, time + 6000, { name: "write", callId: "call-1", arguments: JSON.stringify({ path: artifactPath }) }),
+    event("tool/result", 8, time + 7000, { toolCallId: "call-1", message: { content: [{ type: "text", text: "written" }] } }),
+    event("deliverables/presented", 9, time + 8000, { files: [{ path: artifactPath, description: "说明" }] }),
+    event("turn/end", 10, time + 9000, { turn: 1, reason: { kind: "completed" } }),
   ];
   const sessionDir = path.join(home, "sessions", "escaped-demo", sessionId);
   writeFileDeep(path.join(sessionDir, SESSION_FILE_NAME), framesOf(events));
@@ -90,11 +90,11 @@ function seedSessionHome(
     path.join(home, "storages", "session_projcache", "sessions", `${sessionId}.json`),
     JSON.stringify({
       record: {
-        identity: { createdAt: T0, cwd: workspaceDir },
+        identity: { createdAt: time, cwd: workspaceDir },
         rows: {
           title: { val: title },
           sessionStats: { val: { turns: 1 } },
-          timeContext: { val: { lastMessageTime: T0 + 9000 } },
+          timeContext: { val: { lastMessageTime: time + 9000 } },
         },
       },
     }),
@@ -109,8 +109,8 @@ function seedSessionHome(
             path: workspaceDir,
             title: "Demo Workspace",
             sessionIds: [sessionId],
-            createdAt: new Date(T0).toISOString(),
-            updatedAt: new Date(T0 + 9000).toISOString(),
+            createdAt: new Date(time).toISOString(),
+            updatedAt: new Date(time + 9000).toISOString(),
           },
         },
       },
@@ -922,6 +922,79 @@ test("a scan survives corrupt sessions and still cards the healthy ones", async 
   const cache = readCacheFile(home);
   assert.ok(cache.sessions["sess-alpha"]);
   assert.match(cache.sessions["sess-corrupt"].meta.parseError, /decompress-failed/);
+});
+
+test("rolling scans retain historical summaries and reactivate the same task after a new turn", async (t) => {
+  const time = Date.now() - 45 * 86_400_000;
+  const { home, service, fixture } = await setup(t, { withSessions: true, sessionOptions: { time } });
+  const file = path.join(fixture.sessionDir, SESSION_FILE_NAME);
+  fs.utimesSync(file, time / 1000, time / 1000);
+  const scan = async (mode = "incremental") => {
+    await command(service, "scan.start", { mode });
+    await waitForScan(service);
+    return (await request(service, { route: "/state" })).json;
+  };
+  const old = await scan();
+  assert.equal(old.scan.historicalSkipped, 1);
+  assert.equal(old.tasks.length, 0);
+  assert.equal(readCacheFile(home).sessions["sess-alpha"].unparsed, true);
+  assert.equal(readCacheFile(home).sessions["sess-alpha"].meta.title, "Fix login flow");
+  await command(service, "settings.update", { patch: { initialDays: 90 } });
+  const wide = await scan();
+  assert.equal(wide.tasks.length, 1);
+  const task = wide.tasks[0];
+  await command(service, "settings.update", { patch: { initialDays: 7 } });
+  const history = await scan();
+  assert.equal(history.scan.historicalSkipped, 1);
+  assert.deepEqual(history.tasks[0], task);
+  const full = await scan("full");
+  assert.equal(full.scan.historicalSkipped, 0);
+  const resumedAt = Date.now() - 10_000;
+  fs.appendFileSync(file, framesOf([
+    event("user/message", 11, resumedAt, { content: [{ type: "text", text: "继续修复登录流程" }] }),
+    event("turn/start", 12, resumedAt + 100, { turn: 2 }),
+    event("turn/end", 13, resumedAt + 200, { turn: 2, reason: { kind: "completed" } }),
+  ]));
+  const resumed = await scan();
+  assert.equal(resumed.scan.historicalSkipped, 0);
+  assert.equal(resumed.tasks.length, 1);
+  assert.equal(resumed.tasks[0].id, task.id);
+  assert.ok(resumed.tasks[0].lastActivityAt >= resumedAt);
+});
+
+test("AI receives the bound card first and recent same-workspace candidates in activity order", async (t) => {
+  const prompts = [];
+  const llm = {
+    listProviders: () => [{ id: "fake" }],
+    async *stream({ messages }) {
+      prompts.push(messages[0].content[0].text);
+      yield { type: "text-delta", text: JSON.stringify({ tasks: [{ title: "修复登录流程", status: "in_progress" }] }) };
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+  };
+  const card = (id, title, lastActivityAt, fields = {}) => ({
+    id, title, lastActivityAt, origin: "auto", status: "in_progress", workspaceId: "ws-demo", ...fields,
+  });
+  const { service } = await setup(t, {
+    withSessions: true,
+    ctx: { get: (name) => ({ llm, agentDefaultModel: { currentSelection: () => ({ provider: "fake", model: "fake" }) } })[name] },
+    prepare(home) {
+      const state = createEmptyState();
+      state.tasks = [
+        card("history", "无关历史卡", T0 - 40 * 86_400_000),
+        card("older", "较早候选", T0 - 2000),
+        card("other", "其他工作区", T0, { workspaceId: "ws-other" }),
+        card("bound", "已关联任务", T0 - 45 * 86_400_000, { primarySessionId: "sess-alpha" }),
+        card("recent", "最新候选", T0 - 1000),
+      ];
+      createStore({ dshHome: home }).saveState(state);
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /已关联任务.*最新候选.*较早候选/s);
+  assert.doesNotMatch(prompts[0], /无关历史卡|其他工作区/);
 });
 
 test("unchanged sessions are not re-parsed on every scan (no credential case)", async (t) => {

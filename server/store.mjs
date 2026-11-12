@@ -199,6 +199,7 @@ export function emptyScanState() {
     finishedAt: null,
     processed: 0,
     total: 0,
+    historicalSkipped: 0,
     newTasks: 0,
     updatedTasks: 0,
     aiCalls: 0,

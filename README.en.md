@@ -17,7 +17,7 @@
 ### Install
 
 - **Plugin market** · In DSH, open **Plugins → Discover** and add `https://topmindspace.github.io/dsh-super-kanban/index.json`. Open **Super Kanban**, choose a version, and install it. If Discover is missing, enable the experimental plugin market using the [installation guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐).
-- **npm** · Open **Plugins → Add plugin** and enter `dsh-super-kanban@0.8.0`. Replace `0.8.0` with the version you want.
+- **npm** · Open **Plugins → Add plugin** and enter `dsh-super-kanban@0.9.0`. Replace `0.9.0` with the version you want.
 - **Git or local folder** · Add the repository URL or select a local folder in the plugin page. To pin a version, check out its tag and follow the [source installation steps](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本).
 
 Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or uninstall](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)
@@ -25,9 +25,9 @@ Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or u
 ### First run
 
 1. Open **任务看板** (Task board) from the left sidebar, or use the board icon at the top of a conversation to open it on the right.
-2. Confirm the scan scope in settings and select **扫描** (Scan). The initial scan covers the last 30 days by default. Check the scan button tooltip or Maintenance for results.
+2. Confirm the activity window in settings and select **扫描** (Scan). By default, incremental scans cover sessions active in the last 30 days. Check the scan button tooltip or Maintenance for results.
 3. Open **待处理** (Inbox) to find sessions that need you, or open a task to see its acceptance criteria and main deliverable.
-4. Choose **继续此任务** (Continue task) or **验收产出** (Review deliverables). Check the draft, put it in a linked or new session, and send it yourself.
+4. Review the deliverables and select **确认验收** (Confirm acceptance). To do more work, choose **继续此任务** (Continue task), review the draft, place it in a linked or new session, and send it yourself.
 
 ## Features
 
@@ -35,12 +35,12 @@ Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or u
 
 - **AI task organization** · Incremental scans extract goals, progress, blockers, and deliverables to create or update task cards. Link multiple sessions to one task. When auto-scan is enabled, a completed turn can bring the next scan forward.
 - **Live status and inbox** · Filter running tasks, find requests for approval, answers or review, and see blockers and pending deliverables. Open the corresponding session directly.
-- **Full-page board and conversation sidebar** · See the whole board or keep a compact board next to the chat. Filter by workspace and switch between list, hierarchy, and deliverable views.
+- **Full board, sidebar, and floating panel** · Switch from the conversation header or board toolbar. The optional floating entry shows pending acceptance, inbox items, and running tasks. Open the deliverable or exact session, accept the result, or draft a continuation from the panel.
 - **Long columns and quick actions** · Each column scrolls independently and displays up to 30 cards per page. The Done column accepts drops while collapsed. Right-click a card or use its menu to move, pin, or archive it.
 
 ### Plan and deliver
 
-- **Projects and schedules across workspaces** · Add project and task notes and set due dates. Track completion, blockers, and overdue work. Assign tasks in bulk or link a workspace so new automatically created tasks go to its project. View or restore archived projects.
+- **Workspace projects, timelines, and schedules** · Included workspaces appear automatically in Projects. Custom projects can organize tasks across workspaces. Review task changes, session progress, and deliveries on the timeline, and track due dates in the schedule. Switch between recent and historical activity at any time.
 - **Manual organization and recovery** · Create, drag, pin, and bulk archive tasks. Lock fields to keep manual edits. Manage dependencies, explicitly merge tasks, recover deleted tasks, and restore backups.
 - **Evidence and human review** · See the goal, acceptance criteria, main deliverable, and source sessions. Preview artifacts, copy paths, or reveal files in the file manager. The task keeps a record of acceptance.
 - **Continue with context** · Draft a handoff from the acceptance criteria, key decisions, unfinished work, and artifacts. Place it in a linked session or start a new session in the same workspace.
@@ -84,7 +84,7 @@ Requires DSH `>= 0.2.1-rc.5 < 0.3.0` and Node.js `>= 22.19.0` (bundled with DSH)
 
 ## Documentation and contributing
 
-- **Usage** · [Install, upgrade, and uninstall](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md) · [Troubleshooting](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
+- **Usage** · [Install, upgrade, and uninstall](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md) · [Daily workflows (Chinese)](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/WORKFLOWS.md) · [Troubleshooting](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
 - **Versions** · [Changelog](https://github.com/topmindspace/dsh-super-kanban/blob/main/CHANGELOG.md) · [Roadmap](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ROADMAP.md)
 - **Development** · [Contributing](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) · [Developer guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md) · [Architecture](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md) · [API contract](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md)
 
