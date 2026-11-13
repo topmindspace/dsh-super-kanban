@@ -4972,8 +4972,8 @@ button.sk-task-row-main{cursor:pointer}
           // 整张卡就是打开会话的按钮；对号是卡内的独立控件，点它只验收。
           return h("article", {
             key: row.task.id, className: "sk-pin-card is-review", role: "button", tabIndex: 0,
-            title: [row.folder, row.task.title].filter(Boolean).join(" · ") || "打开会话",
-            "aria-label": `打开会话：${row.task.title}`,
+            title: row.title || "打开会话",
+            "aria-label": `打开会话：${row.title}`,
             onClick: (event) => {
               if (event?.target?.closest?.(".sk-pin-check")) return;
               onOpen(row);
@@ -4988,8 +4988,8 @@ button.sk-task-row-main{cursor:pointer}
               "aria-hidden": "true" }, folderGlyph(row.folder)),
             h("span", { className: "sk-pin-open" },
               h("span", { className: "sk-pin-marquee", "data-marquee": "" },
-                h("span", { className: "sk-pin-title" }, row.folder || row.task.title)),
-              h("span", { className: "sk-pin-meta" }, relTime(row.at))),
+                h("span", { className: "sk-pin-title" }, row.title)),
+              h("span", { className: "sk-pin-meta" }, [row.scope, relTime(row.at)].filter(Boolean).join(" · "))),
             h("button", { type: "button", className: "sk-pin-check", disabled: Boolean(busyId || error),
               title: "确认完成", "aria-label": `确认完成：${row.task.title}`,
               onClick: (event) => { event.stopPropagation(); onAccept(row.task); } },
@@ -5078,10 +5078,11 @@ button.sk-task-row-main{cursor:pointer}
         const timer = setInterval(sync, 600);
         return () => clearInterval(timer);
       }, [host]);
-      const allReviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now),
-        [tasks, sessionStatuses, now]);
-      const reviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now, currentSessionId),
-        [tasks, sessionStatuses, now, currentSessionId]);
+      const titleOf = (row) => host.sessionTitle?.(row.sessionId) || row.task.title;
+      const allReviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now)
+        .map((row) => ({ ...row, title: titleOf(row) })), [tasks, sessionStatuses, now, host]);
+      const reviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now, currentSessionId)
+        .map((row) => ({ ...row, title: titleOf(row) })), [tasks, sessionStatuses, now, currentSessionId, host]);
       // 当前会话的卡先收起，但它还需要一个「点完成」的入口：留一颗悬浮对号。
       const activeReview = currentSessionId
         ? allReviews.find((row) => row.sessionId === currentSessionId) || null
@@ -5391,8 +5392,8 @@ button.sk-task-row-main{cursor:pointer}
       const activeCheck = activeReview && !showPanel && dialogs === 0
         ? h("button", { type: "button", className: "sk-pin-check is-floating",
             disabled: Boolean(busyId || error),
-            title: `确认完成：${activeReview.folder || activeReview.task.title}`,
-            "aria-label": `确认完成：${activeReview.task.title}`,
+            title: `确认完成：${activeReview.title}`,
+            "aria-label": `确认完成：${activeReview.title}`,
             onClick: () => accept(activeReview.task, "已确认完成") },
             busyId === activeReview.task.id ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 15 }))
         : null;
@@ -7211,6 +7212,16 @@ button.sk-task-row-main{cursor:pointer}
             /* layout service unavailable */
           }
           return () => {};
+        },
+        /** 会话在侧栏里显示的标题（session-titles 等生成后以会话列表为准）。 */
+        sessionTitle(sessionId) {
+          try {
+            const state = ctx.get("sessions")?.list?.getSnapshot?.();
+            const title = state?.byId?.[sessionId]?.title;
+            return typeof title === "string" ? title.trim() : "";
+          } catch {
+            return "";
+          }
         },
         /** 当前在前台的会话 id（悬浮形态用它决定「放入会话」的目标）。 */
         currentSession() {

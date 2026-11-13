@@ -911,9 +911,9 @@ test("a finished turn stays pinned until its hover check mark is clicked", async
   const stripElement = [...elements(rendered)].find((node) => node.type?.name === "ReviewStrip");
   assert.ok(stripElement, "the strip is pinned above the launcher");
   const strip = stripElement.type(stripElement.props);
-  assert.match(renderedText(strip), /数据管道/);
-  assert.match(renderedText(strip), /(刚刚|\d+ 分钟前)/);
-  assert.doesNotMatch(renderedText(strip), /生成本周周报|待审批|已完成|本轮结束/);
+  assert.match(renderedText(strip), /生成本周周报/);
+  assert.match(renderedText(strip), /数据管道 · (刚刚|\d+ 分钟前)/);
+  assert.doesNotMatch(renderedText(strip), /待审批|已完成|本轮结束/);
   const check = [...elements(strip)].find((node) => node.props?.["aria-label"] === "确认完成：生成本周周报");
   assert.ok(check, "the check mark is present (revealed by hover in CSS)");
   await check.props.onClick({ stopPropagation() {} });
