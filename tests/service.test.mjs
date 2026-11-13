@@ -2063,6 +2063,62 @@ test("accepting a provisional live notice does not let the settle scan re-pin th
   assert.deepEqual([next.status, next.completionBasis], ["done", "user"]);
 });
 
+test("a later turn that arrives before the settle scan still pins after a provisional accept", async (t) => {
+  let observe = null;
+  const { service, fixture } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  const turnEndAt = Date.now() - 3000;
+  const events = [
+    event("user/message", 20, turnEndAt - 2000, { content: [{ type: "text", text: "再补一条回归测试" }] }),
+    event("turn/start", 21, turnEndAt - 2000, { turn: 2 }),
+    event("assistant/message", 22, turnEndAt - 1000, { message: { content: [{ type: "text", text: "已补齐" }] } }),
+    event("turn/end", 23, turnEndAt, { turn: 2, reason: { kind: "completed" } }),
+  ];
+  fs.appendFileSync(path.join(fixture.sessionDir, SESSION_FILE_NAME), framesOf(events));
+  observe({ id: "sess-alpha" }, { type: "turn/end", data: { reason: { kind: "completed" } } });
+  const queued = (await request(service, {})).json.tasks[0];
+  assert.equal(queued.review.seq, 0);
+  const accepted = await command(service, "task.accept", { id: queued.id, expectedUpdatedAt: queued.updatedAt });
+  assert.equal(accepted.status, 200);
+  assert.equal((await request(service, {})).json.tasks[0].review, null);
+
+  // The deferred ledger is host-internal: it must sit on disk, never on /state or in a backup.
+  const stored = createStore({ dshHome: process.env.DSH_HOME }).load().state;
+  assert.ok(stored.reviewDeferred["sess-alpha"], "dismissal must be remembered until the settle scan");
+  const publicState = (await request(service, { route: "/state" })).json;
+  assert.equal(publicState.reviewDeferred, undefined);
+  assert.equal(publicState.reviewSeen, undefined);
+  const exported = (await request(service, { route: "/export" })).json;
+  assert.equal(exported.state.reviewDeferred, undefined);
+  assert.equal(exported.state.reviewSeen, undefined);
+
+  // A newer turn lands before the settle scan observes the dismissed one.
+  const laterAt = Date.now() + 50;
+  const later = [
+    event("user/message", 30, laterAt - 2000, { content: [{ type: "text", text: "再看一版" }] }),
+    event("turn/start", 31, laterAt - 2000, { turn: 3 }),
+    event("assistant/message", 32, laterAt - 1000, { message: { content: [{ type: "text", text: "已改好" }] } }),
+    event("turn/end", 33, laterAt, { turn: 3, reason: { kind: "completed" } }),
+  ];
+  fs.appendFileSync(path.join(fixture.sessionDir, SESSION_FILE_NAME), framesOf(later));
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const nextTurn = (await request(service, {})).json.tasks[0];
+  assert.equal(nextTurn.review?.seq, 33, "a later turn must still pin even if it landed before the settle scan");
+  const after = createStore({ dshHome: process.env.DSH_HOME }).load().state;
+  assert.equal(after.reviewSeen["sess-alpha"], 33);
+  assert.equal(after.reviewDeferred["sess-alpha"], undefined);
+});
+
 test("ignoring a session records the dismissed turn so unignore plus a scan cannot re-queue it", async (t) => {
   let observe = null;
   const { service, fixture } = await setup(t, {

@@ -1196,18 +1196,21 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   /** Remember a seq-0 dismissal until the settle scan observes the real turn. */
   function recordReviewDeferred(sessionId) {
     if (!sessionId) return;
-    state.reviewDeferred[sessionId] = 1;
+    // Wall-clock time of the dismissal, so a later turn that ends afterwards
+    // can still pin even if it lands before the settle scan.
+    state.reviewDeferred[sessionId] = Date.now();
     const keys = Object.keys(state.reviewDeferred);
     if (keys.length > REVIEW_SEEN_LIMIT) {
       for (const key of keys.slice(0, keys.length - REVIEW_SEEN_LIMIT)) delete state.reviewDeferred[key];
     }
   }
 
-  /** Consume a deferred dismissal; the caller should record the real seq and not pin. */
+  /** Consume a deferred dismissal. Returns the dismissal timestamp, or 0. */
   function consumeReviewDeferred(sessionId) {
-    if (!sessionId || !state.reviewDeferred[sessionId]) return false;
+    if (!sessionId || !state.reviewDeferred[sessionId]) return 0;
+    const at = Number(state.reviewDeferred[sessionId]) || 0;
     delete state.reviewDeferred[sessionId];
-    return true;
+    return at;
   }
 
   /**
@@ -1221,11 +1224,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const firstSighting = !state.reviewSeen[sessionId];
     const seen = Number(state.reviewSeen[sessionId]) || 0;
     const fresh = Date.now() - (Number(meta.lastTurnEnd.time) || 0) <= REVIEW_FRESH_MS;
-    const deferred = consumeReviewDeferred(sessionId);
+    const deferredAt = consumeReviewDeferred(sessionId);
     recordReviewSeen(sessionId, seq);
     // A provisional notice the user already dismissed must only fill in the
-    // ledger; it must not come back as a fresh card.
-    if (deferred) return false;
+    // ledger when the observed turn is the same one (ended at or before the
+    // dismissal). A later turn that landed before this scan must still pin.
+    // Values <= 1 are a legacy boolean sentinel that cannot tell turns apart.
+    if (deferredAt && (deferredAt <= 1 || (Number(meta.lastTurnEnd.time) || 0) <= deferredAt)) return false;
     if (firstSighting ? !fresh : seen >= seq) return false;
     if (meta.origin === "subagent" || Number(meta.delegationDepth) > 0) return false;
     const task = primaryTaskForSession(sessionId);

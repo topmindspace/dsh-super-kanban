@@ -243,7 +243,7 @@ test("the review ledger drops junk and stays bounded", () => {
 
 test("the deferred-dismissal ledger drops junk and stays bounded", () => {
   assert.deepEqual({ ...normalizeReviewDeferred(null) }, {});
-  assert.deepEqual({ ...normalizeReviewDeferred({ a: 1, b: 0, c: "yes", "": 1, d: true }) }, { a: 1, c: 1, d: 1 });
+  assert.deepEqual({ ...normalizeReviewDeferred({ a: 1, b: 0, c: "yes", "": 1, d: true, e: 1_700_000_000_000 }) }, { a: 1, d: 1, e: 1_700_000_000_000 });
   const raw = {};
   for (let index = 0; index < REVIEW_SEEN_LIMIT + 20; index += 1) raw[`session-${index}`] = 1;
   const deferred = normalizeReviewDeferred(raw);
