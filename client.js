@@ -2092,18 +2092,15 @@ button.sk-task-row-main{cursor:pointer}
 .sk-float-notice .sk-text{flex:none;color:inherit;text-decoration:underline;text-underline-offset:2px}
 .sk-floating .sk-modal-mask{padding:12px}
 /* ---------- review strip: finished turns pinned above the launcher ---------- */
-.sk-pin-stack{display:grid;gap:6px;justify-self:end;width:min(336px,calc(100vw - 32px))}
+.sk-pin-stack{display:grid;gap:6px;justify-self:end;width:min(280px,calc(100vw - 32px))}
 .sk-floating.is-left .sk-pin-stack{justify-self:start}
-.sk-pin-card{position:relative;display:flex;align-items:center;gap:9px;min-height:50px;padding:7px 8px 7px 11px;
+.sk-pin-card{position:relative;display:flex;align-items:center;gap:8px;min-height:46px;padding:6px 7px 6px 10px;
   border:1px solid var(--sk-line);border-radius:12px;background:color-mix(in srgb,var(--sk-surface) 94%,transparent);
   box-shadow:0 1px 2px rgba(0,0,0,.05),0 10px 26px rgba(0,0,0,.14);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   transition:border-color .16s var(--sk-ease),box-shadow .16s var(--sk-ease),transform .16s var(--sk-ease);overflow:hidden}
 .sk-pin-card:hover{border-color:var(--sk-line-strong);transform:translateY(-1px);box-shadow:0 2px 4px rgba(0,0,0,.06),0 14px 30px rgba(0,0,0,.17)}
-.sk-pin-dot{flex:none;display:grid;place-items:center;width:8px;height:8px;margin:0 2px;border-radius:50%;
-  background:var(--sk-green);box-shadow:0 0 0 3px color-mix(in srgb,var(--sk-green) 14%,transparent)}
-.sk-pin-card.is-pending .sk-pin-dot{background:var(--sk-amber);box-shadow:0 0 0 3px color-mix(in srgb,var(--sk-amber) 14%,transparent)}
-.sk-pin-card.is-running .sk-pin-dot{width:12px;height:12px;margin:0;background:none;box-shadow:none;color:var(--sk-blue)}
-.sk-pin-card.is-running .sk-pin-spin{width:12px;height:12px;border-width:1.8px}
+.sk-pin-dot{flex:none;width:7px;height:7px;margin:0 2px;border-radius:50%;
+  background:var(--sk-green);box-shadow:0 0 0 3px color-mix(in srgb,var(--sk-green) 13%,transparent)}
 .sk-pin-open{flex:1;min-width:0;display:grid;gap:1px;padding:0;border:0;background:none;color:inherit;text-align:start;cursor:pointer}
 .sk-pin-title{font-size:12.5px;font-weight:600;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sk-pin-meta{font-size:11px;line-height:1.35;color:var(--sk-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
@@ -4886,40 +4883,24 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     /**
-     * 悬浮入口上方的待审批条。每个任务最多一行：运行中和等待回答优先于上一轮
-     * 的待审批，避免同一张卡同时说两件事。审批只来自用户的勾选（task.accept）。
+     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话：正在跑或正在等你
+     * 回答的任务交给悬浮面板，避免同一张卡同时说两件事。审批只来自勾选（task.accept）。
      */
     function floatingReview(tasks, statuses, now = Date.now()) {
-      const rank = { review: 0, pending: 1, running: 2 };
       const rows = [];
       for (const task of tasks || []) {
         if (!task || task.archived) continue;
+        const review = task.review;
+        if (!review?.sessionId || isAccepted(task)) continue;
         const projected = withSessionStatus(task, statuses, now);
-        const scope = taskScopeLabel(projected);
-        const runningId = projected.runningSessionIds?.[0] ||
+        // 新的一轮或待回答请求已经接管这张卡；上一轮的待审批先让位。
+        const running = projected.runningSessionIds?.length ||
           (projected.sessionContext?.isLive ? projected.sessionContext.sessionId : null);
-        if (runningId) {
-          rows.push({ kind: "running", task: projected, scope, sessionId: runningId,
-            at: taskActivityAt(projected), label: "进行中", running: projected.runningSessions || 1 });
-          continue;
-        }
-        const pending = projected.pendingSessions?.[0];
-        if (pending) {
-          rows.push({ kind: "pending", task: projected, scope, sessionId: pending.id,
-            at: taskActivityAt(projected), label: pending.label });
-          continue;
-        }
-        const review = projected.review;
-        if (!review?.sessionId || isAccepted(projected)) continue;
-        rows.push({
-          kind: "review", task: projected, scope, sessionId: review.sessionId,
-          at: Number(review.at) || taskActivityAt(projected),
-          label: projected.status === "done" ? "已完成"
-            : review.kind === "error" ? "执行失败"
-              : review.kind === "interrupted" || review.kind === "aborted" ? "已中断" : "本轮结束",
-        });
+        if (running || projected.pendingSessions?.length) continue;
+        rows.push({ kind: "review", task: projected, scope: taskScopeLabel(projected),
+          sessionId: review.sessionId, at: Number(review.at) || taskActivityAt(projected) });
       }
-      rows.sort((a, b) => rank[a.kind] - rank[b.kind] || b.at - a.at || a.task.id.localeCompare(b.task.id));
+      rows.sort((a, b) => b.at - a.at || a.task.id.localeCompare(b.task.id));
       return rows;
     }
 
@@ -4927,26 +4908,19 @@ button.sk-task-row-main{cursor:pointer}
     function ReviewStrip({ rows, busyId, error, expanded, message, onOpen, onAccept, onExpand }) {
       const visible = expanded ? rows : rows.slice(0, REVIEW_STRIP_LIMIT);
       const hidden = rows.length - visible.length;
-      return h("div", { className: "sk-pin-stack", role: "group", "aria-label": "待审批与运行中的任务" },
+      return h("div", { className: "sk-pin-stack", role: "group", "aria-label": "待审批任务" },
         visible.map((row) => {
           const busy = busyId === row.task.id;
-          const review = row.kind === "review";
-          return h("article", { key: row.task.id, className: cx("sk-pin-card", "is-" + row.kind) },
-            h("span", { className: cx("sk-pin-dot", "is-" + row.kind), "aria-hidden": "true" },
-              row.kind === "running" ? h("span", { className: "sk-pin-spin" }) : null),
+          return h("article", { key: row.task.id, className: "sk-pin-card is-review" },
+            h("span", { className: "sk-pin-dot", "aria-hidden": "true" }),
             h("button", { type: "button", className: "sk-pin-open", title: "打开对应会话",
               "aria-label": `打开会话：${row.task.title}`, onClick: () => onOpen(row) },
               h("span", { className: "sk-pin-title" }, row.task.title),
-              h("span", { className: "sk-pin-meta" }, [
-                row.scope,
-                review ? `${row.label} · 待审批`
-                  : row.kind === "running" && row.running > 1 ? `${row.label} · ${row.running} 个会话` : row.label,
-                relTime(row.at),
-              ].filter(Boolean).join(" · "))),
-            review ? h("button", { type: "button", className: "sk-pin-check", disabled: Boolean(busyId || error),
+              h("span", { className: "sk-pin-meta" }, [row.scope, relTime(row.at)].filter(Boolean).join(" · "))),
+            h("button", { type: "button", className: "sk-pin-check", disabled: Boolean(busyId || error),
               title: "确认完成", "aria-label": `确认完成：${row.task.title}`,
               onClick: (event) => { event.stopPropagation(); onAccept(row.task); } },
-              busy ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 13 })) : null);
+              busy ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 13 })));
         }),
         hidden > 0 || expanded
           ? h("button", { type: "button", className: "sk-pin-more", onClick: onExpand },

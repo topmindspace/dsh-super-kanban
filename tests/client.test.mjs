@@ -846,7 +846,7 @@ test("the inbox distinguishes a failed turn from a running retry", () => {
 /* Review strip pinned above the launcher                              */
 /* ------------------------------------------------------------------ */
 
-test("floating review orders finished turns before waiting and running work", () => {
+test("floating review pins only finished turns, never running or waiting work", () => {
   const { plugin } = loadClient({}, { inspect: true });
   const now = Date.now();
   const task = (id, fields = {}) => ({ id, title: id, status: "in_progress", primarySessionId: id, origin: "auto",
@@ -865,11 +865,12 @@ test("floating review orders finished turns before waiting and running work", ()
   ]);
   const rows = plugin.floatingReview(items, statuses, now);
   assert.deepEqual(Array.from(rows, (row) => [row.kind, row.task.id]), [
-    ["review", "review-new"], ["review", "review-old"], ["pending", "pending"], ["running", "running"],
+    ["review", "review-new"], ["review", "review-old"],
   ]);
-  assert.deepEqual([rows[0].label, rows[1].label, rows[2].label, rows[3].label],
-    ["已完成", "本轮结束", "待审批", "进行中"]);
-  assert.deepEqual(Array.from(rows, (row) => row.sessionId), ["review-new", "review-old", "pending", "running"]);
+  assert.deepEqual(Array.from(rows, (row) => row.sessionId), ["review-new", "review-old"]);
+  // The running turn owns the "running" card, the approval request owns the
+  // "pending" one; neither should float a finished-turn notice at the same time.
+  assert.ok(!rows.some((row) => ["running", "pending", "accepted", "archived"].includes(row.task.id)));
 });
 
 test("a finished turn stays pinned until its hover check mark is clicked", async () => {
@@ -894,7 +895,8 @@ test("a finished turn stays pinned until its hover check mark is clicked", async
   const stripElement = [...elements(rendered)].find((node) => node.type?.name === "ReviewStrip");
   assert.ok(stripElement, "the strip is pinned above the launcher");
   const strip = stripElement.type(stripElement.props);
-  assert.match(renderedText(strip), /生成本周周报.*数据管道 · 已完成 · 待审批/);
+  assert.match(renderedText(strip), /生成本周周报.*数据管道 · (刚刚|\d+ 分钟前)/);
+  assert.doesNotMatch(renderedText(strip), /待审批|已完成|本轮结束/);
   const check = [...elements(strip)].find((node) => node.props?.["aria-label"] === "确认完成：生成本周周报");
   assert.ok(check, "the check mark is present (revealed by hover in CSS)");
   await check.props.onClick({ stopPropagation() {} });
