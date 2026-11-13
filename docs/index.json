@@ -41,8 +41,8 @@
         "zh": "Super Kanban 任务看板"
       },
       "description": {
-        "en": "AI project board for DeepSeek Harness with live session status, task schedules, deliverable review and quick chat.",
-        "zh": "面向 DeepSeek Harness 的 AI 项目看板。自动更新会话任务，集中处理审批、阻塞和验收，支持跨工作区项目、日程与备注。工具栏可切换研判与快聊共用的模型。"
+        "en": "AI project board for DeepSeek Harness: turns sessions into tasks, with live status, acceptance review, full/side/floating views and quick chat.",
+        "zh": "面向 DeepSeek Harness 的 AI 项目看板。自动把会话整理成任务，集中处理审批、阻塞和验收，支持跨工作区项目与日程。全局、右侧、悬浮三种形态随手切换，快聊可写提示词、解释、总结和翻译。"
       },
       "icon": "./icon.svg",
       "author": "topmindspace",
@@ -70,6 +70,18 @@
         "sortKeys": {}
       },
       "versions": [
+        {
+          "version": "0.10.0",
+          "publishTimestamp": 1794532015,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/topmindspace/dsh-super-kanban",
+            "commit": "b7391c8dd443cd7b8529d58b2f66bcf4fbac9deb"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.5 <0.3.0"
+          }
+        },
         {
           "version": "0.9.0",
           "publishTimestamp": 1794466034,
