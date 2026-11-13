@@ -4921,8 +4921,9 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     /**
-     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话：正在跑、正在等你
-     * 回答、或者就是你当前打开的那条会话，都先让位，切走或闲下来再回来。
+     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话：该会话正在跑、
+     * 正在等你回答、或者就是你当前打开的那条，都先让位，切走或闲下来再回来。
+     * 同一任务上其他关联会话的活动不会把它藏起来。
      */
     function floatingReview(tasks, statuses, now = Date.now(), currentSessionId = "") {
       const rows = [];
@@ -4932,9 +4933,14 @@ button.sk-task-row-main{cursor:pointer}
         if (!review?.sessionId) continue;
         if (currentSessionId && review.sessionId === currentSessionId) continue;
         const projected = withSessionStatus(task, statuses, now);
-        const running = projected.runningSessionIds?.length ||
-          (projected.sessionContext?.isLive ? projected.sessionContext.sessionId : null);
-        if (running || projected.pendingSessions?.length) continue;
+        // Only the review's own session hides the card. A supporting session
+        // that is running or waiting must not tuck away the finished primary turn.
+        const reviewSession = review.sessionId;
+        const runningThis = (projected.runningSessionIds || []).includes(reviewSession) ||
+          Boolean(projected.sessionContext?.isLive &&
+            (projected.sessionContext.sessionId || task.primarySessionId) === reviewSession);
+        const pendingThis = (projected.pendingSessions || []).some((item) => item.id === reviewSession);
+        if (runningThis || pendingThis) continue;
         const folder = projected.workspaceTitle || projected.projectName || "";
         rows.push({ kind: "review", task: projected, scope: taskScopeLabel(projected), folder,
           folderSeed: projected.workspaceId || folder || projected.id,

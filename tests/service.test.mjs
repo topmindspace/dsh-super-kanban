@@ -2009,3 +2009,91 @@ test("installing on a session that just finished pins it once; a later turn pins
   const beta = (await request(service, {})).json.tasks.find((task) => task.primarySessionId === "sess-beta");
   assert.equal(beta.review.sessionId, "sess-beta");
 });
+
+test("accepting a provisional live notice does not let the settle scan re-pin the same turn", async (t) => {
+  let observe = null;
+  const { service, fixture } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  const turnEndAt = Date.now() - 3000;
+  const events = [
+    event("user/message", 20, turnEndAt - 2000, { content: [{ type: "text", text: "再补一条回归测试" }] }),
+    event("turn/start", 21, turnEndAt - 2000, { turn: 2 }),
+    event("assistant/message", 22, turnEndAt - 1000, { message: { content: [{ type: "text", text: "已补齐" }] } }),
+    event("turn/end", 23, turnEndAt, { turn: 2, reason: { kind: "completed" } }),
+  ];
+  fs.appendFileSync(path.join(fixture.sessionDir, SESSION_FILE_NAME), framesOf(events));
+  // The live event arrives without a sequence (the documented provisional path).
+  observe({ id: "sess-alpha" }, { type: "turn/end", data: { reason: { kind: "completed" } } });
+  const queued = (await request(service, {})).json.tasks[0];
+  assert.equal(queued.review.sessionId, "sess-alpha");
+  assert.equal(queued.review.seq, 0);
+  const accepted = await command(service, "task.accept", { id: queued.id, expectedUpdatedAt: queued.updatedAt });
+  assert.equal(accepted.status, 200);
+  assert.equal((await request(service, {})).json.tasks[0].review, null);
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const after = (await request(service, {})).json.tasks[0];
+  assert.equal(after.review, null, "the settle scan must fill the ledger without resurrecting the card");
+  assert.deepEqual([after.status, after.completionBasis], ["done", "user"]);
+  assert.equal(createStore({ dshHome: process.env.DSH_HOME }).load().state.reviewSeen["sess-alpha"], 23);
+
+  // A later turn on the same conversation must still be able to pin a fresh card.
+  const laterAt = Date.now() - 1000;
+  const later = [
+    event("user/message", 30, laterAt - 2000, { content: [{ type: "text", text: "再看一版" }] }),
+    event("turn/start", 31, laterAt - 2000, { turn: 3 }),
+    event("assistant/message", 32, laterAt - 1000, { message: { content: [{ type: "text", text: "已改好" }] } }),
+    event("turn/end", 33, laterAt, { turn: 3, reason: { kind: "completed" } }),
+  ];
+  fs.appendFileSync(path.join(fixture.sessionDir, SESSION_FILE_NAME), framesOf(later));
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const next = (await request(service, {})).json.tasks[0];
+  assert.equal(next.review.seq, 33);
+  assert.deepEqual([next.status, next.completionBasis], ["done", "user"]);
+});
+
+test("ignoring a session records the dismissed turn so unignore plus a scan cannot re-queue it", async (t) => {
+  let observe = null;
+  const { service, fixture } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  const turnEndAt = Date.now() - 3000;
+  const events = [
+    event("user/message", 20, turnEndAt - 2000, { content: [{ type: "text", text: "再补一条回归测试" }] }),
+    event("turn/start", 21, turnEndAt - 2000, { turn: 2 }),
+    event("assistant/message", 22, turnEndAt - 1000, { message: { content: [{ type: "text", text: "已补齐" }] } }),
+    event("turn/end", 23, turnEndAt, { turn: 2, reason: { kind: "completed" } }),
+  ];
+  fs.appendFileSync(path.join(fixture.sessionDir, SESSION_FILE_NAME), framesOf(events));
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 23, data: { reason: { kind: "completed" } } });
+  const queued = (await request(service, {})).json.tasks[0];
+  assert.equal(queued.review.seq, 23);
+  assert.equal((await command(service, "session.ignore", { sessionId: "sess-alpha" })).status, 200);
+  assert.equal((await request(service, {})).json.tasks[0].review, null);
+  assert.equal(createStore({ dshHome: process.env.DSH_HOME }).load().state.reviewSeen["sess-alpha"], 23);
+
+  assert.equal((await command(service, "session.unignore", { sessionId: "sess-alpha" })).status, 200);
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const after = (await request(service, {})).json.tasks[0];
+  assert.equal(after.review, null, "unignore plus a scan must not resurrect a dismissed turn");
+});

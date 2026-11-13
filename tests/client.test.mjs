@@ -891,6 +891,28 @@ test("a review card hides while its session runs or waits, and for the open sess
   assert.deepEqual(Array.from(away, (row) => row.task.id), ["accepted", "review-new", "review-old"]);
 });
 
+test("a supporting session that is running or waiting does not hide the primary review", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const now = Date.now();
+  const task = {
+    id: "joint", title: "联合交付", status: "in_progress", primarySessionId: "primary",
+    sessions: [{ id: "primary", title: "主会话" }, { id: "support", title: "并行核验" }],
+    lastActivityAt: now - 1000,
+    review: { at: now - 10_000, sessionId: "primary", seq: 12, kind: "completed" },
+  };
+  assert.deepEqual(Array.from(plugin.floatingReview([task], new Map(), now), (row) => row.sessionId), ["primary"]);
+  const supportRunning = plugin.floatingReview([task], new Map([["support", { running: true }]]), now);
+  assert.deepEqual(Array.from(supportRunning, (row) => row.sessionId), ["primary"],
+    "a supporting session running must not tuck the finished primary turn away");
+  const supportPending = plugin.floatingReview([task], new Map([["support", { pendingInteraction: { kind: "approval" } }]]), now);
+  assert.deepEqual(Array.from(supportPending, (row) => row.sessionId), ["primary"],
+    "a supporting session waiting must not tuck the finished primary turn away");
+  const primaryRunning = plugin.floatingReview([task], new Map([["primary", { running: true }]]), now);
+  assert.equal(primaryRunning.length, 0, "the review's own session running still hides the card");
+  const primaryPending = plugin.floatingReview([task], new Map([["primary", { pendingInteraction: { kind: "approval" } }]]), now);
+  assert.equal(primaryPending.length, 0, "the review's own session waiting still hides the card");
+});
+
 test("a finished turn stays pinned until its hover check mark is clicked", async () => {
   const now = Date.now();
   const task = { id: "weekly", title: "生成本周周报", status: "done", completionBasis: "session_todos",
