@@ -962,3 +962,143 @@ test("a cached parse recomputes runtime when an unchanged session becomes idle",
     Date.now = clock;
   }
 });
+
+test("loadParsed: prefers a later session/title event over an early projcache placeholder", (t) => {
+  const home = tempDir(t);
+  const sessionId = "sess-ab12cd";
+  const placeholder = `会话 ${sessionId.slice(-6)}`;
+  const { file, dir } = writeSessionAt(
+    home,
+    "demo",
+    sessionId,
+    framesOf([
+      evt("session", 1, T0, { id: sessionId, createdAt: T0, cwd: home }),
+      evt("user/message", 2, T0 + 1000, { content: [{ type: "text", text: "先占个位置" }] }),
+      evt("turn/start", 3, T0 + 2000, { turn: 1 }),
+      evt("turn/end", 4, T0 + 3000, { turn: 1, reason: { kind: "completed" } }),
+      evt("session/title", 5, T0 + 4000, { title: "重构登录流程", source: { kind: "provider" } }),
+    ]),
+  );
+  const stat = fs.statSync(file);
+  const source = createSessionSource({ dshHome: home });
+  const parsed = source.loadParsed({
+    id: sessionId,
+    dir,
+    file,
+    title: placeholder,
+    sigKey: `${stat.size}:${stat.mtimeMs}`,
+  });
+  assert.equal(parsed.title, "重构登录流程");
+  assert.equal(parsed.titleSource, "provider");
+});
+
+test("loadParsed: falls back to the projcache title when no session/title event exists", (t) => {
+  const home = tempDir(t);
+  const sessionId = "sess-meta01";
+  const { file, dir } = writeSessionAt(
+    home,
+    "demo",
+    sessionId,
+    framesOf([
+      evt("session", 1, T0, { id: sessionId, createdAt: T0, cwd: home }),
+      evt("user/message", 2, T0 + 1000, { content: [{ type: "text", text: "补一下文档" }] }),
+      evt("turn/start", 3, T0 + 2000, { turn: 1 }),
+      evt("turn/end", 4, T0 + 3000, { turn: 1, reason: { kind: "completed" } }),
+    ]),
+  );
+  const stat = fs.statSync(file);
+  const source = createSessionSource({ dshHome: home });
+  const parsed = source.loadParsed({
+    id: sessionId,
+    dir,
+    file,
+    title: "整理发布说明",
+    sigKey: `${stat.size}:${stat.mtimeMs}`,
+  });
+  assert.equal(parsed.title, "整理发布说明");
+});
+
+test("loadParsed: empty or path-like session/title events fall back to metadata or the first user message", (t) => {
+  const home = tempDir(t);
+  const sessionId = "sess-empty1";
+  const { file, dir } = writeSessionAt(
+    home,
+    "demo",
+    sessionId,
+    framesOf([
+      evt("session", 1, T0, { id: sessionId, createdAt: T0, cwd: home }),
+      evt("session/title", 2, T0 + 500, { title: "   ", source: { kind: "provider" } }),
+      evt("session/title", 3, T0 + 800, { title: "/projects/alpha/src", source: { kind: "provider" } }),
+      evt("user/message", 4, T0 + 1000, { content: [{ type: "text", text: "补测试用例" }] }),
+      evt("turn/start", 5, T0 + 2000, { turn: 1 }),
+      evt("turn/end", 6, T0 + 3000, { turn: 1, reason: { kind: "completed" } }),
+    ]),
+  );
+  const stat = fs.statSync(file);
+  const source = createSessionSource({ dshHome: home });
+  const fromMeta = source.loadParsed({
+    id: sessionId,
+    dir,
+    file,
+    title: "有用的元数据标题",
+    sigKey: `${stat.size}:${stat.mtimeMs}`,
+  });
+  assert.equal(fromMeta.title, "有用的元数据标题");
+  const fromUser = source.loadParsed({
+    id: sessionId,
+    dir,
+    file,
+    title: "/tmp/whatever",
+    sigKey: `${stat.size}:${stat.mtimeMs}`,
+  });
+  assert.equal(fromUser.title, "补测试用例");
+});
+
+test("loadParsed: a missing title falls back to the 会话 + id placeholder, and long titles follow readableTitle clipping", (t) => {
+  const home = tempDir(t);
+  const sessionId = "sess-long99";
+  const longTitle = `重构${"登录流程并补齐全部边界测试和文档说明".repeat(3)}`;
+  const { file, dir } = writeSessionAt(
+    home,
+    "demo",
+    sessionId,
+    framesOf([
+      evt("session", 1, T0, { id: sessionId, createdAt: T0, cwd: home }),
+      evt("session/title", 2, T0 + 1000, { title: longTitle, source: { kind: "provider" } }),
+      evt("turn/start", 3, T0 + 2000, { turn: 1 }),
+      evt("turn/end", 4, T0 + 3000, { turn: 1, reason: { kind: "completed" } }),
+    ]),
+  );
+  const stat = fs.statSync(file);
+  const source = createSessionSource({ dshHome: home });
+  const parsed = source.loadParsed({
+    id: sessionId,
+    dir,
+    file,
+    title: `会话 ${sessionId.slice(-6)}`,
+    sigKey: `${stat.size}:${stat.mtimeMs}`,
+  });
+  assert.equal(parsed.title.length, 48);
+  assert.equal(parsed.title.endsWith("…"), true);
+  assert.equal(parsed.title, `${longTitle.slice(0, 47)}…`);
+
+  const { file: bareFile, dir: bareDir } = writeSessionAt(
+    home,
+    "demo",
+    "sess-bare01",
+    framesOf([
+      evt("session", 1, T0, { id: "sess-bare01", createdAt: T0, cwd: home }),
+      evt("turn/start", 2, T0 + 1000, { turn: 1 }),
+      evt("turn/end", 3, T0 + 2000, { turn: 1, reason: { kind: "completed" } }),
+    ]),
+  );
+  const bareStat = fs.statSync(bareFile);
+  const bare = source.loadParsed({
+    id: "sess-bare01",
+    dir: bareDir,
+    file: bareFile,
+    title: null,
+    sigKey: `${bareStat.size}:${bareStat.mtimeMs}`,
+  });
+  assert.equal(bare.title, "会话 bare01");
+});

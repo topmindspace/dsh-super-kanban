@@ -66,7 +66,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
     "reason": "一句话理由",
     "engine": "llm|rules"
   },
-  "lockedFields": ["status"],            // 用户手改过的字段，AI 不再覆盖
+  "lockedFields": ["status"],            // 用户手改过的字段，AI / 扫描不再覆盖
   "createdAt": "ISO",
   "updatedAt": "ISO",
   "lastActivityAt": 1793694532136,
@@ -125,6 +125,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 - `review` 是「待审批卡片条」的唯一数据源：任务的主会话出现新的 `turn/end` 时由 Host 写入（实时事件先落，结算扫描补准确的 `seq`/`kind`）。
   它不改变任务列状态；用户点对号才走 `task.accept`（`status: "done"` + `completionBasis: "user"`）并清空该字段。
   手动改状态、拖到「已完成」或忽略来源会话也会清空。已是 `done + user` 的任务不会被迟到的扫描把同一轮重新排队；其后的新轮次仍会钉一张新卡。实时事件以 `seq` 为 0 先落、用户已清除后，结算扫描只补账本，不再把同一轮钉回。
+- 自动任务的 `title` 跟随主来源会话的最新标题（解析优先用 `session/title` 事件，投影缓存标题只作兜底）。扫描会刷新仍等于占位「会话 + id 后六位」、或仍等于该会话上次写入 `sessions[].title` 的标题。`lockedFields` 含 `title` 的用户编辑、已改成其他文案的旧卡、以及 `origin: "manual"` 的标题都不会被覆盖；多会话任务只跟 `primarySessionId`。显式 `task.analyze` 仍可按原规则更新未锁定的标题（含手动卡）。
 - v1 → v2 迁移：`keyFacts ← evidence 前 3`、`subtasks ← milestones`、`artifacts = []`、`sessionContext ← 首个 session`、`evidence` 截断 8 条。
 
 ### 2.1 文本与裁剪上限（Host 单一来源）
@@ -286,7 +287,7 @@ DSH 模型变更事件可使缓存失效。`?refresh=1` 可主动刷新，距上
 | op | payload | 说明 |
 | --- | --- | --- |
 | `task.create` | `{title, goal?, status?, priority?, tags?, workspaceId?, sessionId?, progress?}` | 手动建卡 |
-| `task.update` | `{id, patch: {...}, lockFields?: string[]}` | 用户编辑；`lockFields` 中字段加锁 |
+| `task.update` | `{id, patch: {...}, lockFields?: string[]}` | 用户编辑；`lockFields` 中字段加锁。界面保存标题时会把 `title` 加入锁定，扫描不再覆盖 |
 | `task.move` | `{id, status, index?}` | 拖拽换列 |
 | `task.archive` | `{id, archived: boolean}` | 归档 / 恢复 |
 | `task.delete` | `{id}` | 删除（自动任务也允许，记入历史） |

@@ -797,7 +797,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const todoCounts = meta.todoCounts || { total: 0, completed: 0 };
     return {
       sessionId: meta.id,
-      title: meta.title || (parsed ? parsed.title : ""),
+      title: (parsed && parsed.title) || meta.title || "",
       isLive: parsed ? Boolean(parsed.isLive) : Boolean(meta.isLive),
       turnCount: parsed ? parsed.turnCount : meta.turnCount || 0,
       lastTurnEnd: mapTurnEndKind(parsed ? parsed.lastTurnEnd?.kind : meta.lastTurnEnd?.kind),
@@ -988,6 +988,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   function refreshTaskDeterministic(task, meta, context) {
     if (!task) return false;
     let changed = false;
+    if (syncTaskTitleFromSession(task, meta)) changed = true;
+    const existingEntry = (task.sessions || []).find((session) => session.id === meta.id);
+    const nextEntryTitle = meta.title || sessionPlaceholderTitle(meta.id);
+    if (existingEntry && nextEntryTitle && existingEntry.title !== nextEntryTitle) changed = true;
     const locked = new Set(task.lockedFields || []);
     const previousSubtasks = JSON.stringify(task.subtasks || []);
     const manual = (task.subtasks || []).filter((subtask) => subtask.source === "manual");
@@ -1331,6 +1335,74 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return target;
   }
 
+  function sessionPlaceholderTitle(sessionId) {
+    return `会话 ${String(sessionId || "").slice(-6)}`;
+  }
+
+  function clippedTitleVariants(title) {
+    const raw = typeof title === "string" ? title.trim() : "";
+    if (!raw) return [];
+    return [...new Set([raw, clipText(raw, 40), clipText(raw, 48), clipText(raw, TITLE_TEXT_LIMIT)])];
+  }
+
+  function titlesAlign(left, right) {
+    if (!left || !right) return false;
+    const rightSet = new Set(clippedTitleVariants(right));
+    return clippedTitleVariants(left).some((item) => rightSet.has(item));
+  }
+
+  function isSourceSessionForTask(task, sessionId) {
+    if (!task || !sessionId) return false;
+    if (task.primarySessionId) return task.primarySessionId === sessionId;
+    return task.sessions?.[0]?.id === sessionId;
+  }
+
+  function lastAppliedSessionTitle(task, sessionId) {
+    const entry = (task.sessions || []).find((session) => session.id === sessionId);
+    return typeof entry?.title === "string" ? entry.title.trim() : "";
+  }
+
+  /**
+   * True when the card is still showing a scanner placeholder or the last
+   * session-derived title. A title the user (or an older client) set to
+   * something else is left alone. Manual tasks and locked titles never qualify.
+   */
+  function isAutoTrackedTitle(task, sessionId) {
+    const current = typeof task.title === "string" ? task.title.trim() : "";
+    if (!current) return true;
+    if (current === sessionPlaceholderTitle(sessionId)) return true;
+    const last = lastAppliedSessionTitle(task, sessionId);
+    return Boolean(last) && titlesAlign(current, last);
+  }
+
+  function canFollowSessionTitle(task, sessionId) {
+    if (!task || task.origin === "manual") return false;
+    if ((task.lockedFields || []).includes("title")) return false;
+    if (!isSourceSessionForTask(task, sessionId)) return false;
+    return isAutoTrackedTitle(task, sessionId);
+  }
+
+  function canAnalysisUpdateTitle(task, meta, options = {}) {
+    if (!task) return false;
+    if ((task.lockedFields || []).includes("title")) return false;
+    if (!isSourceSessionForTask(task, meta?.id)) return false;
+    // An explicit re-judge (task.analyze) may update a manual card's title,
+    // matching the existing locked-field exception for options.explicit.
+    if (options.explicit) return true;
+    if (task.origin === "manual") return false;
+    if (task.origin === "auto") return true;
+    return isAutoTrackedTitle(task, meta.id);
+  }
+
+  function syncTaskTitleFromSession(task, meta) {
+    if (!task || !meta) return false;
+    const next = clipText(meta.title || "", TITLE_TEXT_LIMIT);
+    if (!next || task.title === next) return false;
+    if (!canFollowSessionTitle(task, meta.id)) return false;
+    task.title = next;
+    return true;
+  }
+
   function sessionEntryFromMeta(meta, evidenceCount = 0) {
     return {
       id: meta.id,
@@ -1389,6 +1461,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     meta.aiDigestBytes = previous?.aiDigestBytes || 0;
     meta.llmError = previous?.llmError || null;
     meta.aiErrorAt = previous?.aiErrorAt || null;
+    // Marks a parse that prefers session/title events over the projcache
+    // placeholder. Stale caches from earlier versions re-parse once.
+    meta.titleRev = 2;
     return { sigKey: meta.sigKey, meta };
   }
 
@@ -1628,7 +1703,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         const forceMainParse =
           preEligible && (mode === "full" || changed || !findTaskBySession(discovered.id) || aiMissing ||
             typeof meta.hasOpenTurn !== "boolean" || source.sessionLiveness(meta) !== meta.isLive);
-        if (changed || cached?.unparsed || forceMainParse) {
+        // Earlier caches preferred the projcache placeholder over a later
+        // session/title event. Re-parse once so existing cards can pick up the
+        // real title without waiting for a file change or a full scan.
+        const titleRevStale = Boolean(cached?.meta) && cached.meta.titleRev !== 2;
+        if (changed || cached?.unparsed || forceMainParse || titleRevStale) {
           try {
             const result = parseDiscovered(discovered);
             parsed = result.parsed;
@@ -2162,7 +2241,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       return true;
     };
 
-    if (setField("title", clipText(analysis.title, TITLE_TEXT_LIMIT))) otherChanged = true;
+    if (canAnalysisUpdateTitle(task, meta, options) && setField("title", clipText(analysis.title, TITLE_TEXT_LIMIT))) otherChanged = true;
+    if (syncTaskTitleFromSession(task, meta)) otherChanged = true;
     if (setField("priority", PRIORITIES.includes(analysis.priority) ? analysis.priority : undefined)) otherChanged = true;
     if (setField("tags", Array.isArray(analysis.tags) ? analysis.tags.slice(0, TAG_LIMIT) : undefined)) otherChanged = true;
     const manualIssues = (task.issues || []).filter((issue) => issue.source === "manual");

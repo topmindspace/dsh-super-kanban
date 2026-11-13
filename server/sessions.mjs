@@ -799,10 +799,12 @@ export function createSessionSource({ dshHome } = {}) {
   }
 
   /**
-   * Metadata the parser bakes into its result (titles/goals/lineage come from the
-   * projcache or workspace registry, which can change without a new session-file
-   * signature). The cache must compare these too, or it could serve a parse whose
-   * title/goal is stale relative to the caller's meta.
+   * Metadata the parser bakes into its result. Goals and lineage come from the
+   * projcache or workspace registry; the session title prefers a `session/title`
+   * event and only falls back to `meta.title`. Those fields can change without a
+   * new session-file signature, so the cache must compare them too: otherwise a
+   * parse whose fallback title or goal is stale relative to the caller's meta
+   * could be reused.
    */
   function metaFingerprint(meta) {
     return JSON.stringify([
@@ -1088,9 +1090,16 @@ export function createSessionSource({ dshHome } = {}) {
         : 0;
     const createdAt = Number(sessionInfo.createdAt) || meta.createdAt || (events[0]?.time ?? 0);
     const cwd = typeof sessionInfo.cwd === "string" ? sessionInfo.cwd : meta.cwd;
+    // Prefer the latest usable session/title event. The discovery / projcache
+    // title (meta.title) is often an early placeholder such as "会话 ab12cd"
+    // and must only fill in when the log has no readable title. Do not pass the
+    // first user message as a fallback to readableTitle(event): an empty or
+    // path-like event would otherwise swallow a good metadata title.
+    const fromEvent = title ? readableTitle(title) : "";
+    if (!fromEvent) titleSource = null;
     const resolvedTitle =
+      fromEvent ||
       readableTitle(meta.title, users[0]?.text) ||
-      readableTitle(title, users[0]?.text) ||
       `会话 ${meta.id.slice(-6)}`;
     const lastTurnEnd = turnEnds[turnEnds.length - 1] || null;
     const hasOpenTurn = (turnStarts.at(-1)?.seq || 0) > Math.max(lastTurnEnd?.seq || 0, lastSeedSeq);
