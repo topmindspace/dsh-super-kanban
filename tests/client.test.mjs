@@ -44,7 +44,8 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
     ...browser,
   };
   const script = inspect ? source.replace("return { apply, inject:",
-    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
+    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, floatingReview, canAcceptTask, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
+    "folderGlyph, folderColor, " +
     "markdownBlocks, renderInline, taskChatReference, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
@@ -840,4 +841,183 @@ test("the inbox distinguishes a failed turn from a running retry", () => {
   const retry = renderAttention([task], new Map([["test-session", { running: true }]]));
   assert.doesNotMatch(renderedText(retry.rows), /执行失败/);
   assert.match(renderedText(retry.rows), /会话运行中/);
+});
+
+/* ------------------------------------------------------------------ */
+/* Review strip pinned above the launcher                              */
+/* ------------------------------------------------------------------ */
+
+test("folder badges keep a stable colour and a readable initial", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  assert.equal(plugin.folderGlyph("产品文档"), "产");
+  assert.equal(plugin.folderGlyph("data-pipeline"), "D");
+  assert.equal(plugin.folderGlyph(""), "任");
+  assert.equal(plugin.folderColor("ws_alpha"), plugin.folderColor("ws_alpha"));
+  assert.match(plugin.folderColor("ws_alpha"), /^#[0-9A-F]{6}$/);
+  const spread = new Set(Array.from({ length: 12 }, (_, index) => plugin.folderColor(`ws_${index}`)));
+  assert.ok(spread.size >= 5, "a handful of workspaces should not collapse onto one colour");
+});
+
+test("a review card hides while its session runs or waits, and for the open session", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const now = Date.now();
+  const task = (id, fields = {}) => ({ id, title: id, status: "in_progress", primarySessionId: id, origin: "auto",
+    lastActivityAt: now - 1000, ...fields });
+  const items = [
+    task("running", { review: { at: now - 30000, sessionId: "running", seq: 3 } }),
+    task("pending", { review: { at: now - 20000, sessionId: "pending", seq: 4 } }),
+    task("review-old", { review: { at: now - 40000, sessionId: "review-old", seq: 5, kind: "completed" } }),
+    task("review-new", { status: "done", completionBasis: "session_todos", review: { at: now - 10000, sessionId: "review-new", seq: 6 } }),
+    task("accepted", { status: "done", completionBasis: "user", review: { at: now - 5000, sessionId: "accepted", seq: 7 } }),
+    task("archived", { archived: true, review: { at: now - 5000, sessionId: "archived", seq: 8 } }),
+  ];
+  const statuses = new Map([
+    ["running", { running: true }],
+    ["pending", { pendingInteraction: { kind: "approval" } }],
+  ]);
+  const rows = plugin.floatingReview(items, statuses, now);
+  assert.deepEqual(Array.from(rows, (row) => [row.kind, row.task.id]), [
+    ["review", "accepted"], ["review", "review-new"], ["review", "review-old"],
+  ]);
+  assert.deepEqual(Array.from(rows, (row) => row.sessionId), ["accepted", "review-new", "review-old"]);
+  // A later turn on an already accepted task still gets a card; archived and
+  // running/waiting turns do not.
+  assert.ok(!rows.some((row) => ["running", "pending", "archived"].includes(row.task.id)));
+  // The card of the conversation you are viewing hides too, and comes back
+  // as soon as the open session is something else.
+  const other = plugin.floatingReview(items, statuses, now, "review-new");
+  assert.deepEqual(Array.from(other, (row) => row.task.id), ["accepted", "review-old"]);
+  const away = plugin.floatingReview(items, statuses, now, "elsewhere");
+  assert.deepEqual(Array.from(away, (row) => row.task.id), ["accepted", "review-new", "review-old"]);
+});
+
+test("a finished turn stays pinned until its hover check mark is clicked", async () => {
+  const now = Date.now();
+  const task = { id: "weekly", title: "生成本周周报", status: "done", completionBasis: "session_todos",
+    primarySessionId: "source", workspaceTitle: "数据管道", updatedAt: "rev-1", lastActivityAt: now - 2000,
+    review: { at: now - 30_000, sessionId: "source", seq: 12, kind: "completed" } };
+  const requests = [];
+  const opens = [];
+  const { host, registrations } = loadClient({ uiWorkspace: { openSession: (id) => opens.push(id) } }, {
+    snapshot: { tasks: [task] },
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return options.body
+        ? { ok: true, json: async () => ({ ok: true, data: { ...task, status: "done", completionBasis: "user" } }) }
+        : { ok: true, json: async () => ({ ok: true, tasks: [{ ...task, completionBasis: "user" }] }) };
+    },
+  });
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const rendered = panel.type(panel.props);
+  const stripElement = [...elements(rendered)].find((node) => node.type?.name === "ReviewStrip");
+  assert.ok(stripElement, "the strip is pinned above the launcher");
+  const strip = stripElement.type(stripElement.props);
+  assert.match(renderedText(strip), /生成本周周报/);
+  assert.match(renderedText(strip), /数据管道 · (刚刚|\d+ 分钟前)/);
+  assert.doesNotMatch(renderedText(strip), /待审批|已完成|本轮结束/);
+  const check = [...elements(strip)].find((node) => node.props?.["aria-label"] === "确认完成：生成本周周报");
+  assert.ok(check, "the check mark is present (revealed by hover in CSS)");
+  await check.props.onClick({ stopPropagation() {} });
+  assert.deepEqual(requests[0],
+    ["/super-kanban/api/command", { op: "task.accept", payload: { id: "weekly", expectedUpdatedAt: "rev-1" } }]);
+  const open = [...elements(strip)].find((node) => node.props?.["aria-label"] === "打开会话：生成本周周报");
+  open.props.onClick();
+  assert.deepEqual(opens, ["source"]);
+});
+
+test("a new turn on an already accepted task can be approved from its card", async () => {
+  const now = Date.now();
+  const task = { id: "again", title: "再看一版", status: "done", completionBasis: "user",
+    primarySessionId: "source", workspaceTitle: "数据管道", updatedAt: "rev-2", lastActivityAt: now - 2000,
+    review: { at: now - 10_000, sessionId: "source", seq: 21, kind: "completed" } };
+  const requests = [];
+  const { registrations } = loadClient({}, {
+    snapshot: { tasks: [task] },
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return options.body
+        ? { ok: true, json: async () => ({ ok: true, data: { ...task, review: null } }) }
+        : { ok: true, json: async () => ({ ok: true, tasks: [{ ...task, review: null }] }) };
+    },
+  });
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const rendered = panel.type(panel.props);
+  const stripElement = [...elements(rendered)].find((node) => node.type?.name === "ReviewStrip");
+  assert.ok(stripElement, "the accepted task with a fresh review is pinned again");
+  const strip = stripElement.type(stripElement.props);
+  const check = [...elements(strip)].find((node) => node.props?.["aria-label"] === "确认完成：再看一版");
+  assert.ok(check);
+  await check.props.onClick({ stopPropagation() {} });
+  assert.deepEqual(requests[0],
+    ["/super-kanban/api/command", { op: "task.accept", payload: { id: "again", expectedUpdatedAt: "rev-2" } }]);
+});
+
+test("the open conversation keeps a lone approve check when its card is tucked away", async () => {
+  const now = Date.now();
+  const task = { id: "active", title: "整理组件规范", status: "in_progress", updatedAt: "rev-1",
+    primarySessionId: "current", workspaceTitle: "设计系统", lastActivityAt: now - 5000,
+    review: { at: now - 5000, sessionId: "current", seq: 7, kind: "completed" } };
+  const requests = [];
+  const { host, registrations } = loadClient({}, {
+    snapshot: { tasks: [task] },
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return options.body
+        ? { ok: true, json: async () => ({ ok: true, data: { ...task, status: "done", completionBasis: "user" } }) }
+        : { ok: true, json: async () => ({ ok: true, tasks: [{ ...task, completionBasis: "user" }] }) };
+    },
+  });
+  host.currentSession = () => "current";
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const view = panel.type(panel.props);
+  assert.equal([...elements(view)].some((node) => node.type?.name === "ReviewStrip"), false);
+  const check = [...elements(view)].find((node) => node.props?.className === "sk-pin-check is-floating");
+  assert.ok(check, "the active conversation keeps an approve check");
+  await check.props.onClick();
+  assert.deepEqual(requests[0],
+    ["/super-kanban/api/command", { op: "task.accept", payload: { id: "active", expectedUpdatedAt: "rev-1" } }]);
+});
+
+test("the lone approve check survives an empty floating entry", () => {
+  const now = Date.now();
+  const task = { id: "active", title: "整理组件规范", status: "in_progress", primarySessionId: "current",
+    workspaceTitle: "设计系统", lastActivityAt: now - 5000,
+    review: { at: now - 5000, sessionId: "current", seq: 7, kind: "completed" } };
+  const { host, registrations } = loadClient({}, {
+    snapshot: { tasks: [task] },
+    prefs: { floatHideEmpty: true, floatEnabled: true },
+  });
+  host.currentSession = () => "current";
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const view = panel.type(panel.props);
+  assert.ok(view, "the floating root must stay mounted for the lone check");
+  assert.ok([...elements(view)].some((node) => node.props?.className === "sk-pin-check is-floating"));
+});
+
+test("more than three pinned cards collapse behind a count and expand in place", () => {
+  const now = Date.now();
+  const tasks = Array.from({ length: 5 }, (_, index) => ({
+    id: `t-${index}`, title: `任务 ${index}`, status: "in_progress", primarySessionId: `s-${index}`,
+    lastActivityAt: now - index * 1000, review: { at: now - index * 1000, sessionId: `s-${index}`, seq: index + 1 },
+  }));
+  const { registrations } = loadClient({}, { snapshot: { tasks } });
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const stripOf = (node) => {
+    const element = [...elements(node)].find((item) => item.type?.name === "ReviewStrip");
+    return element ? element.type(element.props) : null;
+  };
+  const cards = (node) => [...elements(node || [])].filter((item) => item.props?.className?.startsWith?.("sk-pin-card"));
+  const view = panel.type(panel.props);
+  const strip = stripOf(view);
+  assert.equal(cards(strip).length, 3);
+  assert.ok([...elements(strip)].some((node) => node.type === "button" && renderedText(node) === "还有 2 项"));
+  const stripElement = [...elements(view)].find((item) => item.type?.name === "ReviewStrip");
+  const expanded = stripElement.type({ ...stripElement.props, expanded: true });
+  assert.equal(cards(expanded).length, 5);
+  assert.ok([...elements(expanded)].some((node) => renderedText(node) === "收起"));
 });

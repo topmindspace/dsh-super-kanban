@@ -52,6 +52,8 @@ import {
   normalizeSettingsPatch,
   positiveSeqOrNull,
   pushHistory,
+  REVIEW_KINDS,
+  REVIEW_SEEN_LIMIT,
   rolloverUsage,
   shortId,
   stableTaskId,
@@ -85,6 +87,9 @@ const SSE_MAX_BUFFER_BYTES = 1024 * 1024;
 const TURN_SETTLE_MS = 2000;
 const TURN_SCAN_MAX_WAIT_MS = 10_000;
 const TURN_SCAN_MIN_INTERVAL_MS = 15_000;
+// A finished turn first seen within this window counts as "just ended", so a
+// fresh install surfaces today's work without pinning every historical turn.
+const REVIEW_FRESH_MS = 10 * 60_000;
 const SCAN_SLICE_MS = 25;
 
 /* ------------------------------------------------------------------ */
@@ -113,6 +118,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   let cache = loaded.cache;
   let stopped = false;
   state.usage = rolloverUsage(state.usage);
+  // Additive field: hand-edited or older state files may not carry the ledger.
+  if (!state.reviewSeen || typeof state.reviewSeen !== "object") state.reviewSeen = {};
 
   /** id -> SessionMeta (compact, includes workspace + last todo counts). */
   let sessionsById = new Map();
@@ -1122,6 +1129,87 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return archived;
   }
 
+  /* ------------------------- review strip --------------------------- */
+
+  /**
+   * The task a session speaks for. An explicit primary session wins over a
+   * supporting link so one conversation never pins a shared teammate's card.
+   */
+  function primaryTaskForSession(sessionId) {
+    if (!sessionId) return null;
+    let fallback = null;
+    for (const task of state.tasks) {
+      if (!task || task.archived) continue;
+      if (task.primarySessionId === sessionId) return task;
+      // Legacy cards without an explicit primary can still be adopted; a card
+      // that names another session as primary never owns this session's review.
+      if (!fallback && !task.primarySessionId && task.sessions?.some((session) => session?.id === sessionId)) fallback = task;
+    }
+    return fallback;
+  }
+
+  /**
+   * Queue (or refresh) the "turn ended, awaiting approval" notice pinned above
+   * the floating entry. Idempotent for the same turn; an accepted card is never
+   * re-queued by a late scan of the turn the user already approved.
+   */
+  function markTaskReview(task, { sessionId, seq = 0, at = Date.now(), kind = "completed" } = {}) {
+    if (!task || task.archived || !sessionId) return false;
+    const nextSeq = Number(seq) > 0 ? Math.floor(Number(seq)) : 0;
+    const previous = task.review;
+    if (previous && previous.sessionId === sessionId && Number(previous.seq) === nextSeq && nextSeq > 0) return false;
+    task.review = {
+      at: Math.floor(Number(at) > 0 ? Number(at) : Date.now()),
+      sessionId,
+      seq: nextSeq,
+      kind: REVIEW_KINDS.has(kind) ? kind : "completed",
+    };
+    touchTask(task);
+    return true;
+  }
+
+  /** Clear the notice and remember the dismissed turn so the settle scan cannot re-queue it. */
+  function dismissReview(task) {
+    const review = task?.review;
+    if (review?.sessionId) recordReviewSeen(review.sessionId, review.seq);
+    if (task) task.review = null;
+  }
+
+  /** Remember the newest processed turn-end seq for one session (bounded). */
+  function recordReviewSeen(sessionId, seq) {
+    const number = Number(seq);
+    if (!sessionId || !(number > 0)) return;
+    if (!(Number(state.reviewSeen[sessionId]) >= number)) state.reviewSeen[sessionId] = Math.floor(number);
+    const keys = Object.keys(state.reviewSeen);
+    if (keys.length > REVIEW_SEEN_LIMIT) {
+      for (const key of keys.slice(0, keys.length - REVIEW_SEEN_LIMIT)) delete state.reviewSeen[key];
+    }
+  }
+
+  /**
+   * Scan-side turn-end bookkeeping. The first sighting of an old session only
+   * seeds the ledger; a later turn-end on the same session pins a review card.
+   */
+  function markScanReview(meta) {
+    const sessionId = meta?.id;
+    const seq = Number(meta?.lastTurnEnd?.seq) || 0;
+    if (!sessionId || !seq) return false;
+    const firstSighting = !state.reviewSeen[sessionId];
+    const seen = Number(state.reviewSeen[sessionId]) || 0;
+    const fresh = Date.now() - (Number(meta.lastTurnEnd.time) || 0) <= REVIEW_FRESH_MS;
+    recordReviewSeen(sessionId, seq);
+    if (firstSighting ? !fresh : seen >= seq) return false;
+    if (meta.origin === "subagent" || Number(meta.delegationDepth) > 0) return false;
+    const task = primaryTaskForSession(sessionId);
+    if (!task) return false;
+    return markTaskReview(task, {
+      sessionId,
+      seq,
+      at: meta.lastTurnEnd.time || Date.now(),
+      kind: meta.lastTurnEnd.kind,
+    });
+  }
+
   /* --------------------- cross-session duplicate merge --------------- */
 
   function dedupeByText(items, limit) {
@@ -1683,6 +1771,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     }
 
     // Phase C: merge analyses into the board.
+    let addedReviews = 0;
     yieldAt = performance.now() + SCAN_SLICE_MS;
     for (const job of analysisJobs) {
       if (performance.now() >= yieldAt) {
@@ -1699,6 +1788,12 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         if (job.llm) {
           if (job.llm.ignore) {
             applyAiMeta(meta.id, meta, { digestBytes: job.digestBytes });
+            // The analyzer may skip task fields, but the turn still ended:
+            // keep the review ledger moving so a missed live event catches up.
+            if (!scanCancel && markScanReview(meta)) {
+              addedReviews += 1;
+              schedulePersist();
+            }
             continue;
           }
           const llmModel = job.llm.model || "";
@@ -1760,8 +1855,15 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       } catch (error) {
         logWarn(`[super-kanban] merge failed for ${meta.id}: ${String(error?.message || error)}`);
       }
+      // A turn that ended since the last scan pins its review card, whether or
+      // not the analysis produced a field change. Accepted cards are skipped.
+      if (!scanCancel && markScanReview(meta)) {
+        addedReviews += 1;
+        schedulePersist();
+      }
     }
 
+    if (addedReviews > 0) emitChanged("turn-end", addedReviews);
     // Phase D: persist derived board data + the human-readable scan conclusion.
     state.workspaces = computeWorkspaces(discovery.workspaces, [...sessionsById.values()]);
     state.activity = computeActivity();
@@ -2387,6 +2489,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
             task.status = next;
             task.completionBasis = next === "done" ? "user" : null;
             task.attention = null;
+            dismissReview(task);
             pushHistory(task, { kind: "status", from, to: next, by: "user", note: "用户编辑" });
           }
           continue;
@@ -2479,10 +2582,19 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const task = requireTask(payload);
       checkRevision(task, payload.expectedUpdatedAt);
       if (task.archived) throw conflict("请先恢复归档任务再确认验收");
-      if (task.status === "done" && task.completionBasis === "user") return task;
+      if (task.status === "done" && task.completionBasis === "user") {
+        // A later turn on an accepted task pins a fresh review; accepting it
+        // clears the notice without changing the already-locked completion.
+        if (task.review) {
+          dismissReview(task);
+          touchTask(task);
+        }
+        return task;
+      }
       const from = task.status;
       task.status = "done";
       task.attention = null;
+      dismissReview(task);
       task.completionBasis = "user";
       task.lockedFields = [...new Set([...(task.lockedFields || []), "status"])];
       if (task.origin === "auto") task.origin = "auto+edited";
@@ -2504,6 +2616,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         task.status = nextStatus;
         task.completionBasis = nextStatus === "done" ? "user" : null;
         task.attention = null;
+        dismissReview(task);
         task.lockedFields = [...new Set([...(task.lockedFields || []), "status"])];
         syncGoalStatus(task);
         // Same rule as task.update: only a real column change marks the card as
@@ -3086,6 +3199,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (!sessionId) throw badRequest("sessionId-required");
       if (!state.ignoredSessions.includes(sessionId)) state.ignoredSessions.push(sessionId);
       state.suppressedSessions = state.suppressedSessions.filter((id) => id !== sessionId);
+      const reviewTask = primaryTaskForSession(sessionId);
+      if (reviewTask?.review?.sessionId === sessionId) {
+        reviewTask.review = null;
+        touchTask(reviewTask);
+      }
       return { sessionId, ignored: true };
     },
 
@@ -3474,11 +3592,31 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     subscribeAiCatalogEvents();
     try {
       offSessionEvents = ctx?.on?.("session/event", (session, event) => {
-        if (stopped || !state.settings.autoScan || event?.type !== "turn/end") return;
+        if (stopped || event?.type !== "turn/end") return;
         const id = session?.id || session?.header?.id;
-        if (state.ignoredSessions.includes(id) || state.suppressedSessions.includes(id)) return;
-        const workspaceId = metaForSessionId(id)?.workspaceId;
+        if (id && (state.ignoredSessions.includes(id) || state.suppressedSessions.includes(id))) return;
+        const meta = id ? metaForSessionId(id) : null;
+        const workspaceId = meta?.workspaceId;
         if (workspaceId && state.settings.excludeWorkspaces.includes(workspaceId)) return;
+        // Pin the finished turn immediately: the card must appear even when the
+        // scan is busy, deferred or disabled. The scan fills in the exact seq.
+        if (id && meta?.origin !== "subagent" && !(Number(meta?.delegationDepth) > 0)) {
+          const task = primaryTaskForSession(id);
+          // Prefer the event's own sequence; the cached lastTurnEnd is the
+          // previous turn and would dedupe a fresh turn into nothing.
+          const liveSeq = Number(event?.seq) > 0 ? Number(event.seq) : 0;
+          const alreadySeen = liveSeq > 0 && (Number(state.reviewSeen[id]) || 0) >= liveSeq;
+          if (task && !alreadySeen && markTaskReview(task, {
+            sessionId: id,
+            seq: liveSeq,
+            at: Date.now(),
+            kind: event?.data?.reason?.kind || "completed",
+          })) {
+            schedulePersist();
+            emitChanged("turn-end", 1);
+          }
+        }
+        if (!state.settings.autoScan) return;
         const now = Date.now();
         turnScanSettledAt = now + TURN_SETTLE_MS;
         turnScanDeadline ||= now + TURN_SCAN_MAX_WAIT_MS;

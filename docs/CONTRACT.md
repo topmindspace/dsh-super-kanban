@@ -98,6 +98,12 @@ type Priority = "P0" | "P1" | "P2" | "P3";
     "lastActivityAt": 1793694532136,
     "todoTotal": 8,
     "todoDone": 5
+  },
+  "review": {                            // 本轮结束、等待用户点对号的卡片；无待审批时为 null
+    "at": 1793694767953,                 // 本轮结束（被观察到）的时间，用于排序和相对时间
+    "sessionId": "session-...",          // 点卡片要回到的会话
+    "seq": 128,                          // 该轮 turn/end 的事件序号；实时事件先建立时可能为 0
+    "kind": "completed|error|interrupted|aborted"
   }
 }
 ```
@@ -116,6 +122,9 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   旧任务可能没有该字段，客户端按「无 provider」降级展示；下次研判后由 Host 补齐。
 - 旧 `settings.model` 字段已 **deprecated**：仅为旧状态 / 旧客户端兼容保留，**不权威、不用于研判，UI 不再展示**；
   模型选择来自 `settings.aiProvider/aiModel`（空 = 跟随 DSH 默认模型）。
+- `review` 是「待审批卡片条」的唯一数据源：任务的主会话出现新的 `turn/end` 时由 Host 写入（实时事件先落，结算扫描补准确的 `seq`/`kind`）。
+  它不改变任务列状态；用户点对号才走 `task.accept`（`status: "done"` + `completionBasis: "user"`）并清空该字段。
+  手动改状态、拖到「已完成」或忽略来源会话也会清空。已是 `done + user` 的任务不会被迟到的扫描重新排队。
 - v1 → v2 迁移：`keyFacts ← evidence 前 3`、`subtasks ← milestones`、`artifacts = []`、`sessionContext ← 首个 session`、`evidence` 截断 8 条。
 
 ### 2.1 文本与裁剪上限（Host 单一来源）
@@ -285,7 +294,7 @@ DSH 模型变更事件可使缓存失效。`?refresh=1` 可主动刷新，距上
 | `task.unlock` | `{id, fields?: string[]}` | 解锁字段，交还 AI 维护 |
 | `task.analyze` | `{id}` | 立即重跑研判：**只研判主来源会话**（`primarySessionId`，旧卡回退 `sessions[0]`）；一次最多 1 个预算单位；与扫描 / 其他 AI 命令互斥（见下）；AI 不可用/超预算自动降级规则 |
 | `task.continuePrompt` | `{id, target: "session"\|"newSession", purpose?, sessionId?}` | 本地生成续做草稿，`sessionId` 可指定当前任务的任一关联会话 |
-| `task.accept` | `{id, expectedUpdatedAt?}` | 人工验收并锁定完成状态。归档任务须先恢复，过期修订返回 409 |
+| `task.accept` | `{id, expectedUpdatedAt?}` | 人工验收并锁定完成状态，同时清空 `review`。归档任务须先恢复，过期修订返回 409 |
 | `task.polishPrompt` | `{id, prompt}` | AI 润色提示词（耗 1 个预算单位；与扫描 / 其他 AI 命令互斥，见下；不可用时原样返回） |
 | `task.importTodos` | `{id}` | 从来源会话导入待办为子任务 |
 | `task.toggleSubtask` | `{id, subtaskId, done}` | 勾选子任务 |
@@ -413,6 +422,8 @@ Host 只构造用户文本和助手文本消息。
 ### 工作视图与维护接口
 
 `GET /state` 增加 `storage` 和 `maintenance`，分别提供写入健康状态、最近保存时间、会话读取失败数量、回收站与忽略清单。任务可携带 `attention`、`completionBasis`、`relations`、`resolvedIssues`、`pinned`。字段采用增量扩展，旧状态仍可读取。
+
+`review` 不是人工字段：`task.update` / `task.create` 不接受它，只有 Host 在观察到 `turn/end` 时写入，并在验收、手动改状态或忽略会话时清空。`state.json` 另含 Host 内部账本 `reviewSeen`（`sessionId → 已处理的 turn/end seq`，上限 500），不进入 `/state` 响应和备份。
 
 `acceptanceCriteria` 是用户填写的多行验收条件，上限 600 字。`task.create` 接受该字段，`task.update` 在 `patch` 中接受，空字符串清空。自动研判保留此字段。有验收条件的未完成任务在会话提供完成依据时标为 `attention: "acceptance"`。`task.accept` 写入 `completionBasis: "user"`，并保留子任务的人工勾选状态。显式合并保留双方验收条件，超出上限时返回错误，合并撤销恢复各自条件。
 

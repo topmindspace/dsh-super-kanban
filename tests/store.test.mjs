@@ -8,9 +8,13 @@ import {
   DEFAULT_SETTINGS,
   emptyScanState,
   normalizeAiRoutePair,
+  normalizeReviewSeen,
   normalizeSettingsPatch,
+  normalizeTaskReview,
+  REVIEW_SEEN_LIMIT,
   rolloverUsage,
   todayKey,
+  truncateTask,
 } from "../server/store.mjs";
 
 test("normalizeSettingsPatch ignores non-object input", () => {
@@ -206,4 +210,32 @@ test("rolloverUsage keeps counters within the same local day and resets otherwis
   const negative = rolloverUsage({ date: today, calls: -4, tokens: -1 }, now);
   assert.equal(negative.calls, 0);
   assert.equal(negative.tokens, 0);
+});
+
+test("a queued review notice keeps only a usable shape", () => {
+  assert.equal(normalizeTaskReview(null), null);
+  assert.equal(normalizeTaskReview([]), null);
+  assert.equal(normalizeTaskReview({ at: 1 }), null);
+  assert.equal(normalizeTaskReview({ sessionId: "s" }), null);
+  assert.equal(normalizeTaskReview({ sessionId: "s", at: 0 }), null);
+  assert.deepEqual(
+    { ...normalizeTaskReview({ sessionId: "  sess-1  ", at: 1793694767953.9, seq: "12", kind: "error" }) },
+    { at: 1793694767953, sessionId: "sess-1", seq: 12, kind: "error" });
+  assert.deepEqual(
+    { ...normalizeTaskReview({ sessionId: "sess-1", at: 5, seq: -2, kind: "weird" }) },
+    { at: 5, sessionId: "sess-1", seq: 0, kind: "completed" });
+  const task = truncateTask({ id: "t", title: "任务", review: { sessionId: "s", at: 1e12, seq: 3, kind: "completed" } });
+  assert.deepEqual({ ...task.review }, { at: 1e12, sessionId: "s", seq: 3, kind: "completed" });
+  assert.equal(truncateTask({ id: "t", title: "任务", review: { sessionId: "", at: 1 } }).review, null);
+});
+
+test("the review ledger drops junk and stays bounded", () => {
+  assert.deepEqual({ ...normalizeReviewSeen(null) }, {});
+  assert.deepEqual({ ...normalizeReviewSeen({ a: 4, b: 0, c: "x", d: 2.9, "": 9, e: -1 }) }, { a: 4, d: 2 });
+  const raw = {};
+  for (let index = 0; index < REVIEW_SEEN_LIMIT + 20; index += 1) raw[`session-${index}`] = index + 1;
+  const seen = normalizeReviewSeen(raw);
+  assert.equal(Object.keys(seen).length, REVIEW_SEEN_LIMIT);
+  assert.equal(seen["session-0"], undefined);
+  assert.equal(seen[`session-${REVIEW_SEEN_LIMIT + 19}`], REVIEW_SEEN_LIMIT + 20);
 });

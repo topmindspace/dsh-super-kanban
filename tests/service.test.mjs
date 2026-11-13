@@ -1825,3 +1825,187 @@ test("unlinking a generated task does not let a rescan silently reattach it", as
   assert.equal(regenerated.length, 1);
   assert.notEqual(regenerated[0].id, original.id);
 });
+
+/* ------------------------------------------------------------------ */
+/* Review strip (T3-style pinned approval queue)                       */
+/* ------------------------------------------------------------------ */
+
+test("a finished turn is pinned on the task until the user approves it", async (t) => {
+  let observe = null;
+  const { service } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  const scanned = (await request(service, {})).json.tasks[0];
+  assert.ok(scanned);
+  // The ledger seeded this old turn during the first scan: no pinned card.
+  assert.equal(scanned.review || null, null);
+
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
+  const queued = (await request(service, {})).json.tasks[0];
+  assert.equal(queued.review.sessionId, "sess-alpha");
+  assert.equal(queued.review.seq, 12, "the live event sequence wins over the cached previous turn");
+  assert.equal(queued.review.kind, "completed");
+  assert.ok(queued.review.at > 0);
+  assert.notEqual(queued.updatedAt, scanned.updatedAt);
+
+  const accepted = await command(service, "task.accept", { id: queued.id, expectedUpdatedAt: queued.updatedAt });
+  assert.equal(accepted.status, 200);
+  const saved = (await request(service, {})).json.tasks[0];
+  assert.equal(saved.review, null);
+  assert.deepEqual([saved.status, saved.completionBasis], ["done", "user"]);
+});
+
+test("a conversation accepted once still pins its next turn", async (t) => {
+  let observe = null;
+  const { service } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
+  const first = (await request(service, {})).json.tasks[0];
+  assert.equal((await command(service, "task.accept", { id: first.id, expectedUpdatedAt: first.updatedAt })).status, 200);
+
+  // The user keeps talking in the accepted conversation: the next turn must
+  // pin a fresh card even though completion was already locked.
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 20, data: { reason: { kind: "completed" } } });
+  const next = (await request(service, {})).json.tasks[0];
+  assert.equal(next.review.sessionId, "sess-alpha");
+  assert.equal(next.review.seq, 20);
+  assert.deepEqual([next.status, next.completionBasis], ["done", "user"]);
+
+  const accepted = await command(service, "task.accept", { id: next.id, expectedUpdatedAt: next.updatedAt });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.json.data.review, null);
+  assert.deepEqual([accepted.json.data.status, accepted.json.data.completionBasis], ["done", "user"]);
+
+  // A rescan of the accepted turn must not resurrect the notice.
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const after = (await request(service, {})).json.tasks[0];
+  assert.equal(after.review, null);
+});
+
+test("a manual status change dismisses the card and the settle scan does not re-queue it", async (t) => {
+  let observe = null;
+  const { service } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
+  const queued = (await request(service, {})).json.tasks[0];
+  assert.equal(queued.review.seq, 12);
+  const moved = await command(service, "task.update", {
+    id: queued.id, expectedUpdatedAt: queued.updatedAt, patch: { status: "backlog" },
+  });
+  assert.equal(moved.status, 200);
+  assert.equal(moved.json.data.review, null);
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const after = (await request(service, {})).json.tasks.find((task) => task.id === queued.id);
+  assert.equal(after.review, null, "the dismissed turn must not come back from the scan");
+});
+
+test("a supporting session never owns a card whose primary is another session", async (t) => {
+  let observe = null;
+  const { service } = await setup(t, {
+    withSessions: true,
+    prepare(home) {
+      writeFileDeep(path.join(home, "storages", "super-kanban", "state.json"), JSON.stringify({
+        version: 2,
+        tasks: [{
+          id: "t_owner", title: "另一个会话", status: "in_progress", origin: "auto",
+          primarySessionId: "sess-other",
+          sessions: [{ id: "sess-other" }, { id: "sess-alpha" }],
+        }],
+      }));
+    },
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
+  const task = (await request(service, {})).json.tasks.find((item) => item.id === "t_owner");
+  assert.equal(task.review || null, null, "the supporting link must not steal a review");
+});
+
+test("the scan pins a turn that ended after the session was first seen, but never replays history", async (t) => {
+  const { service, fixture } = await setup(t, { withSessions: true });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  assert.equal(createStore({ dshHome: process.env.DSH_HOME }).load().state.reviewSeen["sess-alpha"], 10);
+
+  // A second, newer turn lands in the same log. The next scan sees a seq past
+  // the ledger and pins the card with the exact session and turn-end time.
+  const turnEndAt = Date.now() - 5000;
+  const events = [
+    event("user/message", 20, turnEndAt - 2000, { content: [{ type: "text", text: "再补一条回归测试" }] }),
+    event("turn/start", 21, turnEndAt - 2000, { turn: 2 }),
+    event("assistant/message", 22, turnEndAt - 1000, { message: { content: [{ type: "text", text: "已补齐" }] } }),
+    event("turn/end", 23, turnEndAt, { turn: 2, reason: { kind: "completed" } }),
+  ];
+  fs.appendFileSync(path.join(fixture.sessionDir, SESSION_FILE_NAME), framesOf(events));
+  await command(service, "scan.start");
+  await waitForScan(service);
+  const task = (await request(service, {})).json.tasks[0];
+  assert.deepEqual([task.review.sessionId, task.review.seq, task.review.kind], ["sess-alpha", 23, "completed"]);
+  assert.ok(Math.abs(task.review.at - turnEndAt) < 1000);
+
+  // Approving it clears the card; a rescan of the same turn must not bring it back.
+  const accepted = await command(service, "task.accept", { id: task.id, expectedUpdatedAt: task.updatedAt });
+  assert.equal(accepted.status, 200);
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const after = (await request(service, {})).json.tasks[0];
+  assert.equal(after.review, null);
+  assert.deepEqual([after.status, after.completionBasis], ["done", "user"]);
+});
+
+test("installing on a session that just finished pins it once; a later turn pins it again", async (t) => {
+  const { service, home } = await setup(t, {
+    withSessions: true,
+    sessionOptions: { time: Date.now() - 60_000 },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  const fresh = (await request(service, {})).json.tasks[0];
+  assert.equal(fresh.review.sessionId, "sess-alpha");
+
+  // The user approves; the same turn stays approved across a rescan.
+  const accepted = await command(service, "task.accept", { id: fresh.id, expectedUpdatedAt: fresh.updatedAt });
+  assert.equal(accepted.status, 200);
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  assert.equal((await request(service, {})).json.tasks[0].review, null);
+
+  // A third turn re-arms the strip.
+  seedSessionHome(home, { sessionId: "sess-beta", title: "Second session", time: Date.now() - 50_000 });
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const beta = (await request(service, {})).json.tasks.find((task) => task.primarySessionId === "sess-beta");
+  assert.equal(beta.review.sessionId, "sess-beta");
+});

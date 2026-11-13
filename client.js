@@ -31,6 +31,30 @@ window.__ModuleLoader__.load({
     const FLOAT_STYLES = { badge: "圆形图标", pill: "紧凑胶囊", bar: "状态条" };
     const FLOAT_SUMMARIES = { acceptance: "待验收", attention: "待处理", running: "运行中" };
     const FLOAT_TABS = { ...FLOAT_SUMMARIES, recent: "最近" };
+    // 悬浮入口上方的待审批条：只收刚结束、还没点头的会话。
+    const REVIEW_STRIP_LIMIT = 3;
+    // 文件夹圆标的固定调色板：按工作区 id 稳定取色，超出后循环。
+    const FOLDER_COLORS = ["#2563EB", "#7C3AED", "#0F766E", "#B45309", "#BE123C", "#A21CAF", "#A16207", "#15803D"];
+
+    function folderGlyph(name) {
+      const first = Array.from(String(name || "").trim())[0];
+      return first ? first.toUpperCase() : "任";
+    }
+
+    function folderColor(seed) {
+      // FNV-1a + 终混：短 id、相似前缀也能落到不同色位。
+      let hash = 0x811c9dc5;
+      for (const char of String(seed || "")) {
+        hash ^= char.codePointAt(0);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+      }
+      hash ^= hash >>> 16;
+      hash = Math.imul(hash, 0x85ebca6b);
+      hash ^= hash >>> 13;
+      hash = Math.imul(hash, 0xc2b2ae35);
+      hash ^= hash >>> 16;
+      return FOLDER_COLORS[(hash >>> 0) % FOLDER_COLORS.length];
+    }
     const ACTIVITY_RANGES = { recent: "近期", history: "历史", all: "全部时间" };
     const PREFS_VERSION = 2;
     const DEFAULT_PREFS = Object.freeze({
@@ -198,7 +222,7 @@ window.__ModuleLoader__.load({
 
     function canAcceptTask(task, artifact = primaryArtifactOf(artifactsOf(task))) {
       return !task.archived && (isAccepted(task) || (!task.pendingSessions?.length && !taskRunningLabel(task) &&
-        Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done")));
+        Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done" || task.review?.sessionId)));
     }
 
     function taskActivityAt(task) {
@@ -2089,6 +2113,57 @@ button.sk-task-row-main{cursor:pointer}
   background:var(--dsw-alias-toast-bg,#353638);color:var(--dsw-alias-toast-label,#fff);font-size:12px;line-height:1.5;box-shadow:0 10px 30px rgba(0,0,0,.22)}
 .sk-float-notice .sk-text{flex:none;color:inherit;text-decoration:underline;text-underline-offset:2px}
 .sk-floating .sk-modal-mask{padding:12px}
+/* ---------- review strip: finished turns pinned above the launcher ---------- */
+.sk-pin-stack{display:grid;gap:6px;justify-self:end;width:min(240px,calc(100vw - 32px));
+  max-height:calc(100vh - var(--sk-float-offset,0px) - 120px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.sk-floating.is-left .sk-pin-stack{justify-self:start}
+.sk-pin-card{position:relative;display:flex;align-items:center;gap:8px;min-height:52px;padding:7px 8px 7px 9px;
+  cursor:pointer;user-select:none;-webkit-user-select:none;
+  border:1px solid var(--sk-line);border-radius:12px;background:color-mix(in srgb,var(--sk-surface) 94%,transparent);
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 6px 18px rgba(0,0,0,.10);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  transition:border-color .16s var(--sk-ease),box-shadow .16s var(--sk-ease),transform .16s var(--sk-ease);overflow:hidden}
+.sk-pin-card:hover{border-color:var(--sk-line-strong);transform:translateY(-1px);box-shadow:0 2px 4px rgba(0,0,0,.06),0 14px 30px rgba(0,0,0,.17)}
+.sk-pin-card:focus-visible{outline:2px solid color-mix(in srgb,var(--sk-green) 65%,transparent);outline-offset:2px}
+.sk-pin-avatar{flex:none;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;
+  background:var(--sk-folder,#64748B);color:#fff;font-size:10.5px;font-weight:700;line-height:1;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.sk-pin-open{flex:1;min-width:0;display:grid;gap:1px;padding:0;text-align:start}
+.sk-pin-marquee{display:block;min-width:0;overflow:hidden}
+.sk-pin-title{display:block;font-size:12.5px;font-weight:600;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 只有真的放不下时才在悬停时切成跑马灯；静止状态保持干净的省略号。 */
+.sk-pin-card:hover .sk-pin-marquee.is-overflow{-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 12px,#000 calc(100% - 14px),transparent 100%);
+  mask-image:linear-gradient(90deg,transparent 0,#000 12px,#000 calc(100% - 14px),transparent 100%)}
+.sk-pin-card:hover .sk-pin-marquee.is-overflow .sk-pin-title{display:inline-block;max-width:none;overflow:visible;text-overflow:clip;
+  animation:sk-pin-marquee var(--sk-marquee-duration,3s) linear infinite alternate}
+@keyframes sk-pin-marquee{from{transform:translateX(0)}to{transform:translateX(var(--sk-marquee-shift,0))}}
+.sk-pin-meta{font-size:10.5px;line-height:1.35;color:var(--sk-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.sk-pin-check{flex:none;display:grid;place-items:center;width:26px;height:26px;padding:0;border:1px solid transparent;
+  border-radius:50%;background:var(--sk-green);color:#fff;cursor:pointer;box-shadow:0 2px 6px color-mix(in srgb,var(--sk-green) 34%,transparent);
+  opacity:0;transform:translateX(3px);pointer-events:none;transition:opacity .14s var(--sk-ease),transform .14s var(--sk-ease),filter .14s}
+.sk-pin-card:hover .sk-pin-check,.sk-pin-card:focus-within .sk-pin-check{opacity:1;transform:none;pointer-events:auto}
+.sk-pin-check:hover{filter:brightness(1.07)}
+.sk-pin-check:disabled{opacity:.5;cursor:progress;filter:none}
+.sk-pin-check.is-floating{justify-self:end;width:30px;height:30px;opacity:1;transform:none;pointer-events:auto;
+  box-shadow:0 4px 14px rgba(0,0,0,.18)}
+.sk-pin-spin{width:10px;height:10px;border-radius:50%;border:1.6px solid color-mix(in srgb,currentColor 28%,transparent);border-top-color:currentColor;
+  animation:sk-pin-spin .9s linear infinite}
+.sk-pin-more{justify-self:end;height:26px;padding:0 10px;border:1px solid var(--sk-line);border-radius:999px;background:var(--sk-surface);
+  color:var(--sk-ink-2);font-size:11px;cursor:pointer;font-variant-numeric:tabular-nums}
+.sk-pin-more:hover{background:var(--sk-hover);color:var(--sk-ink)}
+.sk-pin-status{margin:0;padding:0 6px;font-size:11px;line-height:1.4;color:var(--sk-ink-3);text-align:end;overflow-wrap:anywhere}
+.sk-pin-status.is-floating{justify-self:end;max-width:240px;padding:5px 9px;border:1px solid var(--sk-line);border-radius:9px;
+  background:var(--sk-surface);box-shadow:0 4px 14px rgba(0,0,0,.12);color:var(--sk-ink-2);text-align:start}
+@keyframes sk-pin-spin{to{transform:rotate(360deg)}}
+@media (hover:none){.sk-pin-check{opacity:1;transform:none;pointer-events:auto}}
+@media (prefers-reduced-motion:reduce){
+  .sk-pin-spin{animation:none;border-color:currentColor}
+  .sk-pin-card{transition:none}
+  .sk-pin-card:hover .sk-pin-marquee.is-overflow .sk-pin-title{animation:none}
+}
+@media (prefers-reduced-motion:no-preference){
+  .sk-pin-card{animation:sk-pin-in .18s var(--sk-ease)}
+  @keyframes sk-pin-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+}
 /* ---------- settings: display section ---------- */
 .sk-float-options{min-width:0;display:flex;flex-wrap:wrap;gap:8px 16px;margin:0;padding:8px 10px;border:1px solid var(--sk-line);border-radius:8px}
 .sk-float-options label{display:flex;gap:5px;align-items:center}
@@ -4845,6 +4920,91 @@ button.sk-task-row-main{cursor:pointer}
       };
     }
 
+    /**
+     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话：正在跑、正在等你
+     * 回答、或者就是你当前打开的那条会话，都先让位，切走或闲下来再回来。
+     */
+    function floatingReview(tasks, statuses, now = Date.now(), currentSessionId = "") {
+      const rows = [];
+      for (const task of tasks || []) {
+        if (!task || task.archived) continue;
+        const review = task.review;
+        if (!review?.sessionId) continue;
+        if (currentSessionId && review.sessionId === currentSessionId) continue;
+        const projected = withSessionStatus(task, statuses, now);
+        const running = projected.runningSessionIds?.length ||
+          (projected.sessionContext?.isLive ? projected.sessionContext.sessionId : null);
+        if (running || projected.pendingSessions?.length) continue;
+        const folder = projected.workspaceTitle || projected.projectName || "";
+        rows.push({ kind: "review", task: projected, scope: taskScopeLabel(projected), folder,
+          folderSeed: projected.workspaceId || folder || projected.id,
+          sessionId: review.sessionId, at: Number(review.at) || taskActivityAt(projected) });
+      }
+      rows.sort((a, b) => b.at - a.at || a.task.id.localeCompare(b.task.id));
+      return rows;
+    }
+
+    /** 待审批条：一行一张卡，悬停出现对号；点卡片本体打开对应会话。 */
+    function ReviewStrip({ rows, busyId, error, expanded, message, onOpen, onAccept, onExpand }) {
+      const stack = React.useRef(null);
+      // 标题只在真的放不下时才跑马灯：量一次内层宽度，把位移和时长写到 DOM 上。
+      React.useEffect(() => {
+        const root = stack.current;
+        if (!root?.querySelectorAll) return undefined;
+        const measure = () => {
+          for (const box of root.querySelectorAll("[data-marquee]")) {
+            const label = box.firstElementChild;
+            if (!label) continue;
+            const shift = Math.ceil(label.scrollWidth - box.clientWidth);
+            box.classList.toggle("is-overflow", shift > 1);
+            box.style.setProperty("--sk-marquee-shift", shift > 1 ? `-${shift}px` : "0px");
+            box.style.setProperty("--sk-marquee-duration", `${Math.min(6, Math.max(1.8, shift / 34)).toFixed(2)}s`);
+          }
+        };
+        measure();
+        if (typeof ResizeObserver === "undefined") return undefined;
+        const observer = new ResizeObserver(measure);
+        observer.observe(root);
+        return () => observer.disconnect();
+      }, [rows]);
+      const visible = expanded ? rows : rows.slice(0, REVIEW_STRIP_LIMIT);
+      const hidden = rows.length - visible.length;
+      return h("div", { ref: stack, className: "sk-pin-stack", role: "group", "aria-label": "待审批任务" },
+        visible.map((row) => {
+          const busy = busyId === row.task.id;
+          // 整张卡就是打开会话的按钮；对号是卡内的独立控件，点它只验收。
+          return h("article", {
+            key: row.task.id, className: "sk-pin-card is-review", role: "button", tabIndex: 0,
+            title: row.title || "打开会话",
+            "aria-label": `打开会话：${row.title}`,
+            onClick: (event) => {
+              if (event?.target?.closest?.(".sk-pin-check")) return;
+              onOpen(row);
+            },
+            onKeyDown: (event) => {
+              if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+              event.preventDefault();
+              onOpen(row);
+            },
+          },
+            h("span", { className: "sk-pin-avatar", style: { "--sk-folder": folderColor(row.folderSeed) },
+              "aria-hidden": "true" }, folderGlyph(row.folder)),
+            h("span", { className: "sk-pin-open" },
+              h("span", { className: "sk-pin-marquee", "data-marquee": "" },
+                h("span", { className: "sk-pin-title" }, row.title)),
+              h("span", { className: "sk-pin-meta" }, [row.scope, relTime(row.at)].filter(Boolean).join(" · "))),
+            h("button", { type: "button", className: "sk-pin-check", disabled: Boolean(busyId || error),
+              title: "确认完成", "aria-label": `确认完成：${row.task.title}`,
+              onClick: (event) => { event.stopPropagation(); onAccept(row.task); } },
+              busy ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 13 })));
+        }),
+        hidden > 0 || expanded
+          ? h("button", { type: "button", className: "sk-pin-more", onClick: onExpand },
+              hidden > 0 ? `还有 ${hidden} 项` : "收起")
+          : null,
+        message ? h("p", { className: "sk-pin-status", role: "status" }, message) : null);
+    }
+
     /** 当前选中的 DSH 全局面板；用于在全局看板显示时隐藏悬浮入口。 */
     function useActivePanel(host) {
       const [panel, setPanel] = React.useState(() => host.activePanel?.());
@@ -4908,15 +5068,42 @@ button.sk-task-row-main{cursor:pointer}
       }, [data?.tasks, data?.projects]);
       const summary = React.useMemo(() => floatingSummary(tasks, sessionStatuses, data?.settings?.initialDays, now),
         [tasks, sessionStatuses, data?.settings?.initialDays, now]);
+      // 当前打开的会话：它自己的待审批卡先收起，切到别的会话再露出来。
+      const [currentSessionId, setCurrentSessionId] = React.useState(() => host.currentSession?.() || "");
+      const currentSessionGrace = React.useRef(0);
+      React.useEffect(() => {
+        const sync = () => {
+          if (Date.now() < currentSessionGrace.current) return;
+          const id = host.currentSession?.() || "";
+          setCurrentSessionId((previous) => (previous === id ? previous : id));
+        };
+        sync();
+        const timer = setInterval(sync, 600);
+        return () => clearInterval(timer);
+      }, [host]);
+      const titleOf = (row) => host.sessionTitle?.(row.sessionId) || row.task.title;
+      const allReviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now)
+        .map((row) => ({ ...row, title: titleOf(row) })), [tasks, sessionStatuses, now, host]);
+      const reviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now, currentSessionId)
+        .map((row) => ({ ...row, title: titleOf(row) })), [tasks, sessionStatuses, now, currentSessionId, host]);
+      // 当前会话的卡先收起，但它还需要一个「点完成」的入口：留一颗悬浮对号。
+      const activeReview = currentSessionId
+        ? allReviews.find((row) => row.sessionId === currentSessionId) || null
+        : null;
+      const [stripExpanded, setStripExpanded] = React.useState(false);
+      React.useEffect(() => {
+        if (!reviews.length) setStripExpanded(false);
+      }, [reviews.length]);
       const metrics = prefs.floatSummaries.map((id) => ({ id, label: FLOAT_SUMMARIES[id], count: summary[id].length }));
       const tabs = Object.entries(FLOAT_TABS).map(([id, label]) => ({ id, label, count: summary[id].length }));
       React.useEffect(() => {
         if (!data) return;
-        const current = prefs.floatSummaries.includes("acceptance") ? new Set(summary.acceptance.map(({ task }) => task.id)) : null;
+        const pending = prefs.floatSummaries.includes("acceptance") ? summary.acceptance.map(({ task }) => task.id) : [];
+        const current = new Set([...pending, ...reviews.map(({ task }) => task.id)]);
         const previous = previousAcceptance.current;
-        if (current && previous && [...current].some((id) => !previous.has(id))) setPulse((value) => value + 1);
+        if (previous && [...current].some((id) => !previous.has(id))) setPulse((value) => value + 1);
         previousAcceptance.current = current;
-      }, [data, prefs.floatSummaries, summary.acceptance]);
+      }, [data, prefs.floatSummaries, summary.acceptance, reviews]);
       React.useEffect(() => {
         if (open) return;
         setLimit(0);
@@ -4933,6 +5120,11 @@ button.sk-task-row-main{cursor:pointer}
         const timer = setTimeout(() => setNotice(null), 8000);
         return () => clearTimeout(timer);
       }, [notice]);
+      React.useEffect(() => {
+        if (!message) return undefined;
+        const timer = setTimeout(() => setMessage(""), 6000);
+        return () => clearTimeout(timer);
+      }, [message]);
       const preferred = metrics.find(({ count }) => count > 0)?.id || metrics[0].id;
       const selected = Object.hasOwn(FLOAT_TABS, category) ? category : preferred;
       const continueTask = continuation && data?.tasks?.find((task) => task.id === continuation.id && !task.archived);
@@ -4943,7 +5135,8 @@ button.sk-task-row-main{cursor:pointer}
       const showPanel = open && !onBoardPage;
       // 全局或右侧看板正在显示时入口让位：同一时刻只出现一种看板形态。
       const showTrigger = !showPanel && !onBoardPage && sideBoards === 0 && prefs.floatEnabled &&
-        (!prefs.floatHideEmpty || visibleMetrics.length > 0 || Boolean(error));
+        (!prefs.floatHideEmpty || visibleMetrics.length > 0 || reviews.length > 0 || Boolean(activeReview) ||
+          Boolean(message) || Boolean(error));
       const showRoot = showPanel || showTrigger || Boolean(notice);
       const topLayer = typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.showPopover === "function";
       React.useLayoutEffect(() => {
@@ -4984,8 +5177,10 @@ button.sk-task-row-main{cursor:pointer}
           document.removeEventListener("keydown", closeOnEscape, true);
         };
       }, [showPanel, prefs.floatPinned]);
-      const accept = async (task) => {
-        if (busy.current || !canAcceptTask(task) || isAccepted(task)) return;
+      const accept = async (task, doneLabel = "已验收") => {
+        // A later turn on an already accepted task still pins a review; its
+        // check must be able to clear that notice.
+        if (busy.current || !canAcceptTask(task) || (isAccepted(task) && !task.review?.sessionId)) return;
         busy.current = true;
         heading.current?.focus({ preventScroll: true });
         setBusyId(task.id);
@@ -4993,7 +5188,7 @@ button.sk-task-row-main{cursor:pointer}
         try {
           await command("task.accept", { id: task.id, expectedUpdatedAt: task.updatedAt });
           await reload(true);
-          setMessage(`已验收「${task.title}」`);
+          setMessage(`${doneLabel}「${task.title}」`);
         } catch (cause) {
           setMessage(cause.status === 409 ? "任务已更新，请查看最新状态后再确认。" : `验收失败：${cause.message}`);
           if (cause.status === 409) await reload(true);
@@ -5083,14 +5278,16 @@ button.sk-task-row-main{cursor:pointer}
         },
       };
       if (!showRoot) return null;
-      const counts = metrics.map(({ label, count }) => `${label} ${count}`).join("，");
+      const reviewCount = reviews.length;
+      const counts = [reviewCount ? `待审批 ${reviewCount}` : "",
+        ...metrics.map(({ label, count }) => `${label} ${count}`)].filter(Boolean).join("，");
       const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
       const rows = summary[selected].filter(({ task }) => !terms.length ||
         terms.every((term) => [task.title, task.workspaceTitle, task.projectName, ...(task.tags || [])].filter(Boolean).join(" ").toLowerCase().includes(term)));
       const visibleLimit = limit || (selected === "running" ? 3 : FLOAT_PAGE_SIZE);
       const side = dragPosition?.side || prefs.floatPosition;
       const offset = dragPosition?.offset ?? prefs.floatOffset;
-      const badge = (visibleMetrics[0] || metrics[0]).count;
+      const badge = reviewCount || (visibleMetrics[0] || metrics[0]).count;
       const iconButton = (icon, label, onClick, extra) => h("button", { type: "button", className: "sk-float-icon", title: label, "aria-label": label, onClick, ...extra },
         h(Icon, { name: icon, size: 15 }));
       const panel = showPanel ? h("section", { id: panelId, className: cx("sk-float-panel", "is-" + prefs.floatSize), role: "dialog", "aria-labelledby": titleId, inert: Boolean(continueTask) },
@@ -5165,6 +5362,18 @@ button.sk-task-row-main{cursor:pointer}
             onChange: (event) => setQuickTitle(event.target.value) }),
           quickTitle.trim() ? h("button", { type: "submit", className: "sk-btn" }, "保存") : null),
         message ? h("footer", null, h("span", { role: "status" }, message)) : h("span", { className: "sk-sr-only", role: "status" })) : null;
+      const strip = showTrigger && dialogs === 0 && reviews.length
+        ? h(ReviewStrip, {
+            rows: reviews, busyId, error: Boolean(error), expanded: stripExpanded, message,
+            onOpen: (row) => {
+              currentSessionGrace.current = Date.now() + 1500;
+              setCurrentSessionId(row.sessionId);
+              navigate(host.openSession, row.sessionId);
+            },
+            onAccept: (task) => accept(task, "已确认完成"),
+            onExpand: () => setStripExpanded((value) => !value),
+          })
+        : null;
       const entry = showTrigger ? h("button", { ref: trigger, type: "button",
         className: cx("sk-float-trigger", "is-" + prefs.floatStyle, dragPosition && "is-dragging", dialogs > 0 && "is-behind"),
         title: `任务看板 · ${counts}\n点击展开 · 拖动调整位置 · 右键更多`, "aria-label": `任务看板，${counts}`, "aria-haspopup": "dialog", "aria-expanded": false,
@@ -5182,11 +5391,28 @@ button.sk-task-row-main{cursor:pointer}
           ? [badge > 0 ? h("span", { key: "count", className: "sk-float-count" }, badge > 99 ? "99+" : badge) : null,
               summary.running.length ? h("span", { key: "run", className: "sk-float-live", title: `${summary.running.length} 个任务运行中` }) : null]
           : prefs.floatStyle === "pill"
-            ? h("span", null, visibleMetrics.length ? visibleMetrics.map(({ label, count }) => `${label} ${count}`).join(" · ") : "任务看板")
-            : metrics.map(({ id, label, count }) => h("span", { key: id }, label, " ", h("b", null, count)))) : null;
+            ? h("span", null, [reviewCount ? `待审批 ${reviewCount}` : "",
+                ...visibleMetrics.map(({ label, count }) => `${label} ${count}`)].filter(Boolean).join(" · ") || "任务看板")
+            : [reviewCount ? h("span", { key: "review" }, "待审批 ", h("b", null, reviewCount)) : null,
+                ...metrics.map(({ id, label, count }) => h("span", { key: id }, label, " ", h("b", null, count)))]) : null;
+      const activeCheck = activeReview && !showPanel && dialogs === 0
+        ? h("button", { type: "button", className: "sk-pin-check is-floating",
+            disabled: Boolean(busyId || error),
+            title: `确认完成：${activeReview.title}`,
+            "aria-label": `确认完成：${activeReview.title}`,
+            onClick: () => accept(activeReview.task, "已确认完成") },
+            busyId === activeReview.task.id ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 15 }))
+        : null;
+      // 验收反馈在条子/面板都不在场时也要可见（最后一张卡、只有悬浮对号时）。
+      const floatingStatus = message && (showPanel || !reviews.length)
+        ? h("p", { className: "sk-pin-status is-floating", role: "status" }, message)
+        : null;
       return h("div", { ref: root, className: cx("sk-floating", "is-" + side, showPanel && "is-open"), popover: topLayer ? "manual" : undefined,
         style: { "--sk-float-offset": `${showPanel ? 0 : offset}px` } },
         panel,
+        strip,
+        floatingStatus,
+        activeCheck,
         entry,
         notice ? h("div", { className: "sk-float-notice", role: "status" }, h("span", null, notice.text),
           h("button", { type: "button", className: "sk-text", onClick: () => { notice.undo(); setNotice(null); } }, "撤销"),
@@ -6997,6 +7223,16 @@ button.sk-task-row-main{cursor:pointer}
             /* layout service unavailable */
           }
           return () => {};
+        },
+        /** 会话在侧栏里显示的标题（session-titles 等生成后以会话列表为准）。 */
+        sessionTitle(sessionId) {
+          try {
+            const state = ctx.get("sessions")?.list?.getSnapshot?.();
+            const title = state?.byId?.[sessionId]?.title;
+            return typeof title === "string" ? title.trim() : "";
+          } catch {
+            return "";
+          }
         },
         /** 当前在前台的会话 id（悬浮形态用它决定「放入会话」的目标）。 */
         currentSession() {
