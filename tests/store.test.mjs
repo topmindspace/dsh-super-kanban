@@ -8,6 +8,7 @@ import {
   DEFAULT_SETTINGS,
   emptyScanState,
   normalizeAiRoutePair,
+  normalizeReviewDeferred,
   normalizeReviewSeen,
   normalizeSettingsPatch,
   normalizeTaskReview,
@@ -238,4 +239,15 @@ test("the review ledger drops junk and stays bounded", () => {
   assert.equal(Object.keys(seen).length, REVIEW_SEEN_LIMIT);
   assert.equal(seen["session-0"], undefined);
   assert.equal(seen[`session-${REVIEW_SEEN_LIMIT + 19}`], REVIEW_SEEN_LIMIT + 20);
+});
+
+test("the deferred-dismissal ledger drops junk and stays bounded", () => {
+  assert.deepEqual({ ...normalizeReviewDeferred(null) }, {});
+  assert.deepEqual({ ...normalizeReviewDeferred({ a: 1, b: 0, c: "yes", "": 1, d: true, e: 1_700_000_000_000 }) }, { a: 1, d: 1, e: 1_700_000_000_000 });
+  const raw = {};
+  for (let index = 0; index < REVIEW_SEEN_LIMIT + 20; index += 1) raw[`session-${index}`] = 1;
+  const deferred = normalizeReviewDeferred(raw);
+  assert.equal(Object.keys(deferred).length, REVIEW_SEEN_LIMIT);
+  assert.equal(deferred["session-0"], undefined);
+  assert.equal(deferred[`session-${REVIEW_SEEN_LIMIT + 19}`], 1);
 });

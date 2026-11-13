@@ -118,8 +118,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   let cache = loaded.cache;
   let stopped = false;
   state.usage = rolloverUsage(state.usage);
-  // Additive field: hand-edited or older state files may not carry the ledger.
+  // Additive fields: hand-edited or older state files may not carry the ledgers.
   if (!state.reviewSeen || typeof state.reviewSeen !== "object") state.reviewSeen = {};
+  if (!state.reviewDeferred || typeof state.reviewDeferred !== "object") state.reviewDeferred = {};
 
   /** id -> SessionMeta (compact, includes workspace + last todo counts). */
   let sessionsById = new Map();
@@ -1171,7 +1172,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   /** Clear the notice and remember the dismissed turn so the settle scan cannot re-queue it. */
   function dismissReview(task) {
     const review = task?.review;
-    if (review?.sessionId) recordReviewSeen(review.sessionId, review.seq);
+    if (review?.sessionId) {
+      const seq = Number(review.seq);
+      if (seq > 0) recordReviewSeen(review.sessionId, seq);
+      // A live event may land with seq 0; remember the dismissal so the
+      // settle scan can record the real seq without pinning the same turn again.
+      else recordReviewDeferred(review.sessionId);
+    }
     if (task) task.review = null;
   }
 
@@ -1186,6 +1193,26 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     }
   }
 
+  /** Remember a seq-0 dismissal until the settle scan observes the real turn. */
+  function recordReviewDeferred(sessionId) {
+    if (!sessionId) return;
+    // Wall-clock time of the dismissal, so a later turn that ends afterwards
+    // can still pin even if it lands before the settle scan.
+    state.reviewDeferred[sessionId] = Date.now();
+    const keys = Object.keys(state.reviewDeferred);
+    if (keys.length > REVIEW_SEEN_LIMIT) {
+      for (const key of keys.slice(0, keys.length - REVIEW_SEEN_LIMIT)) delete state.reviewDeferred[key];
+    }
+  }
+
+  /** Consume a deferred dismissal. Returns the dismissal timestamp, or 0. */
+  function consumeReviewDeferred(sessionId) {
+    if (!sessionId || !state.reviewDeferred[sessionId]) return 0;
+    const at = Number(state.reviewDeferred[sessionId]) || 0;
+    delete state.reviewDeferred[sessionId];
+    return at;
+  }
+
   /**
    * Scan-side turn-end bookkeeping. The first sighting of an old session only
    * seeds the ledger; a later turn-end on the same session pins a review card.
@@ -1197,11 +1224,35 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const firstSighting = !state.reviewSeen[sessionId];
     const seen = Number(state.reviewSeen[sessionId]) || 0;
     const fresh = Date.now() - (Number(meta.lastTurnEnd.time) || 0) <= REVIEW_FRESH_MS;
-    recordReviewSeen(sessionId, seq);
-    if (firstSighting ? !fresh : seen >= seq) return false;
-    if (meta.origin === "subagent" || Number(meta.delegationDepth) > 0) return false;
+    const deferredAt = Number(state.reviewDeferred[sessionId]) || 0;
+    // Observations that would not pin anyway (seed-only or already in the
+    // ledger) must keep the deferred marker: an in-flight or early scan may
+    // still be looking at a turn older than the one the user just dismissed.
+    if (firstSighting ? !fresh : seen >= seq) {
+      recordReviewSeen(sessionId, seq);
+      return false;
+    }
+    if (meta.origin === "subagent" || Number(meta.delegationDepth) > 0) {
+      recordReviewSeen(sessionId, seq);
+      return false;
+    }
     const task = primaryTaskForSession(sessionId);
-    if (!task) return false;
+    if (!task) {
+      recordReviewSeen(sessionId, seq);
+      return false;
+    }
+    // This observation would pin a card. Consume a deferred dismissal only
+    // here, and only skip when it is the same turn (ended at or before the
+    // dismissal). A later turn that landed before this scan still pins.
+    // Values <= 1 are a legacy boolean sentinel that cannot tell turns apart.
+    if (deferredAt) {
+      consumeReviewDeferred(sessionId);
+      recordReviewSeen(sessionId, seq);
+      const turnTime = Number(meta.lastTurnEnd.time) || 0;
+      if (deferredAt <= 1 || turnTime <= deferredAt) return false;
+    } else {
+      recordReviewSeen(sessionId, seq);
+    }
     return markTaskReview(task, {
       sessionId,
       seq,
@@ -3201,7 +3252,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       state.suppressedSessions = state.suppressedSessions.filter((id) => id !== sessionId);
       const reviewTask = primaryTaskForSession(sessionId);
       if (reviewTask?.review?.sessionId === sessionId) {
-        reviewTask.review = null;
+        dismissReview(reviewTask);
         touchTask(reviewTask);
       }
       return { sessionId, ignored: true };

@@ -124,7 +124,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   模型选择来自 `settings.aiProvider/aiModel`（空 = 跟随 DSH 默认模型）。
 - `review` 是「待审批卡片条」的唯一数据源：任务的主会话出现新的 `turn/end` 时由 Host 写入（实时事件先落，结算扫描补准确的 `seq`/`kind`）。
   它不改变任务列状态；用户点对号才走 `task.accept`（`status: "done"` + `completionBasis: "user"`）并清空该字段。
-  手动改状态、拖到「已完成」或忽略来源会话也会清空。已是 `done + user` 的任务不会被迟到的扫描重新排队。
+  手动改状态、拖到「已完成」或忽略来源会话也会清空。已是 `done + user` 的任务不会被迟到的扫描把同一轮重新排队；其后的新轮次仍会钉一张新卡。实时事件以 `seq` 为 0 先落、用户已清除后，结算扫描只补账本，不再把同一轮钉回。
 - v1 → v2 迁移：`keyFacts ← evidence 前 3`、`subtasks ← milestones`、`artifacts = []`、`sessionContext ← 首个 session`、`evidence` 截断 8 条。
 
 ### 2.1 文本与裁剪上限（Host 单一来源）
@@ -423,7 +423,7 @@ Host 只构造用户文本和助手文本消息。
 
 `GET /state` 增加 `storage` 和 `maintenance`，分别提供写入健康状态、最近保存时间、会话读取失败数量、回收站与忽略清单。任务可携带 `attention`、`completionBasis`、`relations`、`resolvedIssues`、`pinned`。字段采用增量扩展，旧状态仍可读取。
 
-`review` 不是人工字段：`task.update` / `task.create` 不接受它，只有 Host 在观察到 `turn/end` 时写入，并在验收、手动改状态或忽略会话时清空。`state.json` 另含 Host 内部账本 `reviewSeen`（`sessionId → 已处理的 turn/end seq`，上限 500），不进入 `/state` 响应和备份。
+`review` 不是人工字段：`task.update` / `task.create` 不接受它，只有 Host 在观察到 `turn/end` 时写入，并在验收、手动改状态或忽略会话时清空（忽略与验收、改状态走同一套 `dismissReview`，会把该轮记入账本）。`state.json` 另含 Host 内部账本 `reviewSeen`（`sessionId → 已处理的 turn/end seq`，上限 500）和 `reviewDeferred`（`sessionId → 清除时刻的毫秒时间戳`，上限 500）：暂存「`seq` 为 0 时已被用户清除」的会话。结算扫描若观察到的轮次结束时间不晚于该时刻，只补记真实序号、不再钉卡；若在清除之后又结束了新轮次（即使发生在结算扫描之前），仍会钉一张新卡。若本次观察本就不会钉卡（例如日志还停在账本已记录的更早序号），则保留该标记，等真正对应的轮次落盘后再处理。二者均不进入 `/state` 响应和备份。
 
 `acceptanceCriteria` 是用户填写的多行验收条件，上限 600 字。`task.create` 接受该字段，`task.update` 在 `patch` 中接受，空字符串清空。自动研判保留此字段。有验收条件的未完成任务在会话提供完成依据时标为 `attention: "acceptance"`。`task.accept` 写入 `completionBasis: "user"`，并保留子任务的人工勾选状态。显式合并保留双方验收条件，超出上限时返回错误，合并撤销恢复各自条件。
 

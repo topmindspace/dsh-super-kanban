@@ -225,6 +225,20 @@ window.__ModuleLoader__.load({
         Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done" || task.review?.sessionId)));
     }
 
+    /**
+     * Guard for the review-strip check. Visibility is keyed on review.sessionId,
+     * so acceptance must be too: a supporting session that is running or
+     * waiting must not make the green check a no-op. The drawer and the
+     * floating panel's "确认验收" button keep the task-wide canAcceptTask.
+     */
+    function canAcceptReview(task) {
+      if (!task || task.archived) return false;
+      const reviewSession = task.review?.sessionId;
+      if (!reviewSession) return canAcceptTask(task);
+      if (isAccepted(task)) return true;
+      return !(task.pendingSessions || []).some((item) => item.id === reviewSession);
+    }
+
     function taskActivityAt(task) {
       const sessionActivity = timeValue(task.lastActivityAt) || timeValue(task.createdAt);
       return Math.max(sessionActivity,
@@ -4921,8 +4935,9 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     /**
-     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话：正在跑、正在等你
-     * 回答、或者就是你当前打开的那条会话，都先让位，切走或闲下来再回来。
+     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话：该会话正在跑、
+     * 正在等你回答、或者就是你当前打开的那条，都先让位，切走或闲下来再回来。
+     * 同一任务上其他关联会话的活动不会把它藏起来。
      */
     function floatingReview(tasks, statuses, now = Date.now(), currentSessionId = "") {
       const rows = [];
@@ -4932,9 +4947,14 @@ button.sk-task-row-main{cursor:pointer}
         if (!review?.sessionId) continue;
         if (currentSessionId && review.sessionId === currentSessionId) continue;
         const projected = withSessionStatus(task, statuses, now);
-        const running = projected.runningSessionIds?.length ||
-          (projected.sessionContext?.isLive ? projected.sessionContext.sessionId : null);
-        if (running || projected.pendingSessions?.length) continue;
+        // Only the review's own session hides the card. A supporting session
+        // that is running or waiting must not tuck away the finished primary turn.
+        const reviewSession = review.sessionId;
+        const runningThis = (projected.runningSessionIds || []).includes(reviewSession) ||
+          Boolean(projected.sessionContext?.isLive &&
+            (projected.sessionContext.sessionId || task.primarySessionId) === reviewSession);
+        const pendingThis = (projected.pendingSessions || []).some((item) => item.id === reviewSession);
+        if (runningThis || pendingThis) continue;
         const folder = projected.workspaceTitle || projected.projectName || "";
         rows.push({ kind: "review", task: projected, scope: taskScopeLabel(projected), folder,
           folderSeed: projected.workspaceId || folder || projected.id,
@@ -5180,7 +5200,7 @@ button.sk-task-row-main{cursor:pointer}
       const accept = async (task, doneLabel = "已验收") => {
         // A later turn on an already accepted task still pins a review; its
         // check must be able to clear that notice.
-        if (busy.current || !canAcceptTask(task) || (isAccepted(task) && !task.review?.sessionId)) return;
+        if (busy.current || !canAcceptReview(task) || (isAccepted(task) && !task.review?.sessionId)) return;
         busy.current = true;
         heading.current?.focus({ preventScroll: true });
         setBusyId(task.id);

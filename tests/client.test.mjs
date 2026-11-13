@@ -44,7 +44,7 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
     ...browser,
   };
   const script = inspect ? source.replace("return { apply, inject:",
-    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, floatingReview, canAcceptTask, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
+    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, floatingReview, canAcceptTask, canAcceptReview, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
     "folderGlyph, folderColor, " +
     "markdownBlocks, renderInline, taskChatReference, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
@@ -889,6 +889,72 @@ test("a review card hides while its session runs or waits, and for the open sess
   assert.deepEqual(Array.from(other, (row) => row.task.id), ["accepted", "review-old"]);
   const away = plugin.floatingReview(items, statuses, now, "elsewhere");
   assert.deepEqual(Array.from(away, (row) => row.task.id), ["accepted", "review-new", "review-old"]);
+});
+
+test("a supporting session that is running or waiting does not hide the primary review", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const now = Date.now();
+  const task = {
+    id: "joint", title: "联合交付", status: "in_progress", primarySessionId: "primary",
+    sessions: [{ id: "primary", title: "主会话" }, { id: "support", title: "并行核验" }],
+    lastActivityAt: now - 1000,
+    review: { at: now - 10_000, sessionId: "primary", seq: 12, kind: "completed" },
+  };
+  assert.deepEqual(Array.from(plugin.floatingReview([task], new Map(), now), (row) => row.sessionId), ["primary"]);
+  const supportRunning = plugin.floatingReview([task], new Map([["support", { running: true }]]), now);
+  assert.deepEqual(Array.from(supportRunning, (row) => row.sessionId), ["primary"],
+    "a supporting session running must not tuck the finished primary turn away");
+  const supportPending = plugin.floatingReview([task], new Map([["support", { pendingInteraction: { kind: "approval" } }]]), now);
+  assert.deepEqual(Array.from(supportPending, (row) => row.sessionId), ["primary"],
+    "a supporting session waiting must not tuck the finished primary turn away");
+  const primaryRunning = plugin.floatingReview([task], new Map([["primary", { running: true }]]), now);
+  assert.equal(primaryRunning.length, 0, "the review's own session running still hides the card");
+  const primaryPending = plugin.floatingReview([task], new Map([["primary", { pendingInteraction: { kind: "approval" } }]]), now);
+  assert.equal(primaryPending.length, 0, "the review's own session waiting still hides the card");
+  // The strip shows the card while a supporting session is busy; the check
+  // must still accept. The drawer keeps the task-wide canAcceptTask guard.
+  assert.equal(plugin.canAcceptTask(supportRunning[0].task), false);
+  assert.equal(plugin.canAcceptReview(supportRunning[0].task), true,
+    "a supporting session running must not make the strip check a no-op");
+  assert.equal(plugin.canAcceptTask(supportPending[0].task), false);
+  assert.equal(plugin.canAcceptReview(supportPending[0].task), true,
+    "a supporting session waiting must not make the strip check a no-op");
+});
+
+test("the strip check still accepts when a supporting session is running", async () => {
+  const now = Date.now();
+  const task = {
+    id: "joint", title: "联合交付", status: "in_progress", primarySessionId: "primary",
+    sessions: [{ id: "primary", title: "主会话" }, { id: "support", title: "并行核验" }],
+    workspaceTitle: "数据管道", updatedAt: "rev-3", lastActivityAt: now - 2000,
+    review: { at: now - 10_000, sessionId: "primary", seq: 12, kind: "completed" },
+  };
+  const requests = [];
+  const statuses = new Map([["support", { running: true }]]);
+  const { registrations } = loadClient({}, {
+    snapshot: { tasks: [task] },
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return options.body
+        ? { ok: true, json: async () => ({ ok: true, data: { ...task, status: "done", completionBasis: "user" } }) }
+        : { ok: true, json: async () => ({ ok: true, tasks: [{ ...task, status: "done", completionBasis: "user" }] }) };
+    },
+  });
+  const entry = registrations.get("shell.overlay").render({
+    useSessionStatus: (select) => select(statuses),
+  }).children[0];
+  const withStatus = entry.type(entry.props);
+  const panel = withStatus.type(withStatus.props);
+  const rendered = panel.type(panel.props);
+  const stripElement = [...elements(rendered)].find((node) => node.type?.name === "ReviewStrip");
+  assert.ok(stripElement, "the primary review stays on the strip while a supporting session runs");
+  const strip = stripElement.type(stripElement.props);
+  const check = [...elements(strip)].find((node) => node.props?.["aria-label"] === "确认完成：联合交付");
+  assert.ok(check);
+  await check.props.onClick({ stopPropagation() {} });
+  assert.deepEqual(requests[0],
+    ["/super-kanban/api/command", { op: "task.accept", payload: { id: "joint", expectedUpdatedAt: "rev-3" } }],
+    "clicking the check must call task.accept, not silently no-op");
 });
 
 test("a finished turn stays pinned until its hover check mark is clicked", async () => {

@@ -232,6 +232,10 @@ export function createEmptyState() {
     ignoredSessions: [],
     suppressedSessions: [], // sessions whose auto task was deleted by the user
     reviewSeen: {}, // sessionId → last turn-end seq already surfaced as a review card
+    // sessionId → dismissal time (ms): a provisional (seq 0) review was dismissed.
+    // The settle scan records the real seq without re-queuing that turn; a later
+    // turn that ended after the dismissal still pins.
+    reviewDeferred: {},
     deletedLog: [], // last N deleted task tombstones (traceability)
     recovery: [],
     workspaces: [],
@@ -307,6 +311,19 @@ export function normalizeReviewSeen(value) {
   for (const [id, seq] of entries.slice(Math.max(0, entries.length - REVIEW_SEEN_LIMIT))) {
     if (typeof id !== "string" || !id || id.length > 200) continue;
     const number = Number(seq);
+    if (Number.isFinite(number) && number > 0) result[id] = Math.floor(number);
+  }
+  return result;
+}
+
+/** Bounded map of sessions whose provisional review was dismissed, to a timestamp. */
+export function normalizeReviewDeferred(value) {
+  const result = {};
+  if (!isRecord(value)) return result;
+  const entries = Object.entries(value);
+  for (const [id, flag] of entries.slice(Math.max(0, entries.length - REVIEW_SEEN_LIMIT))) {
+    if (typeof id !== "string" || !id || id.length > 200) continue;
+    const number = Number(flag);
     if (Number.isFinite(number) && number > 0) result[id] = Math.floor(number);
   }
   return result;
@@ -736,6 +753,7 @@ export function createStore({ dshHome, logger } = {}) {
     if (Array.isArray(raw.ignoredSessions)) target.ignoredSessions = stringList(raw.ignoredSessions);
     if (Array.isArray(raw.suppressedSessions)) target.suppressedSessions = stringList(raw.suppressedSessions);
     if (isRecord(raw.reviewSeen)) target.reviewSeen = normalizeReviewSeen(raw.reviewSeen);
+    if (isRecord(raw.reviewDeferred)) target.reviewDeferred = normalizeReviewDeferred(raw.reviewDeferred);
     if (Array.isArray(raw.deletedLog)) target.deletedLog = raw.deletedLog.filter(isRecord);
     if (Array.isArray(raw.workspaces)) target.workspaces = raw.workspaces.filter(isRecord);
     if (Array.isArray(raw.activity)) target.activity = raw.activity.filter(isRecord);
