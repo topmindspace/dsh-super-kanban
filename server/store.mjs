@@ -82,6 +82,11 @@ export const TEXT_LIMITS = Object.freeze({
 
 const BACKUP_KEEP = 10;
 
+/** Turn-end kinds a queued review notice may carry (mirrors the session parser). */
+export const REVIEW_KINDS = new Set(["completed", "error", "interrupted", "aborted"]);
+/** Sessions remembered for the "a new turn ended since the last scan" ledger. */
+export const REVIEW_SEEN_LIMIT = 500;
+
 /**
  * v3 AI model selection. Provider ids come from the DSH model catalog and model
  * ids may contain real-world characters (`alibaba/qwen-3-14b`,
@@ -226,6 +231,7 @@ export function createEmptyState() {
     usage: emptyUsage(),
     ignoredSessions: [],
     suppressedSessions: [], // sessions whose auto task was deleted by the user
+    reviewSeen: {}, // sessionId → last turn-end seq already surfaced as a review card
     deletedLog: [], // last N deleted task tombstones (traceability)
     recovery: [],
     workspaces: [],
@@ -272,6 +278,38 @@ function clipText(value, max) {
 export function positiveSeqOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
+}
+
+/**
+ * A queued "this turn ended, approve it" notice pinned to the floating entry.
+ * Only the last turn matters, so a task carries at most one. Invalid records are
+ * dropped instead of being partly persisted.
+ */
+export function normalizeTaskReview(value) {
+  if (!isRecord(value)) return null;
+  const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim().slice(0, 200) : "";
+  const at = Number(value.at);
+  if (!sessionId || !Number.isFinite(at) || at <= 0) return null;
+  return {
+    at: Math.floor(at),
+    sessionId,
+    seq: positiveSeqOrNull(value.seq) || 0,
+    kind: REVIEW_KINDS.has(value.kind) ? value.kind : "completed",
+  };
+}
+
+/** Bounded ledger of the last turn-end seq already considered per session. */
+export function normalizeReviewSeen(value) {
+  const result = {};
+  if (!isRecord(value)) return result;
+  // Keep the newest entries: the service deletes the oldest ones first.
+  const entries = Object.entries(value);
+  for (const [id, seq] of entries.slice(Math.max(0, entries.length - REVIEW_SEEN_LIMIT))) {
+    if (typeof id !== "string" || !id || id.length > 200) continue;
+    const number = Number(seq);
+    if (Number.isFinite(number) && number > 0) result[id] = Math.floor(number);
+  }
+  return result;
 }
 
 /** Sanitize one issue entry (objects from the analyzer, strings via the API). */
@@ -401,6 +439,7 @@ export function truncateTask(task, projectIds) {
     task.goal = { text: clipText(text, GOAL_TEXT_LIMIT), status: text ? "active" : "none", source: "task" };
   }
   if (!isRecord(task.sessionContext)) task.sessionContext = null;
+  task.review = normalizeTaskReview(task.review);
   return task;
 }
 
@@ -696,6 +735,7 @@ export function createStore({ dshHome, logger } = {}) {
     }
     if (Array.isArray(raw.ignoredSessions)) target.ignoredSessions = stringList(raw.ignoredSessions);
     if (Array.isArray(raw.suppressedSessions)) target.suppressedSessions = stringList(raw.suppressedSessions);
+    if (isRecord(raw.reviewSeen)) target.reviewSeen = normalizeReviewSeen(raw.reviewSeen);
     if (Array.isArray(raw.deletedLog)) target.deletedLog = raw.deletedLog.filter(isRecord);
     if (Array.isArray(raw.workspaces)) target.workspaces = raw.workspaces.filter(isRecord);
     if (Array.isArray(raw.activity)) target.activity = raw.activity.filter(isRecord);

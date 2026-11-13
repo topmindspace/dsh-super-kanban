@@ -44,7 +44,7 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
     ...browser,
   };
   const script = inspect ? source.replace("return { apply, inject:",
-    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
+    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, floatingReview, canAcceptTask, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
     "markdownBlocks, renderInline, taskChatReference, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
@@ -840,4 +840,91 @@ test("the inbox distinguishes a failed turn from a running retry", () => {
   const retry = renderAttention([task], new Map([["test-session", { running: true }]]));
   assert.doesNotMatch(renderedText(retry.rows), /执行失败/);
   assert.match(renderedText(retry.rows), /会话运行中/);
+});
+
+/* ------------------------------------------------------------------ */
+/* Review strip pinned above the launcher                              */
+/* ------------------------------------------------------------------ */
+
+test("floating review orders finished turns before waiting and running work", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const now = Date.now();
+  const task = (id, fields = {}) => ({ id, title: id, status: "in_progress", primarySessionId: id, origin: "auto",
+    lastActivityAt: now - 1000, ...fields });
+  const items = [
+    task("running", { review: { at: now - 30000, sessionId: "running", seq: 3 } }),
+    task("pending", { review: { at: now - 20000, sessionId: "pending", seq: 4 } }),
+    task("review-old", { review: { at: now - 40000, sessionId: "review-old", seq: 5, kind: "completed" } }),
+    task("review-new", { status: "done", completionBasis: "session_todos", review: { at: now - 10000, sessionId: "review-new", seq: 6 } }),
+    task("accepted", { status: "done", completionBasis: "user", review: { at: now - 5000, sessionId: "accepted", seq: 7 } }),
+    task("archived", { archived: true, review: { at: now - 5000, sessionId: "archived", seq: 8 } }),
+  ];
+  const statuses = new Map([
+    ["running", { running: true }],
+    ["pending", { pendingInteraction: { kind: "approval" } }],
+  ]);
+  const rows = plugin.floatingReview(items, statuses, now);
+  assert.deepEqual(Array.from(rows, (row) => [row.kind, row.task.id]), [
+    ["review", "review-new"], ["review", "review-old"], ["pending", "pending"], ["running", "running"],
+  ]);
+  assert.deepEqual([rows[0].label, rows[1].label, rows[2].label, rows[3].label],
+    ["已完成", "本轮结束", "待审批", "进行中"]);
+  assert.deepEqual(Array.from(rows, (row) => row.sessionId), ["review-new", "review-old", "pending", "running"]);
+});
+
+test("a finished turn stays pinned until its hover check mark is clicked", async () => {
+  const now = Date.now();
+  const task = { id: "weekly", title: "生成本周周报", status: "done", completionBasis: "session_todos",
+    primarySessionId: "source", workspaceTitle: "数据管道", updatedAt: "rev-1", lastActivityAt: now - 2000,
+    review: { at: now - 30_000, sessionId: "source", seq: 12, kind: "completed" } };
+  const requests = [];
+  const opens = [];
+  const { host, registrations } = loadClient({ uiWorkspace: { openSession: (id) => opens.push(id) } }, {
+    snapshot: { tasks: [task] },
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return options.body
+        ? { ok: true, json: async () => ({ ok: true, data: { ...task, status: "done", completionBasis: "user" } }) }
+        : { ok: true, json: async () => ({ ok: true, tasks: [{ ...task, completionBasis: "user" }] }) };
+    },
+  });
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const rendered = panel.type(panel.props);
+  const stripElement = [...elements(rendered)].find((node) => node.type?.name === "ReviewStrip");
+  assert.ok(stripElement, "the strip is pinned above the launcher");
+  const strip = stripElement.type(stripElement.props);
+  assert.match(renderedText(strip), /生成本周周报.*数据管道 · 已完成 · 待审批/);
+  const check = [...elements(strip)].find((node) => node.props?.["aria-label"] === "确认完成：生成本周周报");
+  assert.ok(check, "the check mark is present (revealed by hover in CSS)");
+  await check.props.onClick({ stopPropagation() {} });
+  assert.deepEqual(requests[0],
+    ["/super-kanban/api/command", { op: "task.accept", payload: { id: "weekly", expectedUpdatedAt: "rev-1" } }]);
+  const open = [...elements(strip)].find((node) => node.props?.["aria-label"] === "打开会话：生成本周周报");
+  open.props.onClick();
+  assert.deepEqual(opens, ["source"]);
+});
+
+test("more than three pinned cards collapse behind a count and expand in place", () => {
+  const now = Date.now();
+  const tasks = Array.from({ length: 5 }, (_, index) => ({
+    id: `t-${index}`, title: `任务 ${index}`, status: "in_progress", primarySessionId: `s-${index}`,
+    lastActivityAt: now - index * 1000, review: { at: now - index * 1000, sessionId: `s-${index}`, seq: index + 1 },
+  }));
+  const { registrations } = loadClient({}, { snapshot: { tasks } });
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const stripOf = (node) => {
+    const element = [...elements(node)].find((item) => item.type?.name === "ReviewStrip");
+    return element ? element.type(element.props) : null;
+  };
+  const cards = (node) => [...elements(node || [])].filter((item) => item.props?.className?.startsWith?.("sk-pin-card"));
+  const view = panel.type(panel.props);
+  const strip = stripOf(view);
+  assert.equal(cards(strip).length, 3);
+  assert.ok([...elements(strip)].some((node) => node.type === "button" && renderedText(node) === "还有 2 项"));
+  const stripElement = [...elements(view)].find((item) => item.type?.name === "ReviewStrip");
+  const expanded = stripElement.type({ ...stripElement.props, expanded: true });
+  assert.equal(cards(expanded).length, 5);
+  assert.ok([...elements(expanded)].some((node) => renderedText(node) === "收起"));
 });
