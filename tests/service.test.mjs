@@ -2119,6 +2119,53 @@ test("a later turn that arrives before the settle scan still pins after a provis
   assert.equal(after.reviewDeferred["sess-alpha"], undefined);
 });
 
+test("an early settle scan of the still-old log must not consume a deferred dismissal", async (t) => {
+  let observe = null;
+  const { service, fixture } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  assert.equal(createStore({ dshHome: process.env.DSH_HOME }).load().state.reviewSeen["sess-alpha"], 10);
+
+  // The live event arrives before the session file has the new turn (seq still 10 on disk).
+  observe({ id: "sess-alpha" }, { type: "turn/end", data: { reason: { kind: "completed" } } });
+  const queued = (await request(service, {})).json.tasks[0];
+  assert.equal(queued.review.seq, 0);
+  assert.equal((await command(service, "task.accept", { id: queued.id, expectedUpdatedAt: queued.updatedAt })).status, 200);
+
+  // A scan that still sees only the previously recorded turn must keep the marker.
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const early = createStore({ dshHome: process.env.DSH_HOME }).load().state;
+  assert.ok(early.reviewDeferred["sess-alpha"], "an already-seen turn must not consume the deferred dismissal");
+  assert.equal(early.reviewSeen["sess-alpha"], 10);
+  assert.equal((await request(service, {})).json.tasks[0].review, null);
+
+  // The file later catches up with the dismissed turn; the next scan fills the ledger and does not re-pin.
+  const turnEndAt = Date.now() - 3000;
+  const events = [
+    event("user/message", 20, turnEndAt - 2000, { content: [{ type: "text", text: "再补一条回归测试" }] }),
+    event("turn/start", 21, turnEndAt - 2000, { turn: 2 }),
+    event("assistant/message", 22, turnEndAt - 1000, { message: { content: [{ type: "text", text: "已补齐" }] } }),
+    event("turn/end", 23, turnEndAt, { turn: 2, reason: { kind: "completed" } }),
+  ];
+  fs.appendFileSync(path.join(fixture.sessionDir, SESSION_FILE_NAME), framesOf(events));
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const after = (await request(service, {})).json.tasks[0];
+  assert.equal(after.review, null, "the dismissed turn must not come back once the log catches up");
+  const stored = createStore({ dshHome: process.env.DSH_HOME }).load().state;
+  assert.equal(stored.reviewSeen["sess-alpha"], 23);
+  assert.equal(stored.reviewDeferred["sess-alpha"], undefined);
+});
+
 test("ignoring a session records the dismissed turn so unignore plus a scan cannot re-queue it", async (t) => {
   let observe = null;
   const { service, fixture } = await setup(t, {

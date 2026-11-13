@@ -1224,17 +1224,35 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const firstSighting = !state.reviewSeen[sessionId];
     const seen = Number(state.reviewSeen[sessionId]) || 0;
     const fresh = Date.now() - (Number(meta.lastTurnEnd.time) || 0) <= REVIEW_FRESH_MS;
-    const deferredAt = consumeReviewDeferred(sessionId);
-    recordReviewSeen(sessionId, seq);
-    // A provisional notice the user already dismissed must only fill in the
-    // ledger when the observed turn is the same one (ended at or before the
-    // dismissal). A later turn that landed before this scan must still pin.
-    // Values <= 1 are a legacy boolean sentinel that cannot tell turns apart.
-    if (deferredAt && (deferredAt <= 1 || (Number(meta.lastTurnEnd.time) || 0) <= deferredAt)) return false;
-    if (firstSighting ? !fresh : seen >= seq) return false;
-    if (meta.origin === "subagent" || Number(meta.delegationDepth) > 0) return false;
+    const deferredAt = Number(state.reviewDeferred[sessionId]) || 0;
+    // Observations that would not pin anyway (seed-only or already in the
+    // ledger) must keep the deferred marker: an in-flight or early scan may
+    // still be looking at a turn older than the one the user just dismissed.
+    if (firstSighting ? !fresh : seen >= seq) {
+      recordReviewSeen(sessionId, seq);
+      return false;
+    }
+    if (meta.origin === "subagent" || Number(meta.delegationDepth) > 0) {
+      recordReviewSeen(sessionId, seq);
+      return false;
+    }
     const task = primaryTaskForSession(sessionId);
-    if (!task) return false;
+    if (!task) {
+      recordReviewSeen(sessionId, seq);
+      return false;
+    }
+    // This observation would pin a card. Consume a deferred dismissal only
+    // here, and only skip when it is the same turn (ended at or before the
+    // dismissal). A later turn that landed before this scan still pins.
+    // Values <= 1 are a legacy boolean sentinel that cannot tell turns apart.
+    if (deferredAt) {
+      consumeReviewDeferred(sessionId);
+      recordReviewSeen(sessionId, seq);
+      const turnTime = Number(meta.lastTurnEnd.time) || 0;
+      if (deferredAt <= 1 || turnTime <= deferredAt) return false;
+    } else {
+      recordReviewSeen(sessionId, seq);
+    }
     return markTaskReview(task, {
       sessionId,
       seq,

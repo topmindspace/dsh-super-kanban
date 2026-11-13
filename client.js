@@ -225,6 +225,20 @@ window.__ModuleLoader__.load({
         Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done" || task.review?.sessionId)));
     }
 
+    /**
+     * Guard for the review-strip check. Visibility is keyed on review.sessionId,
+     * so acceptance must be too: a supporting session that is running or
+     * waiting must not make the green check a no-op. The drawer and the
+     * floating panel's "确认验收" button keep the task-wide canAcceptTask.
+     */
+    function canAcceptReview(task) {
+      if (!task || task.archived) return false;
+      const reviewSession = task.review?.sessionId;
+      if (!reviewSession) return canAcceptTask(task);
+      if (isAccepted(task)) return true;
+      return !(task.pendingSessions || []).some((item) => item.id === reviewSession);
+    }
+
     function taskActivityAt(task) {
       const sessionActivity = timeValue(task.lastActivityAt) || timeValue(task.createdAt);
       return Math.max(sessionActivity,
@@ -5186,7 +5200,7 @@ button.sk-task-row-main{cursor:pointer}
       const accept = async (task, doneLabel = "已验收") => {
         // A later turn on an already accepted task still pins a review; its
         // check must be able to clear that notice.
-        if (busy.current || !canAcceptTask(task) || (isAccepted(task) && !task.review?.sessionId)) return;
+        if (busy.current || !canAcceptReview(task) || (isAccepted(task) && !task.review?.sessionId)) return;
         busy.current = true;
         heading.current?.focus({ preventScroll: true });
         setBusyId(task.id);
