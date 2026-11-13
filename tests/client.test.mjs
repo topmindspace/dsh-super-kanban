@@ -44,7 +44,8 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
     ...browser,
   };
   const script = inspect ? source.replace("return { apply, inject:",
-    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, subscribeBoardRefresh, inject:") : source;
+    "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
+    "markdownBlocks, renderInline, taskChatReference, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
     get: (name) => services[name],
@@ -281,21 +282,175 @@ test("the conversation shortcut passes the scoped session through sidebar naviga
 
 test("the conversation header can open all surfaces and remember its preferred target", () => {
   const seen = [];
-  const { registrations } = loadClient({ layout: { selectPanel: (id) => seen.push(id) } },
+  const { registrations, seedNextState } = loadClient({ layout: { selectPanel: (id) => seen.push(id) } },
     { prefs: { sideEntry: false } });
   const header = registrations.get("conversation.session.header.utilities");
   const first = header.render({ sessionId: "session" });
   const button = [...elements(first)].find((node) => node.props?.["aria-label"] === "打开全局看板");
   button.props.onClick();
-  const picker = [...elements(first)].find((node) => node.props?.label === "切换看板形态");
-  assert.deepEqual(Array.from(elements(picker.type(picker.props))).filter((node) => node.type === "option").map((node) => node.props.value),
-    ["page", "side", "float"]);
-  picker.props.onChange("float");
+  assert.equal([...elements(first)].find((node) => node.props?.["aria-label"] === "切换看板形态").props["aria-expanded"], false);
+  seedNextState({ trigger: {} }, false);
+  const expanded = header.render({ sessionId: "session" });
+  const menu = [...elements(expanded)].find((node) => node.type?.name === "QuickMenu");
+  const items = Array.from(menu.props.items).filter((item) => item !== "divider");
+  assert.deepEqual(items.map((item) => item.id), ["page", "side", "float", "chat", "entry"]);
+  assert.equal(items[0].label, "全局看板（默认）");
+  items.find((item) => item.id === "float").run();
   assert.deepEqual(seen, ["super-kanban"]);
   const next = header.render({});
-  assert.ok([...elements(next)].some((node) => node.props?.["aria-label"] === "打开悬浮小面板"));
-  const overlay = registrations.get("shell.overlay").render({}).children[0];
-  assert.equal(overlay.type(overlay.props).props.open, true);
+  assert.ok([...elements(next)].some((node) => node.props?.["aria-label"] === "打开悬浮看板"));
+  const overlay = registrations.get("shell.overlay").render({});
+  assert.equal(overlay.children[0].type(overlay.children[0].props).props.open, true);
+  // The header menu opens quick chat in the overlay without any board being mounted.
+  items.find((item) => item.id === "chat").run();
+  const chat = overlay.children[1].type(overlay.children[1].props);
+  assert.equal(chat.props.request.sessionId, "session");
+});
+
+test("stored preferences from 0.9 gain the persistent launcher while explicit v2 choices are kept", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const legacy = plugin.normalizePrefs({ surface: "page", floatEnabled: false, floatStyle: "bar", floatSummaries: ["running"], floatHideEmpty: true });
+  assert.deepEqual(
+    [legacy.surface, legacy.floatEnabled, legacy.floatStyle, legacy.floatHideEmpty, Array.from(legacy.floatSummaries)],
+    ["page", true, "badge", false, ["acceptance", "attention", "running"]]);
+  const configured = plugin.normalizePrefs({ floatEnabled: true, floatStyle: "bar", floatPosition: "left", floatSummaries: ["running"] });
+  assert.deepEqual([configured.floatStyle, configured.floatPosition, Array.from(configured.floatSummaries)], ["bar", "left", ["running"]]);
+  const current = plugin.normalizePrefs({ version: 2, floatEnabled: false, floatHideEmpty: true, floatOffset: 120.4, floatSize: "large", floatPinned: true });
+  assert.deepEqual(
+    [current.floatEnabled, current.floatHideEmpty, current.floatOffset, current.floatSize, current.floatPinned],
+    [false, true, 120, "large", true]);
+  assert.equal(plugin.normalizePrefs({ version: 2, floatOffset: -5, floatSize: "huge" }).floatOffset, 0);
+  const hidden = loadClient({}, { prefs: { version: 2, floatEnabled: false } });
+  const entry = hidden.registrations.get("shell.overlay").render({}).children[0];
+  assert.equal(entry.type(entry.props), null);
+});
+
+test("only one board surface shows at a time", () => {
+  const seen = [];
+  let active = "super-kanban";
+  const tab = { id: "tab-1", kind: "super-kanban" };
+  const { host, registrations } = loadClient({
+    layout: {
+      selectPanel: (id) => { seen.push(["panel", id]); active = id; },
+      panelInfo: { getSnapshot: () => ({ activePanelId: active }), subscribe: () => () => {} },
+    },
+    sidebarRight: {
+      active: () => tab,
+      close: (id) => seen.push(["close", id]),
+      openTab: (kind, options) => seen.push(["tab", kind, options?.params?.sessionId]),
+    },
+  });
+  const floating = () => {
+    const entry = registrations.get("shell.overlay").render({}).children[0];
+    return entry.type(entry.props);
+  };
+  // Floating leaves the global board and closes the docked board tab, never another tab.
+  assert.equal(host.openSurface("float"), true);
+  assert.deepEqual(seen, [["panel", null], ["close", "tab-1"]]);
+  assert.equal(floating().props.open, true);
+  tab.kind = "terminal";
+  seen.length = 0;
+  host.openSurface("float");
+  assert.deepEqual(seen, []);
+  // Opening either docked surface collapses the floating panel.
+  assert.equal(host.openSurface("side", "session"), true);
+  assert.equal(floating().props.open, false);
+  host.openSurface("float");
+  assert.equal(host.openSurface("page"), true);
+  assert.equal(floating().props.open, false);
+  assert.deepEqual(seen.at(-1), ["panel", "super-kanban"]);
+  // While the global board is on screen the launcher steps aside.
+  const panel = floating();
+  assert.equal(panel.type(panel.props), null);
+});
+
+test("the launcher menu hides the entry with an undo and the floating panel offers every category", async () => {
+  const requests = [];
+  const task = { id: "owner", title: "当前会话的任务", status: "in_progress", workspaceId: "ws-1", workspaceTitle: "工作区一",
+    projectId: "p-1", primarySessionId: "current", lastActivityAt: Date.now() };
+  const services = { sidebarRight: { screen: () => ({ sessionId: "current" }) } };
+  const menuClient = loadClient(services, {});
+  menuClient.seedNextState({ trigger: {} }, false);
+  const closed = menuClient.registrations.get("shell.overlay").render({}).children[0];
+  const closedPanel = closed.type(closed.props);
+  const closedView = closedPanel.type(closedPanel.props);
+  const menu = [...elements(closedView)].find((node) => node.type?.name === "QuickMenu");
+  const labels = Array.from(menu.props.items).filter((item) => item && item !== "divider").map((item) => item.label);
+  assert.deepEqual(labels, ["展开悬浮看板", "打开右侧看板", "打开全局看板", "快聊", "移到左侧", "隐藏悬浮入口"]);
+  Array.from(menu.props.items).find((item) => item?.label === "隐藏悬浮入口").run();
+  const afterHide = menuClient.registrations.get("shell.overlay").render({}).children[0];
+  const notice = afterHide.type(afterHide.props);
+  const noticeView = notice.type(notice.props);
+  const hasLauncher = (view) => [...elements(view)].some((node) => node.props?.className?.includes?.("sk-float-trigger"));
+  assert.equal(hasLauncher(noticeView), false);
+  [...elements(noticeView)].find((node) => node.type === "button" && renderedText(node) === "撤销").props.onClick();
+  const restored = menuClient.registrations.get("shell.overlay").render({}).children[0];
+  const restoredPanel = restored.type(restored.props);
+  assert.equal(hasLauncher(restoredPanel.type(restoredPanel.props)), true);
+
+  const { host, registrations } = loadClient(services, {
+    snapshot: { tasks: [task], projects: [{ id: "p-1", name: "跨区项目" }] },
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return { ok: true, json: async () => ({ ok: true, tasks: [task] }) };
+    },
+  });
+  host.openSurface("float");
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const view = panel.type(panel.props);
+  const tabs = [...elements(view)].find((node) => node.props?.["aria-label"] === "任务类别");
+  assert.deepEqual([...elements(tabs)].filter((node) => node.type === "button").map((node) => renderedText(node)),
+    ["待验收 0", "待处理 0", "运行中 0", "最近 1"]);
+  // An expanded panel replaces the launcher; an empty quick note is never sent.
+  assert.equal(hasLauncher(view), false);
+  const form = [...elements(view)].find((node) => node.type === "form");
+  assert.equal(form.props.className, "sk-float-add");
+  await form.props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(requests, []);
+});
+
+test("quick capture files the note under the current session's workspace without linking the session", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const tasks = [
+    { id: "other", workspaceId: "ws-2", primarySessionId: "elsewhere" },
+    { id: "owner", workspaceId: "ws-1", sessions: [{ id: "current" }] },
+  ];
+  assert.deepEqual({ ...plugin.quickCapturePayload("补一条回归测试", tasks, "current") }, { title: "补一条回归测试", status: "backlog", workspaceId: "ws-1" });
+  assert.deepEqual({ ...plugin.quickCapturePayload("没有会话时", tasks, null) }, { title: "没有会话时", status: "backlog" });
+  assert.deepEqual({ ...plugin.quickCapturePayload("未知会话", tasks, "unknown") }, { title: "未知会话", status: "backlog" });
+});
+
+test("quick chat answers render common Markdown without HTML and keep an unfinished code block readable", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const blocks = plugin.markdownBlocks("## 结论\n\n先做 **A**。\n\n1. 第一步\n   - 细节\n2. 第二步\n\n> 提示\n\n```js\nconst a = 1;\n<script>alert(1)</script>");
+  assert.deepEqual(Array.from(blocks, (block) => block.type), ["heading", "paragraph", "list", "quote", "code"]);
+  assert.deepEqual(Array.from(blocks[2].items, (item) => [item.marker, item.depth, item.text]), [["1.", 0, "第一步"], ["•", 1, "细节"], ["2.", 0, "第二步"]]);
+  assert.deepEqual([blocks[4].lang, blocks[4].text], ["js", "const a = 1;\n<script>alert(1)</script>"]);
+  const inline = plugin.renderInline("用 `npm test` 跑 **全部** 测试，见 [文档](https://example.com/a) 和 [坏链接](javascript:alert(1))", "k");
+  assert.deepEqual(Array.from(inline).filter((node) => typeof node === "object").map((node) => [node.type, node.props.href, node.children[0]]),
+    [["code", undefined, "npm test"], ["strong", undefined, "全部"], ["a", "https://example.com/a", "文档"]]);
+  assert.match(inline.at(-1), /坏链接/);
+});
+
+test("follow-up context skips one-shot modes and stopped answers", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const route = { ok: true, provider: "demo", model: "selected" };
+  const turn = (input, extra = {}) => ({ ...route, input, answer: "answer", ...extra });
+  const turns = [turn("first"), turn("translated", { mode: "translate-zh" }), turn("partial", { stopped: true }), turn("second", { mode: "ask" })];
+  assert.deepEqual(Array.from(plugin.chatContext(turns, route).turns, ({ input }) => input), ["first", "second"]);
+});
+
+test("a task becomes a bounded quick chat reference", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const reference = plugin.taskChatReference({ id: "t", title: "修复登录", status: "blocked", priority: "P1", workspaceTitle: "前端",
+    projectName: "大促", acceptanceCriteria: "单测通过", nextSteps: ["补测试"], issues: [{ text: "接口超时" }], notes: "x".repeat(9000) });
+  assert.equal(reference.title, "修复登录");
+  assert.match(reference.text, /任务：修复登录\n状态：受阻/);
+  assert.match(reference.text, /工作区：前端\n项目：大促/);
+  assert.match(reference.text, /验收条件：单测通过/);
+  assert.match(reference.text, /未解决的问题：\n- 接口超时/);
+  assert.equal(reference.text.length, 6000);
 });
 
 test("floating summaries share the acceptance rule and exclude historical and archived cards", () => {
@@ -362,7 +517,7 @@ test("floating running preview shows three cards and offers to show the rest", (
   const statuses = new Map(tasks.map((task) => [task.id, { running: true }]));
   const changes = [];
   const { host, registrations } = loadClient({}, {
-    snapshot: { tasks }, prefs: { floatSummaries: ["running"] }, onState: (value) => changes.push(value),
+    snapshot: { tasks }, prefs: { version: 2, floatSummaries: ["running"] }, onState: (value) => changes.push(value),
   });
   host.openSurface("float");
   const entry = registrations.get("shell.overlay").render({ useSessionStatus: (select) => select(statuses) }).children[0];
@@ -387,7 +542,7 @@ test("floating pending requests and running actions open their exact sessions", 
   const opens = [];
   const buttonsFor = (category) => {
     const { host, registrations } = loadClient({ uiWorkspace: { openSession: (id) => opens.push(id) } }, {
-      snapshot: { tasks: [task] }, prefs: { floatSummaries: [category] },
+      snapshot: { tasks: [task] }, prefs: { version: 2, floatSummaries: [category] },
     });
     host.openSurface("float");
     const entry = registrations.get("shell.overlay").render({ useSessionStatus: (select) => select(statuses) }).children[0];

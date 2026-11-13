@@ -20,13 +20,22 @@ window.__ModuleLoader__.load({
     const SIDE_KIND = "super-kanban";
     const SIDE_ID = "dsh-super-kanban/panel";
     const PREFS_KEY = "dsh-super-kanban:prefs";
-    const SURFACES = { page: "全局看板", side: "右侧看板", float: "悬浮小面板" };
-    const FLOAT_STYLES = { badge: "圆形角标", pill: "紧凑胶囊", bar: "状态条" };
+    // 同一块看板的三种形态，任一时刻只显示其中一种。
+    const SURFACES = { page: "全局看板", side: "右侧看板", float: "悬浮看板" };
+    const SURFACE_ICONS = { page: "surfacePage", side: "panelRight", float: "surfaceFloat" };
+    const SURFACE_HINTS = {
+      page: "占满主区域，适合规划、整理与回顾",
+      side: "停靠在会话右侧，边执行边跟进",
+      float: "悬浮在会话之上，随手查看、验收与快聊",
+    };
+    const FLOAT_STYLES = { badge: "圆形图标", pill: "紧凑胶囊", bar: "状态条" };
     const FLOAT_SUMMARIES = { acceptance: "待验收", attention: "待处理", running: "运行中" };
+    const FLOAT_TABS = { ...FLOAT_SUMMARIES, recent: "最近" };
     const ACTIVITY_RANGES = { recent: "近期", history: "历史", all: "全部时间" };
+    const PREFS_VERSION = 2;
     const DEFAULT_PREFS = Object.freeze({
-      surface: "side", floatEnabled: false, floatStyle: "pill", floatPosition: "right",
-      floatSummaries: ["acceptance", "running"], floatHideEmpty: true,
+      version: PREFS_VERSION, surface: "side", floatEnabled: true, floatStyle: "badge", floatPosition: "right", floatOffset: 0,
+      floatSummaries: ["acceptance", "attention", "running"], floatHideEmpty: false, floatSize: "normal", floatPinned: false,
     });
 
     /* ---------------------- v0.5：AI 模型 / 预算常量 ---------------------- */
@@ -182,6 +191,11 @@ window.__ModuleLoader__.load({
       return task.status === "done" && task.completionBasis === "user";
     }
 
+    /** 任务归属：工作区 › 自建项目。两者都有时一起显示，避免只见项目、不见工作区。 */
+    function taskScopeLabel(task) {
+      return [task.workspaceTitle, task.projectName].filter(Boolean).join(" › ");
+    }
+
     function canAcceptTask(task, artifact = primaryArtifactOf(artifactsOf(task))) {
       return !task.archived && (isAccepted(task) || (!task.pendingSessions?.length && !taskRunningLabel(task) &&
         Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done")));
@@ -250,6 +264,11 @@ window.__ModuleLoader__.load({
 
     function cx(...names) {
       return names.filter(Boolean).join(" ");
+    }
+
+    /** 输入法正在组词时的按键。React 合成事件不带 isComposing，要读原生事件；keyCode 229 兜底。 */
+    function isComposingKey(event) {
+      return Boolean(event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229);
     }
 
     async function apiRequest(path, options) {
@@ -939,16 +958,52 @@ window.__ModuleLoader__.load({
     }
 
     function normalizePrefs(value = {}) {
+      // 0.9 及更早的偏好没有 version：悬浮入口改为默认常驻；只有主动开启过的用户保留其样式与摘要选择。
+      const legacy = value.version !== PREFS_VERSION;
+      const configured = !legacy || value.floatEnabled === true;
       const selected = Array.isArray(value.floatSummaries) ? value.floatSummaries : [];
       const floatSummaries = Object.keys(FLOAT_SUMMARIES).filter((id) => selected.includes(id));
+      const offset = Number(value.floatOffset);
       return {
+        version: PREFS_VERSION,
         surface: Object.hasOwn(SURFACES, value.surface) ? value.surface : value.sideEntry === false ? "page" : DEFAULT_PREFS.surface,
-        floatEnabled: value.floatEnabled === true,
-        floatStyle: Object.hasOwn(FLOAT_STYLES, value.floatStyle) ? value.floatStyle : DEFAULT_PREFS.floatStyle,
+        floatEnabled: legacy ? true : value.floatEnabled !== false,
+        floatStyle: configured && Object.hasOwn(FLOAT_STYLES, value.floatStyle) ? value.floatStyle : DEFAULT_PREFS.floatStyle,
         floatPosition: value.floatPosition === "left" ? "left" : "right",
-        floatSummaries: floatSummaries.length ? floatSummaries : DEFAULT_PREFS.floatSummaries,
-        floatHideEmpty: value.floatHideEmpty !== false,
+        floatOffset: Number.isFinite(offset) ? Math.max(0, Math.min(4000, Math.round(offset))) : 0,
+        floatSummaries: configured && floatSummaries.length ? floatSummaries : [...DEFAULT_PREFS.floatSummaries],
+        floatHideEmpty: !legacy && value.floatHideEmpty === true,
+        floatSize: value.floatSize === "large" ? "large" : "normal",
+        floatPinned: value.floatPinned === true,
       };
+    }
+
+    /** 极小的外部状态容器：跨形态（全局 / 右侧 / 悬浮）共享的界面状态都放在这里。 */
+    function createStore(initial) {
+      let value = initial;
+      const listeners = new Set();
+      return {
+        get: () => value,
+        set(next) {
+          const resolved = typeof next === "function" ? next(value) : next;
+          if (resolved === value) return;
+          value = resolved;
+          for (const listener of [...listeners]) listener(value);
+        },
+        subscribe(listener) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      };
+    }
+
+    function useStore(store) {
+      const [value, setValue] = React.useState(() => store.get());
+      React.useEffect(() => {
+        setValue(store.get());
+        return store.subscribe(setValue);
+      }, [store]);
+      return value;
     }
 
     function readPrefs() {
@@ -959,41 +1014,53 @@ window.__ModuleLoader__.load({
       }
     }
 
-    let uiPrefs = readPrefs();
-    const prefsListeners = new Set();
-    const floatListeners = new Set();
+    const prefsStore = createStore(readPrefs());
+    /** 悬浮看板面板是否展开（悬浮入口本身由偏好 floatEnabled 控制）。 */
+    const floatStore = createStore(false);
+    /** 由浮层承载的快聊：null 为关闭；对象为打开，可带 { reference, mode, input }。 */
+    const overlayChatStore = createStore(null);
+    /** 悬浮入口被隐藏后的一次性提示（带撤销）。 */
+    const floatNoticeStore = createStore(null);
+    /** 已挂载的浮层快聊宿主数量；为 0 说明当前 DSH 没有提供 shell.overlay 插槽。 */
+    let overlayHosts = 0;
+    /** 当前打开的看板对话框数量：有对话框时悬浮入口让位，避免盖住底部按钮。 */
+    const dialogCountStore = createStore(0);
+    /** 已挂载的右侧看板登记自己的关闭动作；切到悬浮形态时逐个调用，保证两种形态不同时出现。 */
+    const sideClosers = new Set();
+    const sideCountStore = createStore(0);
     const pageTaskListeners = new Set();
-    let floatOpen = false;
     let requestedPageTask = null;
 
     function updatePrefs(patch) {
-      uiPrefs = normalizePrefs({ ...uiPrefs, ...patch });
+      const next = normalizePrefs({ ...prefsStore.get(), ...patch });
       try {
-        localStorage.setItem(PREFS_KEY, JSON.stringify(uiPrefs));
+        localStorage.setItem(PREFS_KEY, JSON.stringify(next));
       } catch {
         /* localStorage may be unavailable */
       }
-      for (const listener of prefsListeners) listener(uiPrefs);
+      prefsStore.set(next);
     }
 
     function useUiPrefs() {
-      const [prefs, setPrefs] = React.useState(() => uiPrefs);
-      React.useEffect(() => {
-        prefsListeners.add(setPrefs);
-        setPrefs(uiPrefs);
-        return () => prefsListeners.delete(setPrefs);
-      }, []);
-      return prefs;
+      return useStore(prefsStore);
     }
 
     function setFloatingOpen(open) {
-      floatOpen = open;
-      for (const listener of floatListeners) listener(open);
+      floatStore.set(Boolean(open));
     }
 
     function SurfacePicker({ value, onChange, className, label = "看板形态" }) {
       return h("select", { className, value, title: label, "aria-label": label, onChange: (event) => onChange(event.target.value) },
         Object.entries(SURFACES).map(([id, text]) => h("option", { key: id, value: id }, text)));
+    }
+
+    /** 看板工具栏里的形态切换：三个图标按钮，当前形态高亮。 */
+    function SurfaceSwitch({ value, onChange }) {
+      return h("div", { className: "sk-surface-switch", role: "group", "aria-label": "看板形态" },
+        Object.entries(SURFACES).map(([id, text]) => h("button", {
+          key: id, type: "button", "aria-pressed": value === id, "aria-label": text, title: `${text} · ${SURFACE_HINTS[id]}`,
+          onClick: () => { if (value !== id) onChange(id); },
+        }, h(Icon, { name: SURFACE_ICONS[id], size: 15 }))));
     }
 
     /* ================================ icons =============================== */
@@ -1031,6 +1098,14 @@ window.__ModuleLoader__.load({
       target: (p) => h(Svg, p, h("circle", { cx: 12, cy: 12, r: 8.5 }), h("circle", { cx: 12, cy: 12, r: 4.4 }), h("circle", { cx: 12, cy: 12, r: 1.1 })),
       layout: (p) => h(Svg, p, h("rect", { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2 }), h("path", { d: "M9.5 4.5v15" })),
       panelRight: (p) => h(Svg, p, h("rect", { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2 }), h("path", { d: "M14.5 4.5v15" }), h("path", { d: "M14.5 8.5h6" })),
+      surfacePage: (p) => h(Svg, p, h("rect", { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2 }), h("path", { d: "M3.5 9h17" })),
+      surfaceFloat: (p) => h(Svg, p, h("path", { d: "M20.5 10V6.5a2 2 0 0 0-2-2h-13a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2H9" }), h("rect", { x: 12, y: 12.5, width: 8.5, height: 7, rx: 1.5 })),
+      pin: (p) => h(Svg, p, h("path", { d: "M9 4h6l-1 6 3.5 3.5h-11L10 10z" }), h("path", { d: "M12 13.5V20" })),
+      expand: (p) => h(Svg, p, h("path", { d: "M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7" })),
+      shrink: (p) => h(Svg, p, h("path", { d: "M20 10h-6V4M4 14h6v6M14 10l6-6M10 14l-6 6" })),
+      eyeOff: (p) => h(Svg, p, h("path", { d: "M3 3l18 18M10.6 6.2A9.6 9.6 0 0 1 12 6c5 0 8.5 4 9.5 6a13 13 0 0 1-2.6 3.4M6.5 7.6A13.5 13.5 0 0 0 2.5 12c1 2 4.5 6 9.5 6a9.3 9.3 0 0 0 4-.9M9.9 10a3 3 0 0 0 4.1 4.1" })),
+      eye: (p) => h(Svg, p, h("path", { d: "M2.5 12c1-2 4.5-6 9.5-6s8.5 4 9.5 6c-1 2-4.5 6-9.5 6s-8.5-4-9.5-6z" }), h("circle", { cx: 12, cy: 12, r: 3 })),
+      sideLeft: (p) => h(Svg, p, h("path", { d: "M11 6 5 12l6 6M5 12h14" })),
       refresh: (p) => h(Svg, p, h("path", { d: "M20 11a8 8 0 1 0-2.34 5.66" }), h("path", { d: "M20 4v7h-7" })),
       plus: (p) => h(Svg, p, h("path", { d: "M12 5v14M5 12h14" })),
       settings: (p) => h(Svg, p, h("circle", { cx: 12, cy: 12, r: 3.2 }), h("path", { d: "M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" })),
@@ -1063,7 +1138,7 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 /* ---------- tokens & page ---------- */
-.sk-page,.sk-floating{--sk-line:var(--dsw-alias-border-l2,rgba(0,0,0,.10));--sk-line-soft:var(--dsw-alias-border-l1,rgba(0,0,0,.045));
+.sk-page,.sk-floating,.sk-overlay-host,.sk-host-header{--sk-line:var(--dsw-alias-border-l2,rgba(0,0,0,.10));--sk-line-soft:var(--dsw-alias-border-l1,rgba(0,0,0,.045));
   --sk-line-strong:var(--dsw-alias-border-l3,rgba(0,0,0,.12));--sk-surface:var(--dsw-alias-bg-layer-1,#fff);
   --sk-surface-2:color-mix(in srgb,var(--dsw-alias-bg-module-platform,#f5f6f7) 52%,var(--dsw-alias-bg-base,#fff));
   --sk-surface-3:color-mix(in srgb,var(--dsw-alias-bg-module-platform,#f5f6f7) 82%,var(--dsw-alias-bg-base,#fff));
@@ -1087,10 +1162,11 @@ window.__ModuleLoader__.load({
 .sk-page *,.sk-page *::before,.sk-page *::after{box-sizing:border-box}
 .sk-page button,.sk-page input,.sk-page textarea,.sk-page select{font-family:inherit}
 .sk-page ::selection{background:color-mix(in srgb,var(--sk-accent) 24%,transparent)}
-.sk-page ::-webkit-scrollbar{width:6px;height:6px}
-.sk-page ::-webkit-scrollbar-thumb{background:var(--dsh-scrollbar-thumb,var(--dsw-alias-scrollbar-bg-l1,#e5e5e5));border-radius:99px}
-.sk-page ::-webkit-scrollbar-thumb:hover{background:var(--dsh-scrollbar-thumb-hover,var(--dsw-alias-scrollbar-hover-l1,#d4d4d4))}
-.sk-page ::-webkit-scrollbar-track{background:transparent}
+.sk-page ::-webkit-scrollbar,.sk-floating ::-webkit-scrollbar,.sk-overlay-host ::-webkit-scrollbar{width:6px;height:6px}
+.sk-page ::-webkit-scrollbar-thumb,.sk-floating ::-webkit-scrollbar-thumb,.sk-overlay-host ::-webkit-scrollbar-thumb{background:var(--dsh-scrollbar-thumb,var(--dsw-alias-scrollbar-bg-l1,#e5e5e5));border-radius:99px}
+.sk-page ::-webkit-scrollbar-thumb:hover,.sk-floating ::-webkit-scrollbar-thumb:hover,.sk-overlay-host ::-webkit-scrollbar-thumb:hover{background:var(--dsh-scrollbar-thumb-hover,var(--dsw-alias-scrollbar-hover-l1,#d4d4d4))}
+.sk-page ::-webkit-scrollbar-track,.sk-floating ::-webkit-scrollbar-track,.sk-overlay-host ::-webkit-scrollbar-track{background:transparent}
+.sk-page ::-webkit-scrollbar-button,.sk-floating ::-webkit-scrollbar-button,.sk-overlay-host ::-webkit-scrollbar-button{display:none}
 .sk-page :focus-visible{outline:2px solid color-mix(in srgb,var(--sk-accent) 55%,transparent);outline-offset:2px}
 @keyframes skPulse{0%,100%{opacity:1}50%{opacity:.4}}
 /* ---------- buttons ---------- */
@@ -1590,7 +1666,7 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 .sk-page.is-side.sk-tier-narrow .sk-narrow-list{padding-top:10px}
 
 /* ======================= v0.4：克制的强调色 ======================= */
-.sk-page{--sk-brand-accent:var(--dsw-alias-state-business-primary,#4176e6)}
+.sk-page,.sk-floating,.sk-overlay-host{--sk-brand-accent:var(--dsw-alias-state-business-primary,#4176e6)}
 .sk-dot{width:6px;height:6px;border-radius:50%;flex:none;display:inline-block}
 .sk-dot.is-total{background:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
 .sk-dot.is-backlog{background:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
@@ -1860,36 +1936,178 @@ button.sk-task-row-main{cursor:pointer}
 .sk-schedule-group{margin-bottom:14px}
 .sk-schedule-group h2{font-size:14px;margin:8px 0}
 .sk-schedule-group h2 span{font-weight:400;color:var(--sk-ink-3);margin-inline-start:8px}
-.sk-chat-controls,.sk-chat-turn-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
-.sk-chat-mode,.sk-model-button{min-width:0;max-width:55%}
-.sk-chat-mode,.sk-model-controls{position:relative}
-.sk-chat-mode{display:flex;align-items:center}
-.sk-chat-mode .sk-select,.sk-model-controls .sk-select{padding-inline-end:25px}
-.sk-chat-mode .sk-ws-caret,.sk-model-controls .sk-ws-caret{inset-inline-end:8px}
-.sk-model-button{display:inline-flex;align-items:center;gap:5px}
+/* ---------- model button (shared by toolbar, quick chat and settings) ---------- */
+.sk-model-controls{position:relative}
+.sk-model-controls .sk-select{padding-inline-end:25px}
+.sk-model-controls .sk-ws-caret{inset-inline-end:8px}
+.sk-model-button{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:55%}
 .sk-model-button svg,.sk-model-trigger svg{flex:none}
-.sk-model-button span,.sk-model-trigger span,.sk-chat-turn-meta span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.sk-chat-thread{max-height:min(36vh,360px);min-height:0;flex:0 1 auto;overflow:auto;overscroll-behavior:contain;display:grid;gap:12px;
-  border:1px solid var(--sk-line);border-radius:8px;padding:10px;background:var(--sk-surface-2);font-size:13px;line-height:1.55}
-.sk-chat-turn{display:grid;gap:6px;min-width:0}
-.sk-chat-question{justify-self:end;max-width:92%;width:fit-content;margin:0;border-radius:8px;padding:5px 9px;background:var(--sk-surface-3,var(--sk-line));font-weight:500}
-.sk-chat-turn-meta{font-size:11px;color:var(--sk-ink-3)}
-.sk-chat-turn-meta button{flex:none}
+.sk-model-button span,.sk-model-trigger span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .sk-header-actions .sk-model-trigger.is-warn{color:var(--sk-amber)}
 .sk-page:not(.sk-compact-header) .sk-header-actions .sk-model-trigger{display:inline-flex;align-items:center;gap:5px;width:auto;max-width:148px;padding:0 7px;font-size:12px}
-.sk-chat-modal .sk-modal-foot{flex-wrap:wrap}
 .sk-iconbtn-v3.sk-chat-trigger{display:inline-flex;align-items:center;justify-content:center;width:auto;gap:5px;padding:0 7px;white-space:nowrap;font-size:12px}
 .sk-tier-narrow .sk-slimbar .sk-count{display:none}
 .sk-tier-narrow .sk-slimbar{flex-wrap:wrap}
-.sk-surface-picker,.sk-activity-picker{max-width:110px;font-size:12px}
-.sk-host-header{display:inline-flex;align-items:center;gap:2px;--sk-ink:var(--dsw-alias-label-primary,#0f1115);
-  --sk-ink-2:var(--dsw-alias-label-secondary,#61666b);--sk-hover:var(--dsw-alias-interactive-bg-hover,#edf1f6);
-  --sk-line:var(--dsw-alias-border-l2,#d8dce3)}
-.sk-host-surface-picker{max-width:108px;height:28px;border:0;border-radius:5px;
-  background:transparent;color:var(--dsw-alias-label-secondary,#61666b);font:inherit;font-size:11px;cursor:pointer}
-.sk-host-surface-picker option{background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115)}
+.sk-activity-picker{max-width:110px;font-size:12px}
+/* ---------- quick chat ---------- */
+.sk-modal.sk-chat-modal{width:min(720px,calc(100vw - 32px));height:min(780px,calc(100dvh - 48px));max-height:none;padding:16px 18px 12px;gap:10px}
+.sk-page.is-side .sk-modal.sk-chat-modal{width:100%;height:100%}
+.sk-chat-head{display:flex;align-items:center;gap:8px;min-width:0}
+.sk-chat-head h3{margin-inline-end:auto}
+.sk-chat-head .sk-model-button{max-width:40%}
+.sk-chat-modes,.sk-chat-starters{display:flex;flex-wrap:wrap;gap:6px}
+.sk-chat-modes .sk-chip,.sk-chat-starters .sk-chip{height:26px;padding:0 10px;border-radius:999px;font-size:12px;background:transparent;color:var(--sk-ink-2)}
+.sk-chat-modes .sk-chip:hover:not(:disabled):not([aria-pressed=true]),.sk-chat-starters .sk-chip:hover{background:var(--sk-hover);color:var(--sk-ink)}
+.sk-chat-modes .sk-chip[aria-pressed=true]{border-color:transparent;background:var(--sk-primary);color:var(--sk-on-primary);font-weight:500}
+.sk-chat-modes .sk-chip:disabled{opacity:.5;cursor:default}
+.sk-chat-thread{flex:1 1 0;min-height:120px;overflow:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:16px;
+  border:1px solid var(--sk-line);border-radius:12px;padding:14px;background:var(--sk-surface-2);font-size:13px;line-height:1.6}
+.sk-chat-empty{margin:auto;max-width:420px;display:grid;gap:8px;justify-items:center;text-align:center;color:var(--sk-ink-3);font-size:12px}
+.sk-chat-empty p{margin:0}
+.sk-chat-empty-title{font-size:13px;color:var(--sk-ink-2)}
+.sk-chat-starters{justify-content:center;margin-top:6px}
+.sk-chat-turn{display:grid;gap:8px;min-width:0}
+.sk-chat-question{justify-self:end;max-width:88%;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 6px;border-radius:12px 12px 4px 12px;padding:7px 11px;
+  background:color-mix(in srgb,var(--sk-accent) 12%,var(--sk-surface))}
+.sk-chat-question p{margin:0;min-width:0;max-height:9.6em;overflow:auto}
+.sk-chat-tag{flex:none;font-size:11px;line-height:18px;padding:0 6px;border-radius:999px;background:color-mix(in srgb,var(--sk-ink) 8%,transparent);color:var(--sk-ink-2)}
+.sk-chat-answer{min-width:0;border-radius:4px 12px 12px 12px;padding:9px 12px;background:var(--sk-surface);border:1px solid var(--sk-line-soft)}
+.sk-chat-turn-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;font-size:11px;color:var(--sk-ink-3)}
+.sk-chat-turn-meta>span:first-child{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sk-chat-actions{display:flex;flex:none;gap:12px}
+.sk-chat-actions .sk-text:hover:not(:disabled){color:var(--sk-ink)}
+.sk-chat-actions .sk-text:disabled{opacity:.45;cursor:default}
+.sk-chat-reference{display:flex;align-items:center;gap:6px;min-width:0;padding:5px 9px;border:1px dashed var(--sk-line-strong);border-radius:8px;font-size:12px;color:var(--sk-ink-2)}
+.sk-chat-reference>span:first-of-type{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--sk-ink)}
+.sk-chat-reference-note{flex:none;margin-inline-end:auto;color:var(--sk-ink-3)}
+.sk-chat-composer{display:flex;align-items:flex-end;gap:8px}
+.sk-chat-composer .sk-textarea{flex:1;min-width:0;min-height:52px;max-height:190px;resize:none;font-size:13px;line-height:1.5}
+.sk-chat-composer .sk-btn{flex:none;height:34px}
+.sk-chat-foot{margin:0;font-size:11px;color:var(--sk-ink-3)}
+/* ---------- markdown (model answers) ---------- */
+.sk-md{display:grid;gap:8px;min-width:0;overflow-wrap:anywhere}
+.sk-md p,.sk-md blockquote,.sk-md ul{margin:0}
+.sk-md p{white-space:pre-wrap}
+.sk-md-heading{font-weight:650;font-size:13.5px}
+.sk-md blockquote{padding:2px 0 2px 10px;border-inline-start:3px solid var(--sk-line-strong);color:var(--sk-ink-2);white-space:pre-wrap}
+.sk-md-list{list-style:none;padding:0;display:grid;gap:3px}
+.sk-md-list li{display:flex;gap:7px;min-width:0}
+.sk-md-list li>span:last-child{min-width:0;white-space:pre-wrap}
+.sk-md-marker{flex:none;min-width:1.1em;color:var(--sk-ink-3);font-variant-numeric:tabular-nums}
+.sk-md code{font-family:var(--dsh-font-family-code,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);font-size:.92em}
+.sk-md :not(pre)>code{padding:1px 5px;border-radius:5px;background:color-mix(in srgb,var(--sk-ink) 7%,transparent)}
+.sk-md a{color:var(--sk-accent);text-decoration:underline;text-underline-offset:2px}
+.sk-md-code{border:1px solid var(--sk-line);border-radius:8px;overflow:hidden;background:var(--sk-surface-2)}
+.sk-md-code-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 10px;font-size:11px;color:var(--sk-ink-3);border-bottom:1px solid var(--sk-line-soft)}
+.sk-md-code pre{margin:0;padding:9px 10px;overflow:auto;max-height:320px;line-height:1.5;tab-size:2}
+/* ---------- surface switch & conversation header entry ---------- */
+.sk-surface-switch{display:inline-flex;flex:none;gap:1px;padding:2px;border:1px solid var(--sk-line);border-radius:8px;background:var(--sk-surface)}
+.sk-surface-switch button{display:grid;place-items:center;width:26px;height:24px;padding:0;border:0;border-radius:5px;background:none;color:var(--sk-ink-3);cursor:pointer}
+.sk-surface-switch button:hover{background:var(--sk-hover);color:var(--sk-ink)}
+.sk-surface-switch button[aria-pressed=true]{background:color-mix(in srgb,var(--sk-ink) 9%,transparent);color:var(--sk-ink);cursor:default}
+.sk-host-header{display:inline-flex;align-items:center;font:13px/1.45 var(--dsh-font-family-text-default,system-ui,sans-serif)}
+.sk-host-header .sk-header-btn{color:var(--sk-ink-2)}
+.sk-host-header .sk-header-caret{width:16px;margin-inline-start:-3px;border-radius:5px}
+/* ---------- floating board ---------- */
+.sk-floating{position:fixed;inset:auto;right:16px;display:grid;justify-items:end;gap:8px;
+  bottom:min(calc(max(16px,env(safe-area-inset-bottom)) + var(--sk-float-offset,0px)),calc(100dvh - 64px));
+  margin:0;padding:0;border:0;background:transparent;overflow:visible;
+  max-width:calc(100vw - 32px);z-index:50;pointer-events:auto;color:var(--sk-ink);font:13px/1.45 var(--dsh-font-family-text-default,system-ui,sans-serif)}
+.sk-floating[popover]:not(:popover-open),.sk-overlay-host[popover]:not(:popover-open){display:none}
+[inert] .sk-floating{visibility:hidden}
+.sk-floating.is-left{right:auto;left:16px;justify-items:start}
+.sk-floating *,.sk-overlay-host *{box-sizing:border-box}
+.sk-floating button,.sk-floating input,.sk-overlay-host button,.sk-overlay-host textarea,.sk-overlay-host select{font-family:inherit}
+.sk-floating :focus-visible,.sk-overlay-host :focus-visible{outline:2px solid color-mix(in srgb,var(--sk-accent) 60%,transparent);outline-offset:2px}
+.sk-overlay-host .sk-input:focus-visible,.sk-overlay-host .sk-textarea:focus-visible,.sk-floating .sk-input:focus-visible,.sk-floating .sk-textarea:focus-visible{outline:0}
+.sk-overlay-host{position:fixed;inset:0;width:auto;height:auto;margin:0;padding:0;border:0;background:transparent;overflow:visible;pointer-events:none;
+  color:var(--sk-ink);font:13px/1.45 var(--dsh-font-family-text-default,system-ui,sans-serif)}
+.sk-overlay-host>*{pointer-events:auto}
+.sk-overlay-host .sk-toasts{pointer-events:none}
+.sk-float-trigger{position:relative;display:flex;align-items:center;justify-content:center;gap:8px;max-width:100%;min-height:38px;padding:6px 13px;
+  border:1px solid var(--sk-line);border-radius:999px;background:var(--sk-surface);color:var(--sk-ink);
+  box-shadow:0 1px 2px rgba(0,0,0,.06),0 8px 24px rgba(0,0,0,.14);cursor:pointer;font-size:12px;font-variant-numeric:tabular-nums;
+  touch-action:none;user-select:none;-webkit-user-select:none;transition:transform .16s var(--sk-ease),box-shadow .16s var(--sk-ease),background .16s var(--sk-ease)}
+.sk-float-trigger:hover{background:var(--sk-surface-2);transform:translateY(-1px);box-shadow:0 2px 4px rgba(0,0,0,.08),0 12px 28px rgba(0,0,0,.18)}
+.sk-float-trigger.is-dragging{cursor:grabbing;transform:scale(1.05);transition:none}
+.sk-float-trigger.is-behind{visibility:hidden}
+.sk-float-trigger.is-badge{width:46px;height:46px;min-height:0;padding:0}
+.sk-float-trigger.is-bar{border-radius:12px;gap:10px;flex-wrap:wrap}
+.sk-float-trigger b{font-weight:650;color:var(--sk-accent)}
+.sk-float-mark{display:flex;color:var(--sk-ink-2)}
+.sk-float-count{position:absolute;top:-4px;inset-inline-end:-4px;min-width:18px;height:18px;padding:0 5px;border-radius:999px;
+  background:var(--sk-accent);color:#fff;font-size:11px;font-weight:600;line-height:18px;text-align:center;box-shadow:0 0 0 2px var(--sk-surface)}
+.sk-float-live{position:absolute;bottom:3px;inset-inline-end:3px;width:8px;height:8px;border-radius:50%;background:var(--sk-green);box-shadow:0 0 0 2px var(--sk-surface)}
+@media (prefers-reduced-motion:no-preference){
+  .sk-float-mark.is-new{animation:sk-float-arrival .46s ease-out}
+  .sk-float-live{animation:skPulse 1.8s ease-in-out infinite}
+  .sk-float-panel{animation:sk-float-in .16s var(--sk-ease)}
+  @keyframes sk-float-arrival{0%,100%{transform:scale(1)}45%{transform:scale(1.22);color:var(--sk-accent)}}
+  @keyframes sk-float-in{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
+}
+.sk-float-panel{width:min(540px,calc(100vw - 32px));height:min(720px,calc(100dvh - 32px - max(16px,env(safe-area-inset-bottom))));
+  display:flex;flex-direction:column;border:1px solid var(--sk-line);border-radius:16px;background:var(--sk-surface);
+  box-shadow:0 2px 6px rgba(0,0,0,.06),0 18px 54px rgba(0,0,0,.22);overflow:hidden}
+.sk-float-panel.is-large{width:min(860px,calc(100vw - 32px));height:calc(100dvh - 32px - max(16px,env(safe-area-inset-bottom)))}
+.sk-float-panel>header{flex:none;padding:10px 10px 8px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sk-float-panel h2{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:600;margin:0;border-radius:6px}
+.sk-float-panel h2 svg{color:var(--sk-ink-3)}
+.sk-float-tools{display:flex;align-items:center;gap:2px}
+.sk-float-icon{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:8px;background:none;color:var(--sk-ink-3);cursor:pointer}
+.sk-float-icon:hover{background:var(--sk-hover);color:var(--sk-ink)}
+.sk-float-icon[aria-pressed=true]{background:color-mix(in srgb,var(--sk-accent) 12%,transparent);color:var(--sk-accent)}
+.sk-float-metrics{flex:none;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:0 14px 10px;border-bottom:1px solid var(--sk-line)}
+.sk-float-metrics .sk-btn{height:28px;padding:0 10px;border-radius:999px;color:var(--sk-ink-2)}
+.sk-float-metrics .sk-btn b{font-weight:600;font-variant-numeric:tabular-nums}
+.sk-float-metrics [aria-pressed=true]{border-color:transparent;background:var(--sk-primary);color:var(--sk-on-primary)}
+.sk-float-search{display:flex;align-items:center;gap:5px;flex:1 1 120px;min-width:100px;height:28px;margin-inline-start:auto;padding:0 9px;
+  border:1px solid var(--sk-line);border-radius:999px;color:var(--sk-ink-3)}
+.sk-float-search:focus-within{border-color:color-mix(in srgb,var(--sk-accent) 55%,transparent)}
+.sk-float-search input,.sk-float-add input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--sk-ink);font-size:12px}
+.sk-floating .sk-float-search input:focus-visible,.sk-floating .sk-float-add input:focus-visible{outline:0}
+.sk-float-search input::-webkit-search-cancel-button{cursor:pointer}
+.sk-float-content{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:4px 14px 10px}
+.sk-float-content p{margin:4px 0;color:var(--sk-ink-2);font-size:12px;overflow-wrap:anywhere}
+.sk-float-empty{padding:28px 8px;text-align:center}
+.sk-float-criteria{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line}
+.sk-float-row{padding:10px 0;border-bottom:1px solid var(--sk-line-soft)}
+.sk-float-row:last-of-type{border-bottom:0}
+.sk-float-row-head{display:flex;align-items:baseline;gap:7px;min-width:0}
+.sk-float-row-head .sk-dot{flex:none;transform:translateY(-2px)}
+.sk-float-task{font-size:13px;font-weight:600;color:var(--sk-ink);text-align:start;white-space:normal;overflow-wrap:anywhere}
+.sk-float-task:hover{text-decoration:underline;text-underline-offset:2px}
+.sk-float-row .sk-inline-actions{gap:6px;margin-top:6px}
+.sk-float-row .sk-btn{height:28px;padding:0 10px}
+.sk-float-row .sk-btn.ghost{border-color:var(--sk-line);color:var(--sk-ink-2)}
+.sk-float-more{width:100%;margin-top:8px}
+.sk-float-add{flex:none;display:flex;align-items:center;gap:8px;min-height:44px;padding:6px 14px;border-top:1px solid var(--sk-line);color:var(--sk-ink-3)}
+.sk-float-add:focus-within{color:var(--sk-ink)}
+.sk-float-add input{font-size:13px;height:30px}
+.sk-float-add .sk-btn{height:28px}
+.sk-float-panel>footer{flex:none;padding:6px 14px 8px;border-top:1px solid var(--sk-line-soft);color:var(--sk-ink-2);font-size:12px}
+.sk-float-notice{display:flex;align-items:center;gap:10px;max-width:min(420px,calc(100vw - 32px));padding:9px 12px;border-radius:10px;
+  background:var(--dsw-alias-toast-bg,#353638);color:var(--dsw-alias-toast-label,#fff);font-size:12px;line-height:1.5;box-shadow:0 10px 30px rgba(0,0,0,.22)}
+.sk-float-notice .sk-text{flex:none;color:inherit;text-decoration:underline;text-underline-offset:2px}
+.sk-floating .sk-modal-mask{padding:12px}
+/* ---------- settings: display section ---------- */
 .sk-float-options{min-width:0;display:flex;flex-wrap:wrap;gap:8px 16px;margin:0;padding:8px 10px;border:1px solid var(--sk-line);border-radius:8px}
 .sk-float-options label{display:flex;gap:5px;align-items:center}
+.sk-settings-hint{margin:0;font-size:12px;line-height:1.5;color:var(--sk-ink-3)}
+.sk-settings-heading{margin:8px 0 -4px;font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--sk-ink-3)}
+.sk-settings-heading:first-child{margin-top:0}
+.sk-settings-heading+.sk-settings-row{border-top:none;padding-top:0}
+.sk-settings-row>.sk-select,.sk-settings-row>.sk-settings-controls{flex:none}
+.sk-settings-row{flex-wrap:wrap}
+.sk-settings-row .label{flex:1 1 200px}
+.sk-settings-row>.sk-settings-controls{display:flex;align-items:center;gap:8px;max-width:100%}
+.sk-settings-row>.sk-settings-controls .sk-select{flex:none;min-width:96px}
+.sk-settings-row>.sk-float-options{flex:none;border:0;padding:0;gap:6px 12px;font-size:12px}
+.sk-settings-check{display:inline-flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap}
+/* ---------- workspace › project scope ---------- */
+.sk-task-scope{display:inline-flex;align-items:center;gap:5px;min-width:0;color:var(--sk-ink-2)}
+.sk-task-scope svg{flex:none;color:var(--sk-ink-3)}
+.sk-projects-guide{margin:0 0 14px;max-width:720px;font-size:12px;line-height:1.6;color:var(--sk-ink-3)}
+.sk-project-section>h3 span{margin-inline-start:8px;font-weight:400;font-size:12px;color:var(--sk-ink-3)}
 .sk-project-section{margin:14px 0 20px}
 .sk-project-section>h3{font-size:13px;margin:0 0 9px;color:var(--sk-ink-2)}
 .sk-timeline h2{font-size:17px;margin:8px 0 16px}
@@ -1903,41 +2121,6 @@ button.sk-task-row-main{cursor:pointer}
 .sk-timeline-meta time{font-variant-numeric:tabular-nums}
 .sk-timeline-task,.sk-float-task{font-weight:650;text-align:start;overflow-wrap:anywhere}
 .sk-timeline-day p{margin:0;color:var(--sk-ink-2);white-space:pre-line;overflow-wrap:anywhere}
-.sk-floating{position:fixed;inset:auto;bottom:max(14px,env(safe-area-inset-bottom));right:16px;display:grid;justify-items:end;gap:8px;
-  margin:0;padding:0;border:0;background:transparent;overflow:visible;
-  max-width:calc(100vw - 32px);z-index:50;pointer-events:auto;color:var(--sk-ink);font:13px/1.45 var(--dsh-font-family-text-default,system-ui,sans-serif)}
-.sk-floating[popover]:not(:popover-open){display:none}
-[inert] .sk-floating{visibility:hidden}
-.sk-floating.is-left{right:auto;left:16px;justify-items:start}
-.sk-floating *{box-sizing:border-box}
-.sk-floating button{font-family:inherit}
-.sk-floating :focus-visible{outline:2px solid var(--sk-accent);outline-offset:2px}
-.sk-float-trigger{display:flex;align-items:center;justify-content:center;gap:8px;max-width:100%;min-height:36px;padding:6px 11px;
-  border:1px solid var(--sk-line);border-radius:24px;background:var(--sk-surface);color:var(--sk-ink);
-  box-shadow:0 4px 14px #0002;cursor:pointer;font-variant-numeric:tabular-nums}
-.sk-float-trigger:hover,.sk-float-trigger[aria-expanded=true]{background:var(--sk-surface-2)}
-.sk-float-trigger.is-badge{width:44px;height:44px;padding:4px;flex-direction:column;gap:0;line-height:1.1;font-size:11px}
-.sk-float-trigger.is-bar{border-radius:10px;gap:10px;flex-wrap:wrap}
-.sk-float-trigger.is-bar b{color:var(--sk-accent)}
-.sk-float-mark{display:flex}
-@media (prefers-reduced-motion:no-preference){
-  .sk-float-mark.is-new{animation:sk-float-arrival .46s ease-out}
-  @keyframes sk-float-arrival{0%,100%{transform:scale(1)}45%{transform:scale(1.22);color:var(--sk-accent)}}
-}
-.sk-float-panel{width:min(365px,calc(100vw - 32px));max-height:min(510px,calc(100dvh - 90px));display:flex;flex-direction:column;
-  border:1px solid var(--sk-line);border-radius:14px;background:var(--sk-surface);box-shadow:0 12px 36px #0003;overflow:hidden}
-.sk-float-panel header,.sk-float-panel footer{padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:8px}
-.sk-float-panel h2{font-size:14px;margin:0}
-.sk-float-panel footer{border-top:1px solid var(--sk-line);color:var(--sk-ink-2);font-size:12px;flex-wrap:wrap}
-.sk-float-panel footer button{margin-inline-start:auto}
-.sk-float-metrics{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 8px;border-bottom:1px solid var(--sk-line)}
-.sk-float-metrics [aria-pressed=true]{border-color:var(--sk-accent);color:var(--sk-accent)}
-.sk-float-content{min-height:0;overflow:auto;overscroll-behavior:contain;padding:2px 12px 8px}
-.sk-float-content p{margin:5px 0;color:var(--sk-ink-2);overflow-wrap:anywhere}
-.sk-float-criteria{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line}
-.sk-float-row{padding:9px 0;border-bottom:1px solid var(--sk-line)}
-.sk-float-row:last-child{border-bottom:0}
-.sk-floating .sk-modal-mask{padding:12px}
 @media (prefers-reduced-motion:reduce){
   .sk-run-label::before,.sk-session-line .sk-live-dot.is-live{animation:none!important}
 }
@@ -1995,6 +2178,7 @@ button.sk-task-row-main{cursor:pointer}
         const node = rootRef.current;
         const previous = returnFocus?.current || document.activeElement;
         dialogStack.push(token);
+        dialogCountStore.set(dialogStack.length);
         const initial = node?.querySelector("[data-sk-initial-focus]") || focusableIn(node)[0];
         if (initial) {
           initial.focus({ preventScroll: true });
@@ -2043,6 +2227,7 @@ button.sk-task-row-main{cursor:pointer}
           document.removeEventListener("focusin", onFocusIn, true);
           const index = dialogStack.indexOf(token);
           if (index >= 0) dialogStack.splice(index, 1);
+          dialogCountStore.set(dialogStack.length);
           if (previous && previous.isConnected && typeof previous.focus === "function") {
             previous.focus({ preventScroll: true });
           }
@@ -2317,7 +2502,7 @@ button.sk-task-row-main{cursor:pointer}
         h(
           "div",
           { className: "sk-card-meta-v3" },
-          h("span", { className: "sk-card-ws", title: [task.projectName, task.workspacePath].filter(Boolean).join(" · ") }, task.projectName || task.workspaceTitle || "未分组"),
+          h("span", { className: "sk-card-ws", title: [taskScopeLabel(task), task.workspacePath].filter(Boolean).join(" · ") }, taskScopeLabel(task) || "未分组"),
           h("span", { className: "sk-card-ws-sep" }, "·"),
           h("span", { className: "sk-card-time" }, relTime(task.lastActivityAt)),
           h(
@@ -2914,7 +3099,7 @@ button.sk-task-row-main{cursor:pointer}
             placeholder: "记录决策、背景或提醒", onChange: (event) => update({ notes: event.target.value }) })));
     }
 
-    function TaskDrawer({ task, signal, tasks, workspaces, projects = [], onOpenTask, ctxProps, settings, desktopFiles, onClose, onChanged, pushToast }) {
+    function TaskDrawer({ task, signal, tasks, workspaces, projects = [], onOpenTask, ctxProps, settings, desktopFiles, onClose, onChanged, onAskChat, pushToast }) {
       const host = (ctxProps && ctxProps.host) || {};
       const goal = goalInfoOf(task);
       const session = sessionContextOf(task);
@@ -3251,6 +3436,7 @@ button.sk-task-row-main{cursor:pointer}
       ];
       const footerMenuItems = [
         { label: "新会话继续", icon: "spark", run: () => startContinue("newSession", "continue") },
+        onAskChat && { label: "就此任务快聊", icon: "chat", run: () => onAskChat(task) },
         { label: "打开终端", icon: "tool", run: openTerminal },
         { label: "复制会话 ID", icon: "copy", disabled: !session.sessionId, run: copySessionId },
       ];
@@ -3387,7 +3573,8 @@ button.sk-task-row-main{cursor:pointer}
                       h("div", { className: "sk-overview-item" }, h("h3", null, "目标"), h("p", null, goal?.text || "待补充")),
                       h("div", { className: "sk-overview-item" }, h("h3", null, "验收条件"), h("p", null, task.acceptanceCriteria || "待补充")),
                       h("div", { className: "sk-task-plan-line" },
-                        task.projectName ? h("span", null, task.projectName) : null,
+                        taskScopeLabel(task) ? h("span", { className: "sk-task-scope", title: "所属工作区 › 自建项目" },
+                          h(Icon, { name: "folder", size: 12 }), taskScopeLabel(task)) : null,
                         h("button", { type: "button", className: "sk-text sk-planning-action", onClick: () => editPlanning("dueDate"),
                           "aria-label": task.dueDate ? "修改到期日" : "设置到期日", title: task.dueDate ? `修改到期日 · ${task.dueDate}` : undefined },
                           dueLabel(task) || "设置到期日"),
@@ -3503,7 +3690,7 @@ button.sk-task-row-main{cursor:pointer}
                   placeholder: "新增子任务…",
                   onChange: (event) => setNewSubtask(event.target.value),
                   onKeyDown: (event) => {
-                    if (event.key === "Enter" && !event.isComposing && subtaskBusy !== "add") addSubtask();
+                    if (event.key === "Enter" && !isComposingKey(event) && subtaskBusy !== "add") addSubtask();
                   },
                 }),
                 h("button", { type: "button", className: "sk-text", onClick: addSubtask, disabled: !newSubtask.trim() || subtaskBusy === "add" }, "添加"),
@@ -3692,7 +3879,7 @@ button.sk-task-row-main{cursor:pointer}
               "div",
               { className: "sk-field" },
               h("label", { htmlFor: "sk-newtask-title-input" }, "标题"),
-              h("input", { ref: inputRef, id: "sk-newtask-title-input", className: "sk-input", value: title, maxLength: TEXT_LIMITS.title, placeholder: "要做什么？", onChange: (event) => setTitle(event.target.value), onKeyDown: (event) => event.key === "Enter" && !event.isComposing && !saving && create() }),
+              h("input", { ref: inputRef, id: "sk-newtask-title-input", className: "sk-input", value: title, maxLength: TEXT_LIMITS.title, placeholder: "要做什么？", onChange: (event) => setTitle(event.target.value), onKeyDown: (event) => event.key === "Enter" && !isComposingKey(event) && !saving && create() }),
             ),
             h(
               "div",
@@ -4005,6 +4192,44 @@ button.sk-task-row-main{cursor:pointer}
           h(
             "div",
             { className: "sk-modal-body" },
+            h("h4", { className: "sk-settings-heading" }, "显示与入口"),
+            h("div", { className: "sk-settings-row" },
+              h("div", { className: "label" }, h("b", null, "默认看板形态"), h("span", null, "点击会话页头的看板图标时打开。全局、右侧、悬浮三种形态同一时刻只显示一种")),
+              h(SurfacePicker, { value: entryDraft.surface, className: "sk-select", label: "会话页头默认打开方式",
+                onChange: (surface) => changeEntry({ surface }) })),
+            h("div", { className: "sk-settings-row" },
+              h("div", { className: "label" }, h("b", null, "悬浮入口"), h("span", null, "在会话界面常驻，可拖动调整位置，右键可隐藏。进入全局看板时自动让位")),
+              h("button", { type: "button", className: cx("sk-switch", entryDraft.floatEnabled && "on"), role: "switch", "aria-checked": entryDraft.floatEnabled,
+                "aria-label": "常驻悬浮入口", onClick: () => changeEntry({ floatEnabled: !entryDraft.floatEnabled }) }, h("i"))),
+            entryDraft.floatEnabled ? h(React.Fragment, null,
+              h("div", { className: "sk-settings-row" },
+                h("div", { className: "label" }, h("b", null, "入口样式与位置"), h("span", null, "圆形图标最不占地方，胶囊和状态条直接显示数量")),
+                h("span", { className: "sk-settings-controls" },
+                  h("select", { className: "sk-select", "aria-label": "悬浮样式", value: entryDraft.floatStyle, onChange: (event) => changeEntry({ floatStyle: event.target.value }) },
+                    Object.entries(FLOAT_STYLES).map(([key, label]) => h("option", { key, value: key }, label))),
+                  h("select", { className: "sk-select", "aria-label": "悬浮位置", value: entryDraft.floatPosition, onChange: (event) => changeEntry({ floatPosition: event.target.value }) },
+                    h("option", { value: "right" }, "右侧"), h("option", { value: "left" }, "左侧")))),
+              h("div", { className: "sk-settings-row" },
+                h("div", { className: "label" }, h("b", null, "入口上的数量"), h("span", null, "选择入口提示哪些类别。展开后的面板始终包含全部类别")),
+                h("fieldset", { className: "sk-float-options", "aria-label": "悬浮摘要" },
+                  Object.entries(FLOAT_SUMMARIES).map(([id, label]) => {
+                    const checked = entryDraft.floatSummaries.includes(id);
+                    return h("label", { key: id }, h("input", { type: "checkbox", checked,
+                      disabled: checked && entryDraft.floatSummaries.length === 1,
+                      onChange: () => changeEntry({ floatSummaries: checked ? entryDraft.floatSummaries.filter((item) => item !== id) : [...entryDraft.floatSummaries, id] }) }), label);
+                  }))),
+              h("div", { className: "sk-settings-row" },
+                h("div", { className: "label" }, h("b", null, "空闲时隐藏入口"), h("span", null, "所选类别的数量都为零时暂时隐藏，有新事项时再出现")),
+                h("button", { type: "button", className: cx("sk-switch", entryDraft.floatHideEmpty && "on"), role: "switch", "aria-checked": entryDraft.floatHideEmpty,
+                  "aria-label": "所选摘要都为零时隐藏入口", onClick: () => changeEntry({ floatHideEmpty: !entryDraft.floatHideEmpty }) }, h("i"))),
+              h("div", { className: "sk-settings-row" },
+                h("div", { className: "label" }, h("b", null, "悬浮面板"), h("span", null, "大面板适合宽屏。固定后点击面板外不会收起")),
+                h("span", { className: "sk-settings-controls" },
+                  h("select", { className: "sk-select", "aria-label": "悬浮面板大小", value: entryDraft.floatSize, onChange: (event) => changeEntry({ floatSize: event.target.value }) },
+                    h("option", { value: "normal" }, "标准"), h("option", { value: "large" }, "大")),
+                  h("label", { className: "sk-settings-check" }, h("input", { type: "checkbox", checked: entryDraft.floatPinned,
+                    onChange: (event) => changeEntry({ floatPinned: event.target.checked }) }), "固定")))) : null,
+            h("h4", { className: "sk-settings-heading" }, "AI 与扫描"),
             h(
               "div",
               { className: "sk-settings-row" },
@@ -4121,33 +4346,7 @@ button.sk-task-row-main{cursor:pointer}
                   ),
                 )
               : h("div", { className: "sk-usage" }, h("div", { className: "sk-usage-row" }, "今日用量：Host v2 就绪后显示")),
-            h(
-              "div",
-              { className: "sk-field" },
-              h("span", { className: "sk-field-label" }, "显示与入口"),
-              h("label", { className: "sk-settings-row" }, "会话页头默认打开",
-                h(SurfacePicker, { value: entryDraft.surface, className: "sk-select", label: "会话页头默认打开方式",
-                  onChange: (surface) => changeEntry({ surface }) })),
-              h("label", { className: "sk-settings-row" }, "常驻悬浮入口",
-                h("input", { type: "checkbox", checked: entryDraft.floatEnabled,
-                  onChange: (event) => changeEntry({ floatEnabled: event.target.checked }) })),
-              h("label", { className: "sk-settings-row" }, "悬浮样式",
-                h("select", { className: "sk-select", value: entryDraft.floatStyle, onChange: (event) => changeEntry({ floatStyle: event.target.value }) },
-                  Object.entries(FLOAT_STYLES).map(([key, label]) => h("option", { key, value: key }, label)))),
-              h("label", { className: "sk-settings-row" }, "悬浮位置",
-                h("select", { className: "sk-select", value: entryDraft.floatPosition, onChange: (event) => changeEntry({ floatPosition: event.target.value }) },
-                  h("option", { value: "right" }, "右下角"), h("option", { value: "left" }, "左下角"))),
-              h("fieldset", { className: "sk-float-options" }, h("legend", null, "悬浮摘要"),
-                Object.entries(FLOAT_SUMMARIES).map(([id, label]) => {
-                  const checked = entryDraft.floatSummaries.includes(id);
-                  return h("label", { key: id }, h("input", { type: "checkbox", checked,
-                    disabled: checked && entryDraft.floatSummaries.length === 1,
-                    onChange: () => changeEntry({ floatSummaries: checked ? entryDraft.floatSummaries.filter((item) => item !== id) : [...entryDraft.floatSummaries, id] }) }), label);
-                })),
-              h("label", { className: "sk-settings-row" }, "所选摘要都为零时隐藏入口",
-                h("input", { type: "checkbox", checked: entryDraft.floatHideEmpty,
-                  onChange: (event) => changeEntry({ floatHideEmpty: event.target.checked }) })),
-            ),
+            h("h4", { className: "sk-settings-heading" }, "范围与数据"),
             h(
               "div",
               { className: "sk-field" },
@@ -4436,7 +4635,7 @@ button.sk-task-row-main{cursor:pointer}
             summary ? h("span", { className: "sk-task-row-summary" }, summary) : null,
             h("span", { className: "sk-task-row-meta" },
               taskRunningLabel(task) ? h("span", { className: cx("sk-run-label", task.sessionContext?.estimated && "is-estimated") }, taskRunningLabel(task)) : null,
-              [mode === "hierarchy" ? "" : task.projectName || task.workspaceTitle, task.archived ? "已归档" : STATUS_META[statusOf(task)].label,
+              [mode === "hierarchy" ? task.projectName : taskScopeLabel(task), task.archived ? "已归档" : STATUS_META[statusOf(task)].label,
                 taskProgressLabel(task), task.priority, signal?.kind === "due" ? "" : dueLabel(task),
                 artifactsOf(task).length ? `${artifactsOf(task).length} 项产出` : ""].filter(Boolean).join(" · "))),
           taskActions.button(task),
@@ -4533,9 +4732,11 @@ button.sk-task-row-main{cursor:pointer}
         h("div", { className: "sk-projects-head" },
           h("h2", null, "项目"),
           h("button", { type: "button", className: "sk-btn primary", onClick: onNew }, "新建项目")),
-        defaults.length ? h("section", { className: "sk-project-section" }, h("h3", null, "工作区项目"),
+        h("p", { className: "sk-projects-guide" },
+          "工作区来自 DSH 的工作目录，自动出现；自建项目由你创建，可以把多个工作区的任务归到一起。任务在会话里执行，一张任务卡可以关联多个会话。"),
+        defaults.length ? h("section", { className: "sk-project-section" }, h("h3", null, "工作区项目", h("span", null, "按 DSH 工作区自动生成")),
           h("div", { className: "sk-project-grid" }, defaults.map((workspace) => card({ id: workspace.id, name: workspace.title }, true)))) : null,
-        h("section", { className: "sk-project-section" }, h("h3", null, "自建项目"),
+        h("section", { className: "sk-project-section" }, h("h3", null, "自建项目", h("span", null, "手动创建，可跨工作区")),
           custom.length ? h("div", { className: "sk-project-grid" }, custom.map((project) => card(project)))
             : h("p", { className: "sk-project-metrics" }, "把一个或多个工作区的任务归到同一个项目。")),
         archived.length ? h("details", { className: "sk-project-archive" },
@@ -4640,32 +4841,75 @@ button.sk-task-row-main{cursor:pointer}
           .sort((a, b) => acceptanceEvidenceAt(b) - acceptanceEvidenceAt(a)),
         attention: rows.filter(({ signal }) => signal),
         running: rows.filter(({ task }) => taskRunningLabel(task)),
+        recent: rows,
       };
     }
 
+    /** 当前选中的 DSH 全局面板；用于在全局看板显示时隐藏悬浮入口。 */
+    function useActivePanel(host) {
+      const [panel, setPanel] = React.useState(() => host.activePanel?.());
+      React.useEffect(() => {
+        const read = () => setPanel(host.activePanel?.());
+        read();
+        return host.watchPanel?.(read);
+      }, [host]);
+      return panel;
+    }
+
+    const FLOAT_PAGE_SIZE = 8;
+
+    /** 随手记的任务归到当前会话所在的工作区，但不绑定会话：随手记下的事项不一定属于这次对话。 */
+    function quickCapturePayload(title, tasks, sessionId) {
+      const owner = sessionId && tasks.find((task) => task.workspaceId &&
+        (task.primarySessionId === sessionId || task.sessions?.some((item) => item.id === sessionId)));
+      return { title, status: "backlog", ...(owner ? { workspaceId: owner.workspaceId } : {}) };
+    }
+
+    /**
+     * 悬浮看板：常驻的悬浮入口 + 展开后的面板。
+     * 入口可拖动、可右键隐藏；面板集中处理待验收、待处理、运行中与最近任务，并提供快聊和随手记。
+     */
     function FloatingPanel({ host, prefs, open, sessionStatuses }) {
       const { data, loading, error, reload } = useBoardData();
-      const [category, setCategory] = React.useState(prefs.floatSummaries[0]);
+      const [category, setCategory] = React.useState(() => "");
       const [limit, setLimit] = React.useState(0);
-      const [continuation, setContinuation] = React.useState(null);
+      const [continuation, setContinuation] = React.useState(() => null);
       const continuationTrigger = React.useRef(null);
       const [busyId, setBusyId] = React.useState("");
       const [message, setMessage] = React.useState("");
       const busy = React.useRef(false);
       const [pulse, setPulse] = React.useState(0);
+      const [query, setQuery] = React.useState("");
+      const [quickTitle, setQuickTitle] = React.useState("");
+      const [menuAnchor, setMenuAnchor] = React.useState(false);
+      const notice = useStore(floatNoticeStore);
+      const setNotice = floatNoticeStore.set;
+      const [dragPosition, setDragPosition] = React.useState(() => null);
+      const drag = React.useRef(null);
+      const suppressClick = React.useRef(false);
       const previousAcceptance = React.useRef(null);
       const root = React.useRef(null);
       const heading = React.useRef(null);
+      const trigger = React.useRef(null);
+      const wasOpen = React.useRef(false);
       const titleId = React.useId();
       const panelId = React.useId();
+      const activePanel = useActivePanel(host);
+      const dialogs = useStore(dialogCountStore);
+      const sideBoards = useStore(sideCountStore);
       const [now, setNow] = React.useState(Date.now);
       React.useEffect(() => {
         const timer = setInterval(() => setNow(Date.now()), 60_000);
         return () => clearInterval(timer);
       }, []);
-      const summary = React.useMemo(() => floatingSummary(data?.tasks || [], sessionStatuses, data?.settings?.initialDays, now),
-        [data?.tasks, sessionStatuses, data?.settings?.initialDays, now]);
+      const tasks = React.useMemo(() => {
+        const names = new Map((data?.projects || []).map((project) => [project.id, project.name]));
+        return (data?.tasks || []).map((task) => names.has(task.projectId) ? { ...task, projectName: names.get(task.projectId) } : task);
+      }, [data?.tasks, data?.projects]);
+      const summary = React.useMemo(() => floatingSummary(tasks, sessionStatuses, data?.settings?.initialDays, now),
+        [tasks, sessionStatuses, data?.settings?.initialDays, now]);
       const metrics = prefs.floatSummaries.map((id) => ({ id, label: FLOAT_SUMMARIES[id], count: summary[id].length }));
+      const tabs = Object.entries(FLOAT_TABS).map(([id, label]) => ({ id, label, count: summary[id].length }));
       React.useEffect(() => {
         if (!data) return;
         const current = prefs.floatSummaries.includes("acceptance") ? new Set(summary.acceptance.map(({ task }) => task.id)) : null;
@@ -4677,30 +4921,56 @@ button.sk-task-row-main{cursor:pointer}
         if (open) return;
         setLimit(0);
         setContinuation(null);
+        setQuery("");
       }, [open]);
-      const selected = metrics.some((item) => item.id === category) ? category : metrics[0].id;
+      // 全局看板显示时不保留悬浮面板：三种形态只显示一种。
+      const onBoardPage = activePanel === PANEL_ID;
+      React.useEffect(() => {
+        if (onBoardPage && open) setFloatingOpen(false);
+      }, [onBoardPage, open]);
+      React.useEffect(() => {
+        if (!notice) return undefined;
+        const timer = setTimeout(() => setNotice(null), 8000);
+        return () => clearTimeout(timer);
+      }, [notice]);
+      const preferred = metrics.find(({ count }) => count > 0)?.id || metrics[0].id;
+      const selected = Object.hasOwn(FLOAT_TABS, category) ? category : preferred;
       const continueTask = continuation && data?.tasks?.find((task) => task.id === continuation.id && !task.archived);
       React.useEffect(() => {
         if (continuation && !continueTask) setContinuation(null);
       }, [continuation, continueTask]);
       const visibleMetrics = metrics.filter(({ count }) => count > 0);
-      const showTrigger = open || (prefs.floatEnabled && (!prefs.floatHideEmpty || visibleMetrics.length > 0 || Boolean(error)));
+      const showPanel = open && !onBoardPage;
+      // 全局或右侧看板正在显示时入口让位：同一时刻只出现一种看板形态。
+      const showTrigger = !showPanel && !onBoardPage && sideBoards === 0 && prefs.floatEnabled &&
+        (!prefs.floatHideEmpty || visibleMetrics.length > 0 || Boolean(error));
+      const showRoot = showPanel || showTrigger || Boolean(notice);
       const topLayer = typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.showPopover === "function";
       React.useLayoutEffect(() => {
         const node = root.current;
-        if (!topLayer || !showTrigger || !node) return undefined;
+        if (!topLayer || !showRoot || !node) return undefined;
         node.showPopover();
         return () => { if (node.matches(":popover-open")) node.hidePopover(); };
-      }, [showTrigger, topLayer]);
+      }, [showRoot, topLayer]);
       React.useLayoutEffect(() => {
-        if (!open) return undefined;
-        const previousFocus = document.activeElement;
-        heading.current?.focus({ preventScroll: true });
+        if (!showPanel) {
+          // 面板收起后把焦点还给重新出现的悬浮入口。
+          if (wasOpen.current && root.current && (!document.activeElement || document.activeElement === document.body)) {
+            trigger.current?.focus({ preventScroll: true });
+          }
+          wasOpen.current = false;
+          return undefined;
+        }
+        // 只在展开的那一刻把焦点移到标题；固定状态变化引起的重新订阅不抢焦点。
+        if (!wasOpen.current) heading.current?.focus({ preventScroll: true });
+        wasOpen.current = true;
         const closeOutside = (event) => {
-          if (!root.current?.contains(event.target)) setFloatingOpen(false);
+          if (prefs.floatPinned || root.current?.contains(event.target)) return;
+          if (event.target?.closest?.(".sk-overlay-host,.sk-quick-menu")) return;
+          setFloatingOpen(false);
         };
         const closeOnEscape = (event) => {
-          if (event.target?.closest?.(".sk-continue-modal")) return;
+          if (event.target?.closest?.(".sk-continue-modal,.sk-quick-menu")) return;
           if (event.key === "Escape" && !event.defaultPrevented && root.current?.contains(document.activeElement)) {
             event.preventDefault();
             event.stopPropagation();
@@ -4712,9 +4982,8 @@ button.sk-task-row-main{cursor:pointer}
         return () => {
           document.removeEventListener("pointerdown", closeOutside);
           document.removeEventListener("keydown", closeOnEscape, true);
-          if (root.current?.contains(document.activeElement) && previousFocus?.isConnected) previousFocus.focus();
         };
-      }, [open]);
+      }, [showPanel, prefs.floatPinned]);
       const accept = async (task) => {
         if (busy.current || !canAcceptTask(task) || isAccepted(task)) return;
         busy.current = true;
@@ -4737,68 +5006,194 @@ button.sk-task-row-main{cursor:pointer}
         if (action?.(id)) setFloatingOpen(false);
         else setMessage("当前环境无法打开该入口。");
       };
-      if (!showTrigger) return null;
+      // remember=true 时把所选形态记为会话页头的默认形态；点悬浮入口本身不改默认值。
+      const switchSurface = (surface, remember = true) => {
+        const session = host.currentSession?.();
+        if (host.openSurface?.(surface, session)) {
+          if (remember) updatePrefs({ surface });
+        } else if (surface === "side" && host.openSurface?.("page")) {
+          if (remember) updatePrefs({ surface: "page" });
+        } else setMessage("当前环境无法打开此看板形态。");
+      };
+      const openChat = () => host.openChat?.({ sessionId: host.currentSession?.() });
+      const quickAdd = async (event) => {
+        event.preventDefault();
+        const title = quickTitle.trim();
+        if (!title || busy.current) return;
+        busy.current = true;
+        setMessage("");
+        try {
+          await command("task.create", quickCapturePayload(title, data?.tasks || [], host.currentSession?.()));
+          setQuickTitle("");
+          setCategory("recent");
+          await reload(true);
+          setMessage(`已记入待办「${clip(title, 24)}」`);
+        } catch (cause) {
+          setMessage(`保存失败：${cause.message}`);
+        } finally {
+          busy.current = false;
+        }
+      };
+      const hideEntry = () => {
+        setFloatingOpen(false);
+        updatePrefs({ floatEnabled: false });
+        setNotice({ text: "已隐藏悬浮入口。可在会话页头的看板菜单或「看板设置 → 显示与入口」重新显示。", undo: () => updatePrefs({ floatEnabled: true }) });
+      };
+      const entryMenu = [
+        { label: "展开悬浮看板", icon: SURFACE_ICONS.float, run: () => switchSurface("float", false) },
+        { label: "打开右侧看板", icon: SURFACE_ICONS.side, run: () => switchSurface("side") },
+        { label: "打开全局看板", icon: SURFACE_ICONS.page, run: () => switchSurface("page") },
+        "divider",
+        { label: "快聊", icon: "chat", run: openChat },
+        "divider",
+        { label: prefs.floatPosition === "left" ? "移到右侧" : "移到左侧", icon: prefs.floatPosition === "left" ? "arrow" : "sideLeft",
+          run: () => updatePrefs({ floatPosition: prefs.floatPosition === "left" ? "right" : "left" }) },
+        prefs.floatOffset > 0 && { label: "回到底部", icon: "chevronDown", run: () => updatePrefs({ floatOffset: 0 }) },
+        { label: "隐藏悬浮入口", icon: "eyeOff", run: hideEntry },
+      ];
+      // 拖动悬浮入口：竖直方向调整高度，越过屏幕中线则换边；位移很小时仍视为点击。
+      const dragHandlers = {
+        onPointerDown: (event) => {
+          if (event.button !== 0) return;
+          drag.current = { x: event.clientX, y: event.clientY, offset: prefs.floatOffset, moved: false };
+          // 立即捕获指针：快速拖动时指针会先离开按钮，后续移动仍要交给它处理。
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+        },
+        onPointerMove: (event) => {
+          const state = drag.current;
+          if (!state) return;
+          if (!state.moved && Math.hypot(event.clientX - state.x, event.clientY - state.y) < 6) return;
+          state.moved = true;
+          const height = event.currentTarget.offsetHeight || 44;
+          const offset = Math.round(Math.max(0, Math.min(window.innerHeight - height - 28, state.offset - (event.clientY - state.y))));
+          state.next = { offset, side: event.clientX < window.innerWidth / 2 ? "left" : "right" };
+          setDragPosition(state.next);
+        },
+        onPointerUp: () => {
+          const state = drag.current;
+          drag.current = null;
+          if (!state?.moved) return;
+          suppressClick.current = true;
+          if (state.next) updatePrefs({ floatOffset: state.next.offset, floatPosition: state.next.side });
+          setDragPosition(null);
+        },
+        onPointerCancel: () => {
+          drag.current = null;
+          setDragPosition(null);
+        },
+      };
+      if (!showRoot) return null;
       const counts = metrics.map(({ label, count }) => `${label} ${count}`).join("，");
-      const rows = summary[selected];
-      const visibleLimit = limit || (selected === "running" ? 3 : 6);
-      return h("div", { ref: root, className: cx("sk-floating", "is-" + prefs.floatPosition), popover: topLayer ? "manual" : undefined },
-        open ? h("section", { id: panelId, className: "sk-float-panel", role: "dialog", "aria-labelledby": titleId, inert: Boolean(continueTask) },
-          h("header", null, h("h2", { ref: heading, tabIndex: -1, id: titleId }, "任务摘要"),
-            h("button", { type: "button", className: "sk-btn ghost", "aria-label": "关闭任务摘要", onClick: () => setFloatingOpen(false) }, "关闭")),
-          h("div", { className: "sk-float-metrics", role: "group", "aria-label": "任务摘要类别" },
-            metrics.map(({ id, label, count }) => h("button", { key: id, type: "button", className: "sk-btn", "aria-pressed": selected === id,
-              onClick: () => { setCategory(id); setLimit(0); } }, label, " ", count))),
-          h("div", { className: "sk-float-content" },
-            error ? h("p", { role: "alert" }, "连接异常。", h("button", { type: "button", className: "sk-text", onClick: () => reload(false) }, "重试")) : null,
-            !rows.length ? h("p", null, loading ? "正在加载任务…" : `暂无${FLOAT_SUMMARIES[selected]}任务。`) : null,
-            rows.slice(0, visibleLimit).map(({ task, signal, artifact }) => {
-              const mainSession = task.primarySessionId || sessionContextOf(task).sessionId;
-              const pending = task.pendingSessions || [];
-              const source = selected === "running" ? task.runningSessionIds?.[0] || mainSession :
-                signal?.sessionId || artifact?.sessionId || mainSession;
-              const ready = signal?.label === "待验收" && !isAccepted(task) && canAcceptTask(task, artifact);
-              const deliverable = artifact?.kind === "deliverable" ? artifact : null;
-              const at = ready ? acceptanceEvidenceAt({ task, artifact: deliverable }) : 0;
-              return h("article", { key: task.id, className: "sk-float-row" },
-                h("button", { type: "button", className: "sk-text sk-float-task", onClick: (event) =>
-                  mainSession && (event.metaKey || event.altKey) ? navigate(host.openSession, mainSession) : navigate(host.openTask, task.id) }, task.title),
-                h("p", null, [task.workspaceTitle, selected === "running" ? taskRunningLabel(task) : signal?.label,
-                  deliverable?.name || signal?.text, at ? relTime(at) : ""].filter(Boolean).join(" · ")),
-                ready && task.acceptanceCriteria ? h("p", { className: "sk-float-criteria", title: task.acceptanceCriteria }, "验收条件 · ", task.acceptanceCriteria) : null,
-                h("div", { className: "sk-inline-actions" },
-                  source && (selected === "running" || !pending.length) ? h("button", { type: "button", className: "sk-btn ghost",
-                    onClick: () => navigate(host.openSession, source) },
-                    selected === "running" ? "打开运行会话" : "打开来源") : null,
-                  ready && deliverable?.path && (deliverable.sessionId || mainSession) && host.openResource
-                    ? h("button", { type: "button", className: "sk-btn ghost", onClick: async () => {
-                        if (await host.openResource(deliverable.sessionId || mainSession, deliverable.path)) setFloatingOpen(false);
-                        else setMessage("无法预览交付物，请打开来源会话。");
-                      } }, "查看交付物") : null,
-                  ready ? h("button", { type: "button", className: "sk-btn ghost", disabled: Boolean(busyId || error),
-                    onClick: (event) => {
-                      continuationTrigger.current = event.currentTarget;
-                      setMessage("");
-                      setContinuation({ id: task.id, sessionId: deliverable?.sessionId || mainSession });
-                    } }, "继续") : null,
-                  ready
-                    ? h("button", { type: "button", className: "sk-btn", disabled: Boolean(busyId || error),
-                        onClick: () => accept(task) }, busyId === task.id ? "正在验收…" : "确认验收") : null),
-                renderSessionActions(pending, (id) => navigate(host.openSession, id)));
-            }),
-            rows.length > visibleLimit ? h("button", { type: "button", className: "sk-btn",
-              onClick: () => setLimit(selected === "running" ? rows.length : visibleLimit + 6) },
-              selected === "running" ? `查看全部 ${rows.length} 项` : "显示更多任务") : null),
-          h("footer", null, h("span", { role: "status" }, message),
-            h("button", { type: "button", className: "sk-text", onClick: () => navigate(host.openPage) }, "打开全局看板"))) : null,
-        h("button", { type: "button", className: cx("sk-float-trigger", "is-" + prefs.floatStyle),
-          title: counts, "aria-label": `任务摘要，${counts}`, "aria-expanded": open, "aria-controls": open ? panelId : undefined, disabled: Boolean(continueTask),
-          onClick: () => setFloatingOpen(!open) },
-          h("span", { key: pulse, className: cx("sk-float-mark", pulse > 0 && "is-new") }, h(Icon, { name: "board", size: 17 })),
-          prefs.floatStyle === "badge" ? h("span", null, (visibleMetrics[0] || metrics[0]).count) :
-            prefs.floatStyle === "pill" ? h("span", null, metrics.map(({ label, count }) => `${label} ${count}`).join(" · ")) :
-            metrics.map(({ id, label, count }) => h("span", { key: id }, label, " ", h("b", null, count)))),
-        open && continueTask ? h(ContinueTaskModal, {
-          task: continueTask, initialTarget: "session", initialPurpose: "verify", initialSessionId: continuation.sessionId,
+      const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      const rows = summary[selected].filter(({ task }) => !terms.length ||
+        terms.every((term) => [task.title, task.workspaceTitle, task.projectName, ...(task.tags || [])].filter(Boolean).join(" ").toLowerCase().includes(term)));
+      const visibleLimit = limit || (selected === "running" ? 3 : FLOAT_PAGE_SIZE);
+      const side = dragPosition?.side || prefs.floatPosition;
+      const offset = dragPosition?.offset ?? prefs.floatOffset;
+      const badge = (visibleMetrics[0] || metrics[0]).count;
+      const iconButton = (icon, label, onClick, extra) => h("button", { type: "button", className: "sk-float-icon", title: label, "aria-label": label, onClick, ...extra },
+        h(Icon, { name: icon, size: 15 }));
+      const panel = showPanel ? h("section", { id: panelId, className: cx("sk-float-panel", "is-" + prefs.floatSize), role: "dialog", "aria-labelledby": titleId, inert: Boolean(continueTask) },
+        h("header", null,
+          h("h2", { ref: heading, tabIndex: -1, id: titleId }, h(Icon, { name: "board", size: 15 }), "任务看板"),
+          h("span", { className: "sk-float-tools" },
+            iconButton("chat", "快聊", openChat),
+            iconButton("pin", prefs.floatPinned ? "取消固定（点击面板外会收起）" : "固定面板（点击面板外不收起）",
+              () => updatePrefs({ floatPinned: !prefs.floatPinned }), { "aria-pressed": prefs.floatPinned }),
+            iconButton(prefs.floatSize === "large" ? "shrink" : "expand", prefs.floatSize === "large" ? "还原面板大小" : "放大面板",
+              () => updatePrefs({ floatSize: prefs.floatSize === "large" ? "normal" : "large" })),
+            iconButton(SURFACE_ICONS.side, "停靠到会话右侧", () => switchSurface("side")),
+            iconButton(SURFACE_ICONS.page, "打开全局看板", () => switchSurface("page")),
+            iconButton("close", "收起悬浮看板", () => setFloatingOpen(false)))),
+        h("div", { className: "sk-float-metrics", role: "group", "aria-label": "任务类别" },
+          tabs.map(({ id, label, count }) => h("button", { key: id, type: "button", className: "sk-btn", "aria-pressed": selected === id,
+            onClick: () => { setCategory(id); setLimit(0); } }, label, " ", h("b", null, count))),
+          h("label", { className: "sk-float-search" }, h(Icon, { name: "search", size: 13 }),
+            h("input", { type: "search", value: query, placeholder: "筛选任务", "aria-label": "筛选当前类别的任务",
+              onChange: (event) => { setQuery(event.target.value); setLimit(0); } }))),
+        h("div", { className: "sk-float-content" },
+          error ? h("p", { role: "alert" }, "连接异常。", h("button", { type: "button", className: "sk-text", onClick: () => reload(false) }, "重试")) : null,
+          !rows.length ? h("p", { className: "sk-float-empty" }, loading ? "正在加载任务…" : terms.length ? "没有匹配的任务。" :
+            selected === "recent" ? "近期还没有任务。在下方随手记一条，或到会话里开始工作。" : `暂无${FLOAT_TABS[selected]}任务。`) : null,
+          rows.slice(0, visibleLimit).map(({ task, signal, artifact }) => {
+            const mainSession = task.primarySessionId || sessionContextOf(task).sessionId;
+            const pending = task.pendingSessions || [];
+            const source = selected === "running" ? task.runningSessionIds?.[0] || mainSession :
+              signal?.sessionId || artifact?.sessionId || mainSession;
+            const ready = signal?.label === "待验收" && !isAccepted(task) && canAcceptTask(task, artifact);
+            const deliverable = artifact?.kind === "deliverable" ? artifact : null;
+            const at = ready ? acceptanceEvidenceAt({ task, artifact: deliverable }) : 0;
+            const status = statusOf(task);
+            const running = taskRunningLabel(task);
+            const progressLabel = taskProgressLabel(task);
+            const detail = selected === "running" ? [running]
+              : selected === "recent" ? [STATUS_META[status].label, running || signal?.label, progressLabel === "进度未知" ? "" : progressLabel, relTime(taskActivityAt(task))]
+              : [signal?.label, deliverable?.name || signal?.text, at ? relTime(at) : ""];
+            return h("article", { key: task.id, className: "sk-float-row" },
+              h("div", { className: "sk-float-row-head" },
+                h("span", { className: cx("sk-dot", "is-" + status), title: STATUS_META[status].label }),
+                h("button", { type: "button", className: "sk-text sk-float-task", title: "查看任务详情（⌘/Alt + 点击打开主会话）", onClick: (event) =>
+                  mainSession && (event.metaKey || event.altKey) ? navigate(host.openSession, mainSession) : navigate(host.openTask, task.id) }, task.title)),
+              h("p", null, [taskScopeLabel(task), ...detail].filter(Boolean).join(" · ")),
+              ready && task.acceptanceCriteria ? h("p", { className: "sk-float-criteria", title: task.acceptanceCriteria }, "验收条件 · ", task.acceptanceCriteria) : null,
+              h("div", { className: "sk-inline-actions" },
+                source && (selected === "running" || !pending.length) ? h("button", { type: "button", className: "sk-btn ghost",
+                  onClick: () => navigate(host.openSession, source) },
+                  selected === "running" ? "打开运行会话" : selected === "recent" ? "打开会话" : "打开来源") : null,
+                ready && deliverable?.path && (deliverable.sessionId || mainSession) && host.openResource
+                  ? h("button", { type: "button", className: "sk-btn ghost", onClick: async () => {
+                      if (await host.openResource(deliverable.sessionId || mainSession, deliverable.path)) setFloatingOpen(false);
+                      else setMessage("无法预览交付物，请打开来源会话。");
+                    } }, "查看交付物") : null,
+                ready || (selected === "recent" && status !== "done") ? h("button", { type: "button", className: "sk-btn ghost", disabled: Boolean(busyId || error),
+                  onClick: (event) => {
+                    continuationTrigger.current = event.currentTarget;
+                    setMessage("");
+                    setContinuation({ id: task.id, sessionId: deliverable?.sessionId || mainSession, purpose: ready ? "verify" : status === "blocked" ? "unblock" : "continue" });
+                  } }, "继续") : null,
+                ready
+                  ? h("button", { type: "button", className: "sk-btn", disabled: Boolean(busyId || error),
+                      onClick: () => accept(task) }, busyId === task.id ? "正在验收…" : "确认验收") : null),
+              renderSessionActions(pending, (id) => navigate(host.openSession, id)));
+          }),
+          rows.length > visibleLimit ? h("button", { type: "button", className: "sk-btn sk-float-more",
+            onClick: () => setLimit(selected === "running" ? rows.length : visibleLimit + FLOAT_PAGE_SIZE) },
+            selected === "running" ? `查看全部 ${rows.length} 项` : `显示更多（还有 ${rows.length - visibleLimit} 项）`) : null),
+        h("form", { className: "sk-float-add", onSubmit: quickAdd },
+          h(Icon, { name: "plus", size: 14 }),
+          h("input", { value: quickTitle, maxLength: 120, placeholder: "随手记一条待办，回车保存", "aria-label": "随手记一条待办任务",
+            onChange: (event) => setQuickTitle(event.target.value) }),
+          quickTitle.trim() ? h("button", { type: "submit", className: "sk-btn" }, "保存") : null),
+        message ? h("footer", null, h("span", { role: "status" }, message)) : h("span", { className: "sk-sr-only", role: "status" })) : null;
+      const entry = showTrigger ? h("button", { ref: trigger, type: "button",
+        className: cx("sk-float-trigger", "is-" + prefs.floatStyle, dragPosition && "is-dragging", dialogs > 0 && "is-behind"),
+        title: `任务看板 · ${counts}\n点击展开 · 拖动调整位置 · 右键更多`, "aria-label": `任务看板，${counts}`, "aria-haspopup": "dialog", "aria-expanded": false,
+        ...dragHandlers,
+        ...quickMenuHandlers(setMenuAnchor, (event) => event.currentTarget),
+        onClick: () => {
+          if (suppressClick.current) {
+            suppressClick.current = false;
+            return;
+          }
+          switchSurface("float", false);
+        } },
+        h("span", { key: pulse, className: cx("sk-float-mark", pulse > 0 && "is-new") }, h(Icon, { name: "board", size: 18 })),
+        prefs.floatStyle === "badge"
+          ? [badge > 0 ? h("span", { key: "count", className: "sk-float-count" }, badge > 99 ? "99+" : badge) : null,
+              summary.running.length ? h("span", { key: "run", className: "sk-float-live", title: `${summary.running.length} 个任务运行中` }) : null]
+          : prefs.floatStyle === "pill"
+            ? h("span", null, visibleMetrics.length ? visibleMetrics.map(({ label, count }) => `${label} ${count}`).join(" · ") : "任务看板")
+            : metrics.map(({ id, label, count }) => h("span", { key: id }, label, " ", h("b", null, count)))) : null;
+      return h("div", { ref: root, className: cx("sk-floating", "is-" + side, showPanel && "is-open"), popover: topLayer ? "manual" : undefined,
+        style: { "--sk-float-offset": `${showPanel ? 0 : offset}px` } },
+        panel,
+        entry,
+        notice ? h("div", { className: "sk-float-notice", role: "status" }, h("span", null, notice.text),
+          h("button", { type: "button", className: "sk-text", onClick: () => { notice.undo(); setNotice(null); } }, "撤销"),
+          h("button", { type: "button", className: "sk-text", "aria-label": "关闭提示", onClick: () => setNotice(null) }, "知道了")) : null,
+        menuAnchor ? h(QuickMenu, { anchor: menuAnchor, items: entryMenu, label: "悬浮入口操作", onClose: () => setMenuAnchor(false) }) : null,
+        showPanel && continueTask ? h(ContinueTaskModal, {
+          task: continueTask, initialTarget: "session", initialPurpose: continuation.purpose || "verify", initialSessionId: continuation.sessionId,
           ctxProps: { host }, workspaces: data?.workspaces, pushToast: setMessage, feedback: message,
           returnFocus: continuationTrigger,
           onClose: () => setContinuation(null), onDone: () => { setFloatingOpen(false); void reload(true); },
@@ -4807,13 +5202,10 @@ button.sk-task-row-main{cursor:pointer}
 
     function FloatingEntry({ host, useSessionStatus }) {
       const prefs = useUiPrefs();
-      const [open, setOpen] = React.useState(() => floatOpen);
-      React.useEffect(() => {
-        floatListeners.add(setOpen);
-        setOpen(floatOpen);
-        return () => floatListeners.delete(setOpen);
-      }, []);
-      if (!prefs.floatEnabled && !open) return null;
+      const open = useStore(floatStore);
+      const notice = useStore(floatNoticeStore);
+      // 入口已隐藏且面板未展开时不挂载面板，也就不会为它轮询看板数据。
+      if (!prefs.floatEnabled && !open && !notice) return null;
       const props = { host, prefs, open };
       return typeof useSessionStatus === "function" ? h(FloatingWithStatus, { ...props, useSessionStatus }) : h(FloatingPanel, props);
     }
@@ -4821,6 +5213,38 @@ button.sk-task-row-main{cursor:pointer}
     function FloatingWithStatus({ useSessionStatus, ...props }) {
       const sessionStatuses = useSessionStatus((snapshot) => snapshot);
       return h(FloatingPanel, { ...props, sessionStatuses });
+    }
+
+    /** 会话页头入口：左键按默认形态打开看板，右侧小箭头选择形态、快聊与悬浮入口开关。 */
+    function HeaderEntry({ host, sessionId }) {
+      const prefs = useUiPrefs();
+      const [anchor, setAnchor] = React.useState(false);
+      const open = (surface) => {
+        if (host.openSurface(surface, sessionId)) return true;
+        return surface !== "page" && host.openPage();
+      };
+      const choose = (surface) => {
+        updatePrefs({ surface });
+        open(surface);
+      };
+      const items = [
+        ...Object.entries(SURFACES).map(([id, label]) => ({
+          id, label: prefs.surface === id ? `${label}（默认）` : label, icon: SURFACE_ICONS[id], run: () => choose(id),
+        })),
+        "divider",
+        { id: "chat", label: "快聊", icon: "chat", run: () => host.openChat({ sessionId }) },
+        { id: "entry", label: prefs.floatEnabled ? "隐藏悬浮入口" : "显示悬浮入口", icon: prefs.floatEnabled ? "eyeOff" : "eye",
+          run: () => updatePrefs({ floatEnabled: !prefs.floatEnabled }) },
+      ];
+      return h("div", { className: "sk-host-header" },
+        h("button", { type: "button", className: "sk-header-btn", title: `打开${SURFACES[prefs.surface]}`,
+          "aria-label": `打开${SURFACES[prefs.surface]}`, onClick: () => open(prefs.surface) },
+          h(Icon, { name: "board", size: 16 })),
+        h("button", { type: "button", className: "sk-header-btn sk-header-caret", title: "切换看板形态", "aria-label": "切换看板形态",
+          "aria-haspopup": "menu", "aria-expanded": Boolean(anchor),
+          onClick: (event) => setAnchor(anchor ? false : quickMenuAnchor(event, "button")) },
+          h(Icon, { name: "chevronDown", size: 12 })),
+        anchor ? h(QuickMenu, { anchor, items, label: "看板形态与快捷操作", onClose: () => setAnchor(false) }) : null);
     }
 
     function ProjectModal({ project, workspaces, onClose, onSave, onChanged }) {
@@ -4892,10 +5316,10 @@ button.sk-task-row-main{cursor:pointer}
             h("button", { className: "sk-btn primary", type: "submit", disabled: busy || changes.conflicts.length > 0 || !draft.name.trim() }, busy ? "保存中…" : "保存项目"))));
     }
 
-    async function readChatReply({ mode, input, context, signal, onEvent }) {
+    async function readChatReply({ mode, input, context, reference, signal, onEvent }) {
       const response = await fetch(new URL(`${API}/chat`, document.baseURI), {
         method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, input, context }), signal,
+        body: JSON.stringify({ mode, input, context, reference }), signal,
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
@@ -4940,87 +5364,255 @@ button.sk-task-row-main{cursor:pointer}
     function chatContext(turns, route) {
       const recent = [];
       let size = 0;
-      for (const turn of turns.slice(-4).reverse()) {
+      for (const turn of turns.slice().reverse()) {
+        // 翻译、润色等一次性模式以及未完成的回答不进入追问上下文。
+        if ((turn.mode && turn.mode !== "ask") || turn.stopped) continue;
         if (!route?.ok || turn.provider !== route.provider || turn.model !== route.model) break;
         size += turn.input.length + turn.answer.length;
-        if (size > 24_000) break;
+        if (size > 24_000 || recent.length >= 4) break;
         recent.unshift({ input: turn.input, answer: turn.answer });
       }
       return recent.length ? { provider: route.provider, model: route.model, turns: recent } : undefined;
     }
 
-    function QuickChat({ route, modelOpen, onModel, onClose, pushToast }) {
-      const [mode, setMode] = React.useState("ask");
-      const [input, setInput] = React.useState("");
-      const [turns, setTurns] = React.useState([]);
-      const [attempt, setAttempt] = React.useState(null);
+    // 与 Host 的 server/quick-chat.mjs 保持一致：问答可连续追问，其余模式每次只处理当前输入。
+    const CHAT_MODES = {
+      ask: { label: "问答", placeholder: "问点什么…（Enter 发送）", hint: "可连续追问，最近几轮问答会作为上下文。" },
+      prompt: { label: "写提示词", placeholder: "用一两句话描述想让 AI 完成的事", hint: "把想法整理成可直接发给会话的任务提示词。" },
+      explain: { label: "解释", placeholder: "粘贴报错、代码或术语", hint: "解释含义，并给出可能原因和下一步。" },
+      summarize: { label: "总结", placeholder: "粘贴要总结的内容", hint: "先给结论，再列要点。" },
+      polish: { label: "润色", placeholder: "粘贴要润色的文字", hint: "保持原意，让表达更清晰简洁。" },
+      "translate-zh": { label: "译成中文", placeholder: "粘贴要翻译的原文", hint: "只翻译当前原文。" },
+      "translate-en": { label: "译成英文", placeholder: "粘贴要翻译的原文", hint: "只翻译当前原文。" },
+    };
+    const CHAT_INPUT_LIMIT = 4000;
+    const CHAT_REFERENCE_LIMIT = 6000;
+    const CHAT_TURN_LIMIT = 30;
+
+    /** 快聊记录只放在当前窗口的内存里：关闭弹窗不丢，刷新窗口或点「新对话」即清空，不写入磁盘。 */
+    const chatStore = createStore({ turns: [], mode: "ask", input: "", reference: null });
+
+    function patchChat(patch) {
+      chatStore.set((current) => ({ ...current, ...(typeof patch === "function" ? patch(current) : patch) }));
+    }
+
+    /** 把任务整理成快聊的参考资料（只在用户主动选择「就此任务快聊」时生成）。 */
+    function taskChatReference(task) {
+      const goal = goalInfoOf(task);
+      const list = (title, items) => items.length ? `${title}：\n${items.map((item) => `- ${item}`).join("\n")}` : "";
+      const subtasks = subtasksOf(task);
+      const text = [
+        `任务：${task.title}`,
+        `状态：${STATUS_META[statusOf(task)].label} · ${taskProgressLabel(task)} · 优先级 ${task.priority || "P2"}`,
+        task.workspaceTitle ? `工作区：${task.workspaceTitle}` : "",
+        task.projectName ? `项目：${task.projectName}` : "",
+        task.dueDate ? `到期日：${task.dueDate}` : "",
+        goal?.text ? `目标：${goal.text}` : "",
+        task.acceptanceCriteria ? `验收条件：${task.acceptanceCriteria}` : "",
+        list("关键事实", keyFactsOf(task).map((fact) => fact.text).filter(Boolean).slice(0, 8)),
+        list("未解决的问题", (task.issues || []).map((issue) => issue?.text).filter(Boolean).slice(0, 6)),
+        list("下一步", (task.nextSteps || []).filter(Boolean).slice(0, 6)),
+        list("子任务", subtasks.slice(0, 12).map((item) => `${item.done ? "[x]" : "[ ]"} ${item.title || item.text || ""}`)),
+        list("交付物", artifactsOf(task).slice(0, 6).map((item) => item.path || item.name).filter(Boolean)),
+        task.notes ? `备注：${task.notes}` : "",
+      ].filter(Boolean).join("\n");
+      return { title: clip(task.title, 80), text: text.slice(0, CHAT_REFERENCE_LIMIT) };
+    }
+
+    /* --------------------------- Markdown（精简） --------------------------- */
+
+    /** 行内标记：`code`、**加粗**、*强调* 与 http(s) 链接。只生成 React 节点，不拼接 HTML。 */
+    function renderInline(text, keyPrefix) {
+      const nodes = [];
+      const pattern = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\[[^\]\n]+\]\((https?:\/\/[^\s)]+)\))|(\*[^*\s][^*\n]*\*)/g;
+      let last = 0;
+      let index = 0;
+      for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+        if (match.index > last) nodes.push(text.slice(last, match.index));
+        const token = match[0];
+        const key = `${keyPrefix}:${index++}`;
+        if (match[1]) nodes.push(h("code", { key }, token.slice(1, -1)));
+        else if (match[2]) nodes.push(h("strong", { key }, token.slice(2, -2)));
+        else if (match[3]) nodes.push(h("a", { key, href: match[4], target: "_blank", rel: "noopener noreferrer" }, token.slice(1, token.indexOf("](") )));
+        else nodes.push(h("em", { key }, token.slice(1, -1)));
+        last = match.index + token.length;
+      }
+      if (last < text.length) nodes.push(text.slice(last));
+      return nodes;
+    }
+
+    const MD_FENCE = /^\s*```+\s*([\w+#.-]*)\s*$/;
+    const MD_HEADING = /^\s{0,3}(#{1,6})\s+(.*)$/;
+    const MD_QUOTE = /^\s{0,3}>\s?/;
+    const MD_LIST = /^(\s*)(?:([-*+])|(\d+)[.)])\s+(.*)$/;
+
+    /** 模型回答的块级渲染：代码块、标题、引用、列表和段落；流式输出中未闭合的代码块同样可读。 */
+    function markdownBlocks(source) {
+      const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+      const blocks = [];
+      let index = 0;
+      while (index < lines.length) {
+        const line = lines[index];
+        const fence = line.match(MD_FENCE);
+        if (fence) {
+          const code = [];
+          index += 1;
+          while (index < lines.length && !/^\s*```+\s*$/.test(lines[index])) code.push(lines[index++]);
+          index += 1;
+          blocks.push({ type: "code", lang: fence[1], text: code.join("\n") });
+        } else if (!line.trim()) {
+          index += 1;
+        } else if (MD_HEADING.test(line)) {
+          const heading = line.match(MD_HEADING);
+          blocks.push({ type: "heading", level: heading[1].length, text: heading[2] });
+          index += 1;
+        } else if (MD_QUOTE.test(line)) {
+          const quote = [];
+          while (index < lines.length && MD_QUOTE.test(lines[index])) quote.push(lines[index++].replace(MD_QUOTE, ""));
+          blocks.push({ type: "quote", text: quote.join("\n") });
+        } else if (MD_LIST.test(line)) {
+          const items = [];
+          while (index < lines.length) {
+            const item = lines[index].match(MD_LIST);
+            if (item) items.push({ marker: item[3] ? `${item[3]}.` : "•", depth: Math.min(3, Math.floor(item[1].length / 2)), text: item[4] });
+            else if (items.length && /^\s{2,}\S/.test(lines[index]) && !MD_FENCE.test(lines[index])) items.at(-1).text += "\n" + lines[index].trim();
+            else break;
+            index += 1;
+          }
+          blocks.push({ type: "list", items });
+        } else {
+          const paragraph = [];
+          while (index < lines.length && lines[index].trim() && ![MD_FENCE, MD_HEADING, MD_QUOTE, MD_LIST].some((rule) => rule.test(lines[index]))) {
+            paragraph.push(lines[index++]);
+          }
+          blocks.push({ type: "paragraph", text: paragraph.join("\n") });
+        }
+      }
+      return blocks;
+    }
+
+    function MarkdownLite({ text, onCopyCode }) {
+      return h("div", { className: "sk-md" }, markdownBlocks(text).map((block, key) => {
+        if (block.type === "code") {
+          return h("div", { key, className: "sk-md-code" },
+            h("div", { className: "sk-md-code-head" }, h("span", null, block.lang || "代码"),
+              onCopyCode ? h("button", { type: "button", className: "sk-text", onClick: () => onCopyCode(block.text) }, "复制代码") : null),
+            h("pre", { tabIndex: 0 }, h("code", null, block.text)));
+        }
+        if (block.type === "heading") {
+          return h("p", { key, className: "sk-md-heading", role: "heading", "aria-level": Math.min(6, block.level + 3) }, renderInline(block.text, key));
+        }
+        if (block.type === "quote") return h("blockquote", { key }, renderInline(block.text, key));
+        if (block.type === "list") {
+          return h("ul", { key, className: "sk-md-list" }, block.items.map((item, index) =>
+            h("li", { key: index, style: item.depth ? { marginInlineStart: item.depth * 16 } : undefined },
+              h("span", { className: "sk-md-marker", "aria-hidden": "true" }, item.marker), h("span", null, renderInline(item.text, `${key}:${index}`)))));
+        }
+        return h("p", { key }, renderInline(block.text, key));
+      }));
+    }
+
+    /* ------------------------------- 快聊弹窗 ------------------------------- */
+
+    function QuickChat({ route, modelOpen, onModel, onClose, pushToast, host, sessionId, workspaceId, seed }) {
+      const session = useStore(chatStore);
+      const { turns, mode, input, reference } = session;
+      const [attempt, setAttempt] = React.useState(() => null);
       const [busy, setBusy] = React.useState(false);
+      const [saving, setSaving] = React.useState("");
       const request = React.useRef(null);
       const dialogRef = React.useRef(null);
       const inputRef = React.useRef(null);
       const outputRef = React.useRef(null);
       const followOutput = React.useRef(true);
       const titleId = React.useId();
-      const asking = mode === "ask";
+      const meta = CHAT_MODES[mode] || CHAT_MODES.ask;
       useDialogFocus(dialogRef, onClose);
       useBodyScrollLock();
-      React.useEffect(() => () => {
-        request.current?.abort();
-        request.current = null;
+      React.useEffect(() => {
+        if (seed?.reference || seed?.mode || seed?.input) {
+          patchChat({
+            ...(seed.reference ? { reference: seed.reference, mode: "ask" } : {}),
+            ...(Object.hasOwn(CHAT_MODES, seed.mode || "") ? { mode: seed.mode } : {}),
+            ...(seed.input ? { input: String(seed.input).slice(0, CHAT_INPUT_LIMIT) } : {}),
+          });
+        }
+        return () => {
+          request.current?.abort();
+          request.current = null;
+        };
       }, []);
       React.useLayoutEffect(() => {
         const node = outputRef.current;
         if (node && followOutput.current) node.scrollTop = node.scrollHeight;
-      }, [mode, turns, attempt]);
+      }, [turns, attempt]);
 
-      const changeMode = (event) => {
-        followOutput.current = true;
-        setMode(event.target.value);
-        setAttempt(null);
-        inputRef.current?.focus();
+      const focusInput = () => inputRef.current?.focus({ preventScroll: true });
+      const changeMode = (next) => {
+        patchChat({ mode: next });
+        focusInput();
       };
-      const clear = () => {
-        setTurns([]);
+      const reset = () => {
+        // 先解除当前请求的归属，迟到的回调才不会把已清空的记录写回来。
+        const active = request.current;
+        request.current = null;
+        active?.abort();
+        setBusy(false);
+        patchChat({ turns: [], reference: null });
         setAttempt(null);
-        inputRef.current?.focus();
+        focusInput();
       };
-      const send = async (event) => {
-        event.preventDefault();
-        const text = input.trim();
+      const send = async (event, retry) => {
+        event?.preventDefault();
+        const text = (retry ? retry.input : input).trim();
+        const useMode = retry ? retry.mode || "ask" : mode;
         if (request.current || !text || route?.ok === false) return;
         const controller = new AbortController();
         request.current = controller;
         followOutput.current = true;
-        const context = asking ? chatContext(turns, route) : undefined;
-        let current = { input: text, answer: "", status: "正在连接模型…" };
+        // 重新生成：旧回答不进入上下文，但要等新回答成功后才被替换，失败或停止时原回答保留。
+        const replaces = retry?.index;
+        const history = replaces === undefined ? turns : turns.slice(0, replaces);
+        const context = useMode === "ask" ? chatContext(history, route) : undefined;
+        const attached = useMode === "ask" ? reference : null;
+        const again = { input: text, mode: useMode, index: replaces };
+        let current = { mode: useMode, input: text, answer: "", status: "正在连接模型…", reference: attached?.title, replaces };
         const update = (patch) => {
           current = { ...current, ...patch };
           setAttempt(current);
         };
+        const record = (extra) => {
+          const { status: _status, error: _error, retry: _retry, replaces: _replaces, ...turn } = current;
+          patchChat((state) => {
+            const next = { ...turn, ...extra };
+            const list = replaces === undefined || replaces >= state.turns.length ? [...state.turns, next]
+              : [...state.turns.slice(0, replaces), next, ...state.turns.slice(replaces + 1)];
+            // 输入框里仍是刚发出的这段文字时清空，其余情况保留用户正在写的草稿。
+            return { turns: list.slice(-CHAT_TURN_LIMIT), input: !retry || state.input.trim() === text ? "" : state.input };
+          });
+          setAttempt(null);
+        };
+        const stopped = () => {
+          if (replaces !== undefined) setAttempt(null);
+          else if (current.answer) record({ stopped: true });
+          else update({ status: "已停止", retry: again });
+        };
         setAttempt(current);
         setBusy(true);
-        inputRef.current?.focus();
+        focusInput();
         try {
-          await readChatReply({ mode, input: text, context, signal: controller.signal, onEvent: (event) => {
+          await readChatReply({ mode: useMode, input: text, context, reference: attached || undefined, signal: controller.signal, onEvent: (chunk) => {
             if (request.current !== controller || controller.signal.aborted) return;
-            if (event.type === "start") update({ model: event.model, provider: event.provider, status: "正在回答…" });
-            if (event.type === "delta") update({ answer: current.answer + event.text, status: "正在回答…" });
+            if (chunk.type === "start") update({ model: chunk.model, provider: chunk.provider, status: "正在回答…" });
+            if (chunk.type === "delta") update({ answer: current.answer + chunk.text, status: "正在回答…" });
           } });
           if (request.current !== controller) return;
-          if (controller.signal.aborted) {
-            update({ status: "已停止" });
-            return;
-          }
-          if (asking) {
-            const completed = current;
-            setTurns((previous) => [...previous.slice(-11), completed]);
-            setInput("");
-          }
-          update({ status: "回答完成", answer: asking ? "" : current.answer });
+          if (controller.signal.aborted) stopped();
+          else record(null);
         } catch (cause) {
           if (request.current !== controller) return;
-          if (controller.signal.aborted) update({ status: "已停止" });
-          else update({ status: "", error: cause.message });
+          if (controller.signal.aborted) stopped();
+          else update({ status: "", error: cause.message, retry: again });
         } finally {
           if (request.current === controller) {
             request.current = null;
@@ -5028,61 +5620,164 @@ button.sk-task-row-main{cursor:pointer}
           }
         }
       };
+      const stop = (event) => {
+        event.preventDefault();
+        request.current?.abort();
+        focusInput();
+      };
+      const toSession = async (text) => {
+        const target = sessionId || host?.currentSession?.();
+        if (!target || !host?.placeDraft) {
+          pushToast("请先打开一个会话，再把内容放入输入框", "error");
+          return;
+        }
+        setSaving("draft");
+        try {
+          const result = await host.placeDraft(target, text);
+          if (result?.ok && result.result === "applied") {
+            pushToast("已放入会话输入框，确认后发送", "info");
+            onClose();
+          } else {
+            const copied = await copyToClipboard(text);
+            pushToast((result?.result === "preserved" ? "输入框已有草稿" : "会话输入框未就绪") + (copied ? "，内容已复制" : "，请手动复制"), copied ? "info" : "error");
+          }
+        } finally {
+          setSaving("");
+        }
+      };
+      const toTask = async (turn) => {
+        setSaving("task");
+        try {
+          const title = clip(turn.input.split("\n").find((line) => line.trim())?.trim() || "快聊记录", 80);
+          await command("task.create", { title, status: "backlog", notes: turn.answer.slice(0, 4000), ...(workspaceId ? { workspaceId } : {}) });
+          pushToast(`已存为待办任务「${title}」`, "info");
+        } catch (cause) {
+          pushToast(`保存失败：${cause.message}`, "error");
+        } finally {
+          setSaving("");
+        }
+      };
+
       const currentModel = selectedModelLabel(route);
-      const previousModel = turns.at(-1);
-      const newModel = asking && previousModel?.model && route?.ok &&
-        (previousModel.provider !== route.provider || previousModel.model !== route.model);
-      const turnNode = (turn, index) => h("article", { className: "sk-chat-turn", key: index },
-        h("p", { className: "sk-chat-question sk-preserve-lines" }, turn.input),
-        h("div", { className: "sk-chat-answer sk-preserve-lines", "aria-label": "模型回答" }, turn.answer),
+      const lastModelTurn = turns.findLast?.((turn) => turn.model);
+      const newModel = mode === "ask" && lastModelTurn && route?.ok &&
+        (lastModelTurn.provider !== route.provider || lastModelTurn.model !== route.model);
+      const copyCode = (code) => copyWithToast(code, "代码", pushToast);
+      const question = (turn) => h("div", { className: "sk-chat-question" },
+        turn.mode && turn.mode !== "ask" ? h("span", { className: "sk-chat-tag" }, CHAT_MODES[turn.mode]?.label) : null,
+        turn.reference ? h("span", { className: "sk-chat-tag", title: `参考：${turn.reference}` }, "带参考") : null,
+        h("p", { className: "sk-preserve-lines" }, turn.input));
+      const turnNode = (turn, index) => busy && attempt?.replaces === index ? null : h("article", { className: "sk-chat-turn", key: index },
+        question(turn),
+        h("div", { className: "sk-chat-answer", "aria-label": "模型回答" }, h(MarkdownLite, { text: turn.answer, onCopyCode: copyCode })),
         h("div", { className: "sk-chat-turn-meta" },
-          h("span", { title: modelLabel(turn.provider, turn.model) }, modelNameOf(turn.provider, turn.model)),
-          h("button", { className: "sk-text", type: "button", onClick: () => copyWithToast(turn.answer, "回答", pushToast) }, "复制回答")));
+          h("span", { title: modelLabel(turn.provider, turn.model) }, [modelNameOf(turn.provider, turn.model), turn.stopped ? "已停止" : ""].filter(Boolean).join(" · ")),
+          h("span", { className: "sk-chat-actions" },
+            h("button", { className: "sk-text", type: "button", onClick: () => copyWithToast(turn.answer, "回答", pushToast) }, "复制"),
+            host?.placeDraft ? h("button", { className: "sk-text", type: "button", disabled: Boolean(saving),
+              title: "把这段内容放入当前会话的输入框，由你确认后发送", onClick: () => toSession(turn.answer) }, "放入会话") : null,
+            h("button", { className: "sk-text", type: "button", disabled: Boolean(saving), title: "新建一张待办任务，问题作标题，回答存入备注",
+              onClick: () => toTask(turn) }, "存为任务"),
+            index === turns.length - 1 && !busy ? h("button", { className: "sk-text", type: "button",
+              onClick: () => send(null, { input: turn.input, mode: turn.mode, index }) }, "重新生成") : null)));
+      const empty = !turns.length && !attempt;
       return h("div", { className: "sk-modal-mask", inert: modelOpen, onMouseDown: (event) => event.target === event.currentTarget && onClose() },
         h("form", { className: "sk-modal sk-chat-modal", ref: dialogRef, role: "dialog", "aria-modal": modelOpen ? undefined : "true", "aria-labelledby": titleId, onSubmit: send },
-          h("h3", { id: titleId }, h(Icon, { name: "chat", size: 15 }), "快聊"),
-          h("div", { className: "sk-modal-body" },
-            h("div", { className: "sk-chat-controls" },
-              h("span", { className: "sk-chat-mode" },
-                h("select", { className: "sk-select", "aria-label": "快聊模式", value: mode, disabled: busy, onChange: changeMode },
-                  h("option", { value: "ask" }, "快速问答"), h("option", { value: "translate-zh" }, "翻译成中文"), h("option", { value: "translate-en" }, "翻译成英文")),
-                h(Icon, { name: "chevronDown", size: 12, className: "sk-ws-caret" })),
-              h("button", { className: "sk-btn sk-model-button", type: "button", onClick: onModel, "aria-label": "切换模型",
-                title: route?.message || modelLabel(route?.provider, route?.model) || currentModel },
-                h(Icon, { name: "spark", size: 14 }), h("span", null, currentModel))),
-            route?.ok === false ? h("p", { className: "sk-error-detail" }, route.message) : null,
-            h("p", { className: "sub" }, asking
-              ? newModel ? "换模型后从下一条开始记忆，之前的问答仍可复制。"
-                : "可追问最近的问答。内容发送给当前模型，关闭快聊即清空。"
-              : "翻译只发送当前原文，关闭快聊即清空。"),
-            (asking && turns.length > 0) || attempt?.answer || (asking && busy) ?
-              h("div", { className: "sk-chat-thread", tabIndex: 0, ref: outputRef, "aria-label": asking ? "问答记录" : "译文",
-                onScroll: (event) => {
-                  const node = event.currentTarget;
-                  followOutput.current = node.scrollHeight - node.clientHeight - node.scrollTop < 32;
-                } },
-                asking ? turns.map(turnNode) : null,
-                asking && busy ? h("p", { className: "sk-chat-question sk-preserve-lines" }, attempt.input) : null,
-                attempt?.answer ? h("div", { className: "sk-chat-answer sk-preserve-lines", "aria-label": "模型回答" }, attempt.answer) : null)
-              : null,
-            attempt?.status ? h("div", { className: "sk-chat-status", role: "status" },
-              [attempt.status, modelNameOf(attempt.provider, attempt.model)].filter(Boolean).join(" · ")) : null,
-            attempt?.error ? h("p", { role: "alert", className: "sk-error-detail" }, attempt.error) : null,
-            h("label", { className: "sk-field" }, asking ? "问题" : "原文",
-              h("textarea", { className: "sk-textarea", ref: inputRef, "data-sk-initial-focus": true, rows: 3, maxLength: 4000,
-                placeholder: asking && turns.length ? "输入追问…" : undefined, value: input, readOnly: busy, onChange: (event) => setInput(event.target.value),
-                onKeyDown: (event) => { if (event.key === "Enter" && !event.isComposing && (event.metaKey || event.ctrlKey)) send(event); } }))),
-          h("div", { className: "sk-modal-foot" },
-            h("button", { className: "sk-btn ghost", type: "button", onClick: onClose }, "关闭"),
-            asking && (turns.length || attempt) && !busy
-              ? h("button", { className: "sk-btn ghost", type: "button", onClick: clear }, "清空问答") : null,
-            attempt?.answer ? h("button", { className: "sk-btn", type: "button", onClick: () => copyWithToast(attempt.answer, asking ? "回答" : "译文", pushToast) }, asking ? "复制回答" : "复制译文") : null,
-            busy ? h("button", { key: "stop", className: "sk-btn", type: "button", onClick: (event) => {
-              event.preventDefault();
-              request.current?.abort();
-              inputRef.current?.focus();
-            } }, "停止")
-              : h("button", { key: "send", className: "sk-btn primary", type: "submit", disabled: !input.trim() || route?.ok === false, title: "发送（⌘/Ctrl + Enter）" }, "发送"))));
+          h("header", { className: "sk-chat-head" },
+            h("h3", { id: titleId }, h(Icon, { name: "chat", size: 15 }), "快聊"),
+            h("button", { className: "sk-btn sk-model-button", type: "button", onClick: onModel, "aria-label": "切换模型",
+              title: route?.message || modelLabel(route?.provider, route?.model) || currentModel },
+              h(Icon, { name: "spark", size: 14 }), h("span", null, currentModel)),
+            turns.length || attempt ? h("button", { className: "sk-btn ghost", type: "button", onClick: reset, title: "清空当前记录，开始新对话" }, "新对话") : null,
+            h("button", { className: "sk-btn ghost icon", type: "button", "aria-label": "关闭快聊", title: "关闭（Esc）· 记录保留到刷新窗口", onClick: onClose },
+              h(Icon, { name: "close", size: 14 }))),
+          h("div", { className: "sk-chat-modes", role: "group", "aria-label": "快聊模式" },
+            Object.entries(CHAT_MODES).map(([id, item]) => h("button", { key: id, type: "button", className: "sk-chip", "aria-pressed": mode === id,
+              disabled: busy, title: item.hint, onClick: () => changeMode(id) }, item.label))),
+          route?.ok === false ? h("p", { className: "sk-error-detail", role: "alert" }, route.message) : null,
+          h("div", { className: "sk-chat-thread", tabIndex: 0, ref: outputRef, "aria-label": "快聊记录",
+            onScroll: (event) => {
+              const node = event.currentTarget;
+              followOutput.current = node.scrollHeight - node.clientHeight - node.scrollTop < 32;
+            } },
+            empty ? h("div", { className: "sk-chat-empty" },
+              h("p", { className: "sk-chat-empty-title" }, meta.hint),
+              h("p", null, "内容会发送给当前模型；记录只保存在本窗口内存中，刷新或点「新对话」即清空。"),
+              h("div", { className: "sk-chat-starters" },
+                h("button", { type: "button", className: "sk-chip", onClick: () => changeMode("prompt") }, "把想法写成任务提示词"),
+                h("button", { type: "button", className: "sk-chip", onClick: () => changeMode("explain") }, "解释一段报错"),
+                h("button", { type: "button", className: "sk-chip", onClick: () => changeMode("summarize") }, "总结一段内容"),
+                h("button", { type: "button", className: "sk-chip", onClick: () => changeMode("translate-zh") }, "翻译成中文"))) : null,
+            turns.map(turnNode),
+            attempt ? h("article", { className: "sk-chat-turn is-live" },
+              question(attempt),
+              attempt.answer ? h("div", { className: "sk-chat-answer", "aria-label": "模型回答" }, h(MarkdownLite, { text: attempt.answer, onCopyCode: copyCode })) : null,
+              attempt.status ? h("div", { className: "sk-chat-status", role: "status" },
+                [attempt.status, modelNameOf(attempt.provider, attempt.model)].filter(Boolean).join(" · ")) : null,
+              attempt.error ? h("p", { role: "alert", className: "sk-error-detail" }, attempt.error) : null,
+              attempt.retry && !busy ? h("div", { className: "sk-chat-turn-meta" }, h("span", null, "输入已保留"),
+                h("button", { className: "sk-text", type: "button", onClick: () => send(null, attempt.retry) }, "重试")) : null) : null),
+          newModel ? h("p", { className: "sub" }, "已换模型：新问题从新一轮开始，之前的回答仍可查看。") : null,
+          reference ? h("div", { className: "sk-chat-reference" },
+            h(Icon, { name: "file", size: 12 }),
+            h("span", { title: reference.text }, `参考任务：${reference.title}`),
+            mode === "ask" ? h("span", { className: "sk-chat-reference-note" }, "随问题发送给模型") : h("span", { className: "sk-chat-reference-note" }, "仅问答模式使用"),
+            h("button", { type: "button", className: "sk-text", "aria-label": "移除参考任务", onClick: () => patchChat({ reference: null }) }, "移除")) : null,
+          h("div", { className: "sk-chat-composer" },
+            h("textarea", { className: "sk-textarea", ref: inputRef, "data-sk-initial-focus": true, "aria-label": meta.label + "输入",
+              rows: Math.min(8, Math.max(2, input.split("\n").length)), maxLength: CHAT_INPUT_LIMIT,
+              placeholder: mode === "ask" && turns.length ? "继续追问…（Enter 发送）" : meta.placeholder, value: input, readOnly: busy,
+              onChange: (event) => patchChat({ input: event.target.value }),
+              onKeyDown: (event) => {
+                if (event.key !== "Enter" || isComposingKey(event) || event.shiftKey || event.altKey) return;
+                send(event);
+              } }),
+            busy
+              ? h("button", { key: "stop", className: "sk-btn", type: "button", onClick: stop }, h(Icon, { name: "stop", size: 13 }), "停止")
+              : h("button", { key: "send", className: "sk-btn primary", type: "submit", disabled: !input.trim() || route?.ok === false,
+                  title: "发送（Enter）" }, h(Icon, { name: "send", size: 13 }), "发送")),
+          h("p", { className: "sk-chat-foot" }, "Enter 发送 · Shift + Enter 换行 · Esc 关闭",
+            input.length > CHAT_INPUT_LIMIT * 0.8 ? h("span", null, ` · ${input.length}/${CHAT_INPUT_LIMIT}`) : null)));
+    }
+
+    /** 由浮层承载的快聊：会话页头菜单与悬浮看板不依赖任何一块已打开的看板即可使用。 */
+    function OverlayChat({ host }) {
+      const request = useStore(overlayChatStore);
+      React.useEffect(() => {
+        overlayHosts += 1;
+        return () => { overlayHosts -= 1; };
+      }, []);
+      return request ? h(OverlayChatHost, { key: request.token, host, request }) : null;
+    }
+
+    function OverlayChatHost({ host, request }) {
+      const { data, reload, setData } = useBoardData();
+      const [toasts, pushToast] = useToasts();
+      const [modelOpen, setModelOpen] = React.useState(false);
+      const modelTrigger = React.useRef(null);
+      const root = React.useRef(null);
+      const topLayer = typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.showPopover === "function";
+      React.useLayoutEffect(() => {
+        const node = root.current;
+        if (!topLayer || !node) return undefined;
+        node.showPopover();
+        return () => { if (node.matches(":popover-open")) node.hidePopover(); };
+      }, [topLayer]);
+      const sessionId = request.sessionId || host.currentSession?.() || null;
+      return h("div", { ref: root, className: "sk-overlay-host", popover: topLayer ? "manual" : undefined },
+        h(QuickChat, { route: data?.aiRoute, modelOpen, host, sessionId, seed: request, pushToast,
+          workspaceId: quickCapturePayload("", data?.tasks || [], sessionId).workspaceId,
+          onModel: (event) => { modelTrigger.current = event.currentTarget; setModelOpen(true); },
+          onClose: () => overlayChatStore.set(null) }),
+        modelOpen && data ? h(ModelModal, { settings: data.settings || {}, returnFocus: modelTrigger, onClose: () => setModelOpen(false),
+          onSave: ({ settings, aiRoute }) => {
+            setData((current) => current ? { ...current, settings, aiRoute } : current);
+            setModelOpen(false);
+            pushToast("已切换模型", "info");
+            void reload(true);
+          } }) : null,
+        h("div", { className: "sk-toasts", role: "status", "aria-live": "polite", "aria-atomic": "false" },
+          toasts.map((toast) => h("div", { key: toast.id, className: cx("sk-toast", toast.tone === "error" && "error") }, toast.text))));
     }
 
     function ArtifactEntry({ artifact, task, host, desktopFiles, pushToast, onPreview, details }) {
@@ -5288,11 +5983,20 @@ button.sk-task-row-main{cursor:pointer}
       const [newTaskStatus, setNewTaskStatus] = React.useState(null);
       const [projectEditor, setProjectEditor] = React.useState(null);
       const [chatOpen, setChatOpen] = React.useState(false);
+      const [chatSeed, setChatSeed] = React.useState(() => null);
       const [modelOpen, setModelOpen] = React.useState(false);
       const modelTriggerRef = React.useRef(null);
       const openModel = (event) => {
         modelTriggerRef.current = event.currentTarget;
         setModelOpen(true);
+      };
+      // 快聊优先由浮层承载（三种形态共用同一个全窗口弹窗）；旧版 DSH 没有浮层插槽时退回本面板内的弹窗。
+      const openChat = (seed) => {
+        if (overlayHosts > 0 && host.openChat) host.openChat({ ...(seed || {}), sessionId });
+        else {
+          setChatSeed(seed || null);
+          setChatOpen(true);
+        }
       };
       const [settingsOpen, setSettingsOpen] = React.useState(false);
       const [draggingId, setDraggingId] = React.useState(null);
@@ -5310,6 +6014,28 @@ button.sk-task-row-main{cursor:pointer}
         host.canOpenNativeFile?.().then((available) => { if (current) setDesktopFiles(available); });
         return () => { current = false; };
       }, [host]);
+
+      // 右侧看板登记自己的关闭动作：切到悬浮形态时由 host.closeSide() 调用，两种形态不同时出现。
+      const closeTab = React.useRef(ctxProps.closeTab);
+      closeTab.current = ctxProps.closeTab;
+      // DSH 收起右侧栏时标签页内容仍然挂载，所以按「是否可见」而不是「是否挂载」登记。
+      const sideVisible = surface === "side" && ctxProps.visible !== false;
+      React.useEffect(() => {
+        if (!sideVisible) return undefined;
+        const close = () => {
+          if (typeof closeTab.current !== "function") return false;
+          closeTab.current();
+          return true;
+        };
+        sideClosers.add(close);
+        sideCountStore.set(sideClosers.size);
+        // 右侧看板出现（包括从 DSH 右栏直接打开）时收起悬浮面板。
+        setFloatingOpen(false);
+        return () => {
+          sideClosers.delete(close);
+          sideCountStore.set(sideClosers.size);
+        };
+      }, [sideVisible]);
 
       React.useEffect(() => {
         try { localStorage.setItem(`dsh-super-kanban:view:${surface}`, mode); } catch { /* optional preference */ }
@@ -5330,7 +6056,7 @@ button.sk-task-row-main{cursor:pointer}
         const onKey = (event) => {
           if (event.defaultPrevented) return;
           const target = event.target;
-          if (target?.closest?.(".sk-floating")) return;
+          if (target?.closest?.(".sk-floating,.sk-overlay-host")) return;
           const root = rootRef.current;
           const activeSurface = target?.closest?.(".sk-page");
           if (!root || (activeSurface && activeSurface !== root) || (!activeSurface && surface === "side")) return;
@@ -5750,7 +6476,7 @@ button.sk-task-row-main{cursor:pointer}
       };
 
       const switchSurface = (next) => {
-        if (host.openSurface?.(next, sessionId)) updatePrefs({ surface: next });
+        if (host.openSurface?.(next, sessionId, surface)) updatePrefs({ surface: next });
         else pushToast("当前环境无法打开此看板形态", "error");
       };
       const boardMenuItems = [
@@ -5789,8 +6515,8 @@ button.sk-task-row-main{cursor:pointer}
       const modelButton = h("button", { type: "button", className: cx("sk-iconbtn-v3 sk-model-trigger", aiRoute?.ok === false && "is-warn"),
         "aria-label": "选择模型", title: aiRoute?.message || modelLabel(aiRoute?.provider, aiRoute?.model) || currentModel, onClick: openModel },
         h(Icon, { name: "spark", size: 15 }), compactHeader ? null : h("span", null, currentModel));
-      const chatButton = compactHeader ? actionIcon("chat", "快聊", () => setChatOpen(true)) :
-        h("button", { type: "button", className: "sk-iconbtn-v3 sk-chat-trigger", "aria-label": "快聊", onClick: () => setChatOpen(true) },
+      const chatButton = compactHeader ? actionIcon("chat", "快聊", () => openChat()) :
+        h("button", { type: "button", className: "sk-iconbtn-v3 sk-chat-trigger", "aria-label": "快聊", onClick: () => openChat() },
           h(Icon, { name: "chat", size: 15 }), "快聊");
       const newTextButton = h(
         "button",
@@ -5809,7 +6535,7 @@ button.sk-task-row-main{cursor:pointer}
         h("div", { className: "sk-header-actions" },
           !isNarrow && mode !== "projects" ? searchField : null,
           scanButton, modelButton, chatButton, settingsButton,
-          h(SurfacePicker, { value: surface, onChange: switchSurface, className: "sk-select sk-surface-picker" }),
+          h(SurfaceSwitch, { value: surface, onChange: switchSurface }),
           mode === "projects" || selectedProject?.archived ? null : surface === "side" || isNarrow
             ? actionIcon("plus", "新建任务", () => setNewTaskStatus("backlog"), "is-primary")
             : newTextButton,
@@ -5857,14 +6583,14 @@ button.sk-task-row-main{cursor:pointer}
           h(
             "span",
             { className: "sk-ws-picker" },
-            h("select", { className: "sk-select sk-ws-select", "aria-label": "按项目筛选", value: scopeValue,
+            h("select", { className: "sk-select sk-ws-select", "aria-label": "按项目筛选", title: "按工作区或自建项目筛选", value: scopeValue,
               onChange: (event) => {
                 const scope = event.target.value;
                 setFilters((value) => ({ ...value, project: scope.startsWith("ws:") ? "" : scope, workspace: scope.startsWith("ws:") ? scope.slice(3) : "" }));
                 setCurrentOnly(false);
               } },
-              h("option", { value: "" }, "全部项目"),
-              workspaces.length ? h("optgroup", { label: "工作区项目" }, workspaces.filter((workspace) => workspace.included !== false)
+              h("option", { value: "" }, "全部范围"),
+              workspaces.length ? h("optgroup", { label: "工作区" }, workspaces.filter((workspace) => workspace.included !== false)
                 .map((workspace) => h("option", { key: workspace.id, value: `ws:${workspace.id}` }, workspace.title))) : null,
               showProjectFilter ? h("optgroup", { label: "自建项目" },
                 projects.map((project) => h("option", { key: project.id, value: project.id }, project.name + (project.archived ? "（已归档）" : ""))),
@@ -6065,7 +6791,8 @@ button.sk-task-row-main{cursor:pointer}
         menuTask ? h(QuickMenu, { anchor: quickTask.anchor, items: taskMenuItems(menuTask), label: `任务操作：${menuTask.title}`, onClose: () => setQuickTask(null) }) : null,
         drawerTask
           ? h(TaskDrawer, { key: drawerTask.id, task: drawerTask, signal: signals.get(drawerTask.id), tasks, workspaces, projects, onOpenTask: setDrawerId, ctxProps, settings, desktopFiles,
-              onClose: () => setDrawerId((id) => id === drawerTask.id ? null : id), onChanged: () => reload(true), pushToast })
+              onClose: () => setDrawerId((id) => id === drawerTask.id ? null : id), onChanged: () => reload(true),
+              onAskChat: (task) => openChat({ reference: taskChatReference(task) }), pushToast })
           : null,
         newTaskStatus !== null
           ? h(NewTaskModal, { defaultStatus: newTaskStatus, workspaces, projects,
@@ -6083,7 +6810,9 @@ button.sk-task-row-main{cursor:pointer}
               onChanged: () => reload(true),
               onSave: async () => { setProjectEditor(null); pushToast("项目已保存", "info"); await reload(true); } })
           : null,
-        chatOpen ? h(QuickChat, { route: aiRoute, modelOpen, onModel: openModel, onClose: () => setChatOpen(false), pushToast }) : null,
+        chatOpen ? h(QuickChat, { route: aiRoute, modelOpen, onModel: openModel, host, sessionId, seed: chatSeed, pushToast,
+          workspaceId: quickCapturePayload("", tasks, sessionId).workspaceId || filters.workspace || undefined,
+          onClose: () => { setChatOpen(false); setChatSeed(null); } }) : null,
         settingsOpen
           ? h(SettingsModal, {
               settings,
@@ -6133,6 +6862,8 @@ button.sk-task-row-main{cursor:pointer}
 
       render() {
         if (!this.state.error) return this.props.children;
+        // 浮层出错时静默退出，避免错误页盖住整个 DSH 窗口。
+        if (this.props.quiet) return null;
         const message = String((this.state.error && this.state.error.message) || this.state.error || "未知错误");
         return h(
           "div",
@@ -6167,8 +6898,7 @@ button.sk-task-row-main{cursor:pointer}
       ctx.effect(() => {
         const sync = (event) => {
           if (event.key !== PREFS_KEY && event.key !== null) return;
-          uiPrefs = readPrefs();
-          for (const listener of prefsListeners) listener(uiPrefs);
+          prefsStore.set(readPrefs());
         };
         window.addEventListener("storage", sync);
         return () => window.removeEventListener("storage", sync);
@@ -6245,15 +6975,90 @@ button.sk-task-row-main{cursor:pointer}
         },
         openTask(id) {
           if (!hostApi.openPage()) return false;
+          setFloatingOpen(false);
           requestedPageTask = id;
           for (const listener of pageTaskListeners) listener();
           return true;
         },
-        openSurface(surface, sessionId) {
-          if (surface === "page") return hostApi.openPage();
-          if (surface === "side") return sessionId ? hostApi.openSideTab(sessionId) : hostApi.openSide();
+        /** 当前选中的全局面板 id；会话视图为 null。旧版 DSH 读不到时返回 undefined。 */
+        activePanel() {
+          try {
+            const info = ctx.get("layout")?.panelInfo;
+            return typeof info?.getSnapshot === "function" ? info.getSnapshot()?.activePanelId ?? null : undefined;
+          } catch {
+            return undefined;
+          }
+        },
+        watchPanel(listener) {
+          try {
+            const info = ctx.get("layout")?.panelInfo;
+            if (typeof info?.subscribe === "function") return info.subscribe(listener);
+          } catch {
+            /* layout service unavailable */
+          }
+          return () => {};
+        },
+        /** 当前在前台的会话 id（悬浮形态用它决定「放入会话」的目标）。 */
+        currentSession() {
+          try {
+            return ctx.get("sidebarRight")?.screen?.()?.sessionId || null;
+          } catch {
+            return null;
+          }
+        },
+        /** 关闭正在显示的右侧看板标签页；其他标签页不受影响。 */
+        closeSide() {
+          let closed = false;
+          for (const close of [...sideClosers]) {
+            try {
+              if (close()) closed = true;
+            } catch {
+              /* tab already gone */
+            }
+          }
+          if (closed) return true;
+          try {
+            const sidebarRight = ctx.get("sidebarRight");
+            const tab = sidebarRight?.active?.();
+            const shown = typeof sidebarRight?.isExpanded !== "function" || sidebarRight.isExpanded();
+            if (shown && tab?.kind === SIDE_KIND && typeof sidebarRight.close === "function") {
+              sidebarRight.close(tab.id);
+              return true;
+            }
+          } catch {
+            /* sidebar service unavailable */
+          }
+          return false;
+        },
+        /**
+         * 三种形态互斥：打开全局或右侧看板时收起悬浮面板；
+         * 打开悬浮看板时回到会话并关闭右侧看板标签页。
+         */
+        openSurface(surface, sessionId, from) {
+          if (surface === "page") {
+            if (!hostApi.openPage()) return false;
+            setFloatingOpen(false);
+            return true;
+          }
+          if (surface === "side") {
+            const opened = sessionId ? hostApi.openSideTab(sessionId) : hostApi.openSide();
+            if (opened) setFloatingOpen(false);
+            return opened;
+          }
           if (surface !== "float") return false;
+          if (from === "page" || hostApi.activePanel() === PANEL_ID) {
+            try {
+              ctx.get("layout").selectPanel(null);
+            } catch {
+              /* layout service unavailable */
+            }
+          }
+          hostApi.closeSide();
           setFloatingOpen(true);
+          return true;
+        },
+        openChat(seed) {
+          overlayChatStore.set({ ...(seed || {}), token: Date.now() });
           return true;
         },
         async prepareSession(workspaceId, prompt) {
@@ -6413,26 +7218,15 @@ button.sk-task-row-main{cursor:pointer}
       const SideKanbanBody = (slotProps) => {
         const info = slotProps?.useTabInfo?.();
         const sessionId = slotProps?.sessionId || info?.tab?.navigation?.params?.sessionId || null;
-        return board({ ...(slotProps || {}), ...baseProps, sessionId, surface: "side" });
+        return board({ ...(slotProps || {}), ...baseProps, sessionId, surface: "side", closeTab: info?.tab?.actions?.close,
+          visible: info?.tab?.visible !== false });
       };
 
       function KanbanSidebarIcon({ size }) {
         return h(Icon, { name: "board", size: size || 18 });
       }
 
-      const HeaderKanbanButton = ({ sessionId }) => {
-        const prefs = useUiPrefs();
-        const open = (surface) => {
-          if (hostApi.openSurface(surface, sessionId)) return true;
-          return surface !== "page" && hostApi.openPage();
-        };
-        return h("div", { className: "sk-host-header" },
-          h("button", { type: "button", className: "sk-header-btn", title: `打开${SURFACES[prefs.surface]}`,
-            "aria-label": `打开${SURFACES[prefs.surface]}`, onClick: () => open(prefs.surface) },
-            h(Icon, { name: "board", size: 16 })),
-          h(SurfacePicker, { value: prefs.surface, className: "sk-host-surface-picker", label: "切换看板形态",
-            onChange: (surface) => { updatePrefs({ surface }); open(surface); } }));
-      };
+      const HeaderKanbanButton = (slotProps) => HeaderEntry({ host: hostApi, sessionId: slotProps?.sessionId });
 
       {
         ctx.slots.inject("main", function* () {
@@ -6483,7 +7277,9 @@ button.sk-task-row-main{cursor:pointer}
       }
       ctx.slots.inject("shell.overlay", () =>
         ctx.slots.register({ name: "shell.overlay", id: "super-kanban-summary" },
-          (props) => h(BoardErrorBoundary, null, h(FloatingEntry, { ...props, host: hostApi }))));
+          (props) => h(BoardErrorBoundary, { quiet: true },
+            h(FloatingEntry, { ...props, host: hostApi }),
+            h(OverlayChat, { host: hostApi }))));
     }
 
     return { apply, inject: [

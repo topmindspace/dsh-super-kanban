@@ -37,3 +37,4 @@ lib/
 coverage/
 .npmrc
 *.tsbuildinfo
+.playwright-mcp/

@@ -1,7 +1,7 @@
 {
   "name": "dsh-super-kanban",
-  "version": "0.9.0",
-  "description": "AI project board for DeepSeek Harness with live session status, task schedules, deliverable review and quick chat.",
+  "version": "0.10.0",
+  "description": "AI project board for DeepSeek Harness: turns sessions into tasks, with live status, acceptance review, full/side/floating views and quick chat.",
   "type": "module",
   "main": "./index.mjs",
   "exports": {

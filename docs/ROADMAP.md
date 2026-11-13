@@ -13,4 +13,4 @@ Super Kanban 把多个 DSH 会话聚合成可追溯的任务，支持项目与�
 
 ## 快聊与旁会话
 
-快聊适合短问答、连续追问和中英翻译，使用看板选择的模型，关闭后清空弹窗记录。需要保留会话、调用工具或继续执行时，可在 DSH 开启会话。DSH 的可继续子会话能力也可用于这类流程。[DSH 可继续子会话](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/feature/2026-07-28-continuable-subagent-conversations.md) · [社区旁会话插件](https://github.com/123dbl/dsh-side-session)
+快聊适合短问答、连续追问、写提示词、解释、总结、润色和中英翻译，使用看板选择的模型。记录只保存在当前窗口的内存里，刷新窗口或点「新对话」即清空。需要长期保留会话、调用工具或继续执行时，可在 DSH 开启会话，也可以把快聊的回答放入会话输入框。DSH 的可继续子会话能力也可用于这类流程。[DSH 可继续子会话](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/feature/2026-07-28-continuable-subagent-conversations.md) · [社区旁会话插件](https://github.com/123dbl/dsh-side-session)

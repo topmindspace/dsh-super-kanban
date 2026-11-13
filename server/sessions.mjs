@@ -235,6 +235,11 @@ function parseToolArgs(call) {
   }
 }
 
+/** Workspace-relative paths use "/" on every platform so cards, digests and matching read the same on Windows. */
+function posixPath(relative) {
+  return path.sep === "/" ? relative : relative.split(path.sep).join("/");
+}
+
 function resolveArtifactPath(rawPath, workspaceRoot, fallbackRoot) {
   if (typeof rawPath !== "string") return null;
   const trimmed = rawPath.trim();
@@ -299,7 +304,7 @@ export function extractArtifacts(parsed, { workspacePath = null, max = LOCAL_ART
     name: path.basename(candidate.absPath),
     path:
       workspaceRoot && candidate.absPath.startsWith(workspaceRoot + path.sep)
-        ? path.relative(workspaceRoot, candidate.absPath)
+        ? posixPath(path.relative(workspaceRoot, candidate.absPath))
         : candidate.absPath,
     absPath: candidate.absPath,
     sessionId: parsed.id,
@@ -353,7 +358,7 @@ function recentWritesOf(parsed, now) {
       const relative = path.relative(root, file);
       if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !fs.statSync(file).isFile()) continue;
       const key = shortHash(`${root}\0${file}`, 24);
-      if (!writes.has(key)) writes.set(key, { key, path: relative, seq: result.seq, at: result.time });
+      if (!writes.has(key)) writes.set(key, { key, path: posixPath(relative), seq: result.seq, at: result.time });
     } catch { /* missing or inaccessible checkout evidence is omitted */ }
   }
   return [...writes.values()];
@@ -406,7 +411,7 @@ export function toolBrief(parsed, { baselineSeq = 0, workspacePath = null } = {}
     );
     if (!absPath) continue;
     const relative =
-      workspaceRoot && absPath.startsWith(workspaceRoot + path.sep) ? path.relative(workspaceRoot, absPath) : absPath;
+      workspaceRoot && absPath.startsWith(workspaceRoot + path.sep) ? posixPath(path.relative(workspaceRoot, absPath)) : absPath;
     if (seen.has(relative)) continue;
     seen.add(relative);
     files.push(clip(relative, 80));

@@ -379,24 +379,36 @@ DSH 模型变更事件可使缓存失效。`?refresh=1` 可主动刷新，距上
 
 ### POST `/chat`
 
-Owner 以 `application/json` 提交 `{ mode, input, context? }`。模式为 `ask`、`translate-zh` 或 `translate-en`，
-输入去除首尾空白后限 1–4,000 个 UTF-16 代码单元，请求体上限 192 KiB。使用 §5.2 的共享模型。
+Owner 以 `application/json` 提交 `{ mode, input, context?, reference? }`。输入去除首尾空白后限 1–4,000 个 UTF-16 代码单元，
+请求体上限 192 KiB。使用 §5.2 的共享模型。
+
+| 模式 | 用途 | 上下文与参考 |
+| --- | --- | --- |
+| `ask` | 问答，可连续追问 | 接受 `context` 和 `reference` |
+| `prompt` | 把想法整理成任务提示词 | 只处理当前输入 |
+| `explain` | 解释报错、代码或术语 | 只处理当前输入 |
+| `summarize` | 总结内容 | 只处理当前输入 |
+| `polish` | 润色文字 | 只处理当前输入 |
+| `translate-zh` / `translate-en` | 译成简体中文 / 英文 | 只处理当前输入 |
 
 `ask` 可提交 `context: { provider, model, turns: [{ input, answer }] }`，按从旧到新顺序最多四轮。单轮输入最多
 4,000，回答最多 12,000，全部历史合计最多 24,000 个 UTF-16 代码单元。上下文的提供方和模型都与实际路由相同时才会发送。
-Host 只构造用户文本和助手文本消息。翻译模式忽略上下文。
+Host 只构造用户文本和助手文本消息。
+
+`ask` 还可提交 `reference: { title, text }`，用于用户主动附带的参考资料，例如一张任务的摘要。`title` 最多 200，
+`text` 为 1–6,000 个 UTF-16 代码单元。Host 把它放进系统提示，并声明其中的内容只是数据。其余模式忽略 `context` 和 `reference`。
 
 响应是 `application/x-ndjson`，每行一个 JSON 事件。
 
 | 事件 | 字段 |
 | --- | --- |
-| `start` | 实际调用的 `provider`、`model` 和本次使用的历史轮数 `contextUsed` |
+| `start` | 实际调用的 `provider`、`model` 和本次使用的历史轮数 `contextUsed`。使用了参考资料时带 `reference: true` |
 | `delta` | `text` 文本片段 |
 | `done` | 回答完成 |
 | `error` | 可展示的 `message`，保留已收到的片段 |
 
-同一宿主一次接受一个快聊请求，适配器清理期间返回 409。模型服务或路由不可用时返回 503。限时 45 秒，客户端断开会触发取消。
-快聊内容由打开的弹窗在内存中管理，使用量独立于研判开关与预算。
+同一宿主一次接受一个快聊请求，适配器清理期间返回 409。模型服务或路由不可用时返回 503。限时 60 秒，输出上限 2,000 tokens，
+客户端断开会触发取消。快聊内容由浏览器在当前窗口的内存中管理，Host 不保存。使用量独立于研判开关与预算。
 
 ### 工作视图与维护接口
 
@@ -439,7 +451,12 @@ data: {"reason":"init"|"scan"|"task"|"settings","tasksChanged":2}
 
 - 注册 `main` 面板（key=`super-kanban`）与 `sidebar.panellist` 入口（id=`super-kanban`，label「任务看板」）。
 - 注册右侧栏 tab 类型与 `sidebar.right.pane.tab` slot；注册会话头部快捷入口（`conversation.session.header.utilities`）。
-- 注册 `shell.overlay` 窗口级悬浮入口，显示配置与默认形态保存在本地浏览器偏好。
+- 注册 `shell.overlay` 窗口级浮层，承载悬浮入口、悬浮看板和快聊弹窗。显示配置与默认形态保存在本地浏览器偏好
+  （localStorage 键 `dsh-super-kanban:prefs`，`version: 2`），不进入看板状态和备份。没有 `version` 的旧偏好按默认开启悬浮入口迁移。
+- 全局、右侧、悬浮三种形态互斥。打开悬浮看板时用 `ctx.get("layout").selectPanel(null)` 回到会话，并只关闭看板自己的右侧栏标签页
+  （已挂载的右侧看板调用自身 `tab.actions.close()`，否则用 `sidebarRight.active()` 核对 `kind` 后 `close(tab.id)`）。
+  全局看板是否正在显示读取 `layout.panelInfo`，读不到时入口保持显示。
+- 把内容放入会话输入框使用 `conversation.input.requestDraftInitialization(binding, { prompt, whenDraftExists: "keep" })`，只填草稿，由用户发送。
 - 打开会话使用 `ctx.get("uiWorkspace")?.openSession(sessionId)`。
 - 只允许同源 fetch；不得访问外部网络、不得加载外部字体 / 图片。
 - 样式只使用 DSH 设计 token（`--dsw-alias-*` 等）与插件自有 CSS 变量，深浅色自适应。
@@ -549,7 +566,7 @@ if (target) ctx.get("sidebarRight").toggleFullscreen(target);
 - 旧状态缺少 `aiBudgetMode` 时默认为 `auto`。仅当旧客户端提交纯预算 patch（键仅含
   `maxAiCallsPerScan` 和可选的 `dailyAiCallLimit`）时推断为 `fixed`。
 - 历史任务可能缺少 `ai.provider`。显示实际保存的模型，下次研判时补齐。
-- 旧快聊请求 `{mode,input}` 仍有效。新增 `start` 字段可忽略。
+- 旧快聊请求 `{mode,input}` 仍有效。新增 `start` 字段可忽略。旧 Host 收到新模式会返回 400，升级插件后两半同时更新。
 
 ## 7. 验收标准
 

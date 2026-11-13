@@ -7,11 +7,11 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 │                                                                            │
 │  Host 半边（Node，插件服务）                  Browser 半边（浏览器 bundle）  │
 │  index.mjs ──► server/service.mjs             client.js                     │
-│                ├─ sessions.mjs   只读扫描      ├─ 全页主面板（main slot）     │
+│                ├─ sessions.mjs   只读扫描      ├─ 全局看板（main slot）       │
 │                ├─ analyzer-rules.mjs           ├─ 侧边栏入口                 │
 │                ├─ analyzer-llm.mjs             ├─ 右侧栏 tab 类型            │
 │                ├─ native-llm.mjs  DSH 模型服务 ├─ 会话头部快捷入口            │
-│                └─ store.mjs      本机持久化    │                             │
+│                └─ store.mjs      本机持久化    ├─ 窗口浮层（悬浮/快聊）      │
 │                         ▲                     │                             │
 │                         │  HTTP /super-kanban/api（owner 鉴权）              │
 │                         └─────────────────────┘                             │
@@ -44,7 +44,7 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `server/analyzer-rules.mjs` | 本地规则引擎：从解析结果推导任务、状态、进度、问题、优先级 |
 | `server/native-llm.mjs` | 惰性获取 DSH 模型服务、选择推理设置、读取流式输出和映射用量 |
 | `server/analyzer-llm.mjs` | 可选 LLM 引擎，负责研判提示词、JSON 提取、重试与预算 |
-| `server/quick-chat.mjs` | 快聊模型调用，负责流式 HTTP 响应、并发、断开取消和限时 |
+| `server/quick-chat.mjs` | 快聊模型调用，负责各模式的提示词、参考资料校验、流式 HTTP 响应、并发、断开取消和限时 |
 | `server/projects.mjs` | 项目、日期及任务规划字段的存储格式与文本上限 |
 | `server/store.mjs` | 持久化：`state.json` / `sessions-cache.json`，原子写、裁剪、版本迁移、损坏恢复 |
 | `server/auth.mjs` | owner 鉴权决策表：归一化 `connection.admit()` 结果，异常/畸形输入一律 fail-closed 403 |
@@ -52,7 +52,7 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `server/http.mjs` | HTTP 公共设施：JSON 响应、受控请求体读取、错误分类、id / 载荷校验 |
 | `server/titles.mjs` | 标题相似度：为用户发起的相似任务查询提供确定性的纯字符串打分 |
 | `cordis.patch.yml` | Cordis bundle patch：只把 host 插件 insert 进 profile，**不含 `config:` 块**；看板设置来自 `state.json`（设置页） |
-| `install.sh` / `uninstall.sh` | 把仓库链接进 DSH profile / 回滚 |
+| `install.sh` / `uninstall.sh` | 把仓库链接进 DSH profile / 定向移除本插件的依赖与 bundle 条目 |
 | `scripts/` | 校验、文档检查、版本一致性、隐私扫描、市场索引生成、发布辅助 |
 | `tests/` | `node --test` 套件（store / analyzer / sessions / service / http / auth / titles / host-entry / package / market-index / privacy） |
 | `docs/` | 公开文档、截图、GitHub Pages 落地页（`index.html`）与插件市场索引（`index.json`） |
@@ -116,7 +116,7 @@ store.saveState()              原子写（tmp + rename）；经 SSE 通知刷�
 - **模型解析**。每次扫描的 AI 阶段、单卡重判、润色和快聊共用解析逻辑。已保存模型优先，否则实时读取 DSH 默认。模型不可用时，扫描走本地规则。
 - **解析缓存**：`loadParsed` 的有界 LRU(6) 以「文件签名 + 文件 stat + 解析相关 meta 指纹」为键，抽屉轮询/重判/待办导入复用解析结果，文件或元数据变化时重新解析，失败不缓存。
 - **刷新成本**：浏览器每 4s（扫描中 1.2s）轮询 `/state`，但只在轻量 `stateSignature`（任务 id/updatedAt/status/archived + scan/settings/usage/stats/activity/workspaces）变化时才重渲染，避免大 evidence 数组的重复序列化。
-  全页、右侧栏和悬浮面板在同一窗口共享轮询、SSE 和在途读取。写入成功或收到变更事件后开启新一轮，迟到的旧响应会被丢弃。
+  全局、右侧和悬浮看板在同一窗口共享轮询、SSE 和在途读取。写入成功或收到变更事件后开启新一轮，迟到的旧响应会被丢弃。
 - **活跃周期** · 增量发现保留轻量会话元数据，跳过周期外未变化的日志、研判和自动关联。旧卡和既有摘要仍可查看。新轮次使会话重新进入周期，手动全量扫描覆盖全部历史。
 - **研判上下文** · 已关联任务优先进入摘要。额外候选仅来自同一工作区，按最近会话活动排序，并受活跃周期及摘要预算限制。
   显式或默认 provider 不可用时不自动换模型，直接规则降级并在扫描结论说明；无 `ctx.llm` 的旧 DSH 同样规则降级。
@@ -142,7 +142,7 @@ store.saveState()              原子写（tmp + rename）；经 SSE 通知刷�
 | LLM（`analyzer-llm.mjs`，经 `native-llm.mjs`） | 压缩摘要 digest + 已有任务上下文 + 解析出的 provider/model | 结构化 JSON（任务、状态、进度、问题、关键事实、置信度、理由、merge 建议） | AI 开启、解析出可用 route、预算内、门控通过时 |
 
 LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直连模型端点、不读取 `.credentials.yaml`、不保存凭证；
-模型与 provider 来自看板设置（默认跟随 DSH 默认模型），第三方模型在「DSH 设置 → 模型」中配置。
+模型与 provider 来自看板的模型选择（默认跟随 DSH 默认模型），第三方模型在「DSH 设置 → 模型」中配置。
 调用失败（网络 / 鉴权 / 限流 / 非法 JSON）会按错误码重试（≤3 attempt）后降级规则引擎并写入失败冷却。
 实际使用的 provider/model 记录到 `task.ai`。
 
@@ -191,12 +191,12 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 
 | 扩展点 | 内容 |
 | --- | --- |
-| `main` slot | 全页看板主面板（`key = "super-kanban"`） |
+| `main` slot | 全局看板主面板（`key = "super-kanban"`） |
 | `sidebar.panellist` | 左侧栏「任务看板」入口 |
-| `sidebarRightTabs.register` | 右侧栏看板 tab 类型（`kind = "super-kanban"`） |
-| `sidebar.right.pane.tab` slot | 右侧栏看板内容 |
-| `conversation.session.header.utilities` | 会话头部快捷入口和形态切换 |
-| `shell.overlay` | 窗口级悬浮入口及任务摘要面板 |
+| `sidebarRightTabs.register` | 右侧看板的 tab 类型（`kind = "super-kanban"`） |
+| `sidebar.right.pane.tab` slot | 右侧看板内容 |
+| `conversation.session.header.utilities` | 会话头部入口：按默认形态打开看板，菜单里切换形态、打开快聊、显示或隐藏悬浮入口 |
+| `shell.overlay` | 窗口级浮层：悬浮入口、悬浮看板和快聊弹窗 |
 
 ### 状态与数据流
 
@@ -208,18 +208,23 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 - 抽屉展示 `task.ai`（引擎 / 提供方与模型 / 置信度 / 时间 / 理由）；无 `provider` 的旧任务只显示模型；
   来源会话在研判后又有新活动（`lastActivityAt > analyzedAt + 5 分钟`）才提示「可能已过期」；「重新研判」调用
   `task.analyze`；编辑中的草稿在后台更新后保留并显示提醒。
-- 抽屉、浮层、筛选等纯 UI 状态保存在本地（localStorage / 组件状态），不入库。
+- 抽屉、浮层、筛选等纯 UI 状态保存在本地（localStorage / 组件状态），不入库。跨形态共享的界面状态（显示偏好、悬浮面板是否展开、
+  快聊记录、打开的对话框数量）放在模块内的小型 store 里，组件用 `useStore` 订阅。快聊记录只在内存中，不写 localStorage。
 - 深浅色、字体、圆角全部使用 DSH 设计 token，不引入外部字体 / 图片 / 网络资源。
 
-### 双形态与自适应
+### 三种形态与自适应
 
-- 同一个 Board 组件接受 `surface: "page" | "side"`。
+- 同一个 Board 组件接受 `surface: "page" | "side"`。悬浮看板是独立的轻量面板，与前两者共用数据读取、任务信号和验收规则。
+- 三种形态互斥，由 `host.openSurface(surface, sessionId, from)` 统一协调：打开全局或右侧看板时收起悬浮面板。打开悬浮看板时回到会话，
+  并关闭看板自己的右侧栏标签页。右侧看板挂载时登记自己的关闭动作，全局看板是否显示读取 `layout.panelInfo`。
+- 悬浮入口默认开启，常驻会话界面。全局或右侧看板显示、或有对话框打开时让位，DSH 收起右侧栏后重新出现。位置、样式和面板大小保存在显示偏好里。
 - 按根容器宽度分档：窄（单列 + 状态分段）/ 中 / 宽（四列）。右侧栏可拖宽，拖到全屏时自动切到宽档。
-- 抽屉在页面形态从右侧覆盖，在右侧栏形态则覆盖整个面板。
+- 抽屉在全局看板中从右侧覆盖，在右侧看板中覆盖整个面板。
 
 ### 页头与入口
 
-全页和侧栏共用模型、快聊、扫描与设置入口。宽屏显示当前模型名称，窄栏保留图标。
+全局看板和右侧看板共用模型、快聊、扫描、设置和形态切换入口。宽屏显示当前模型名称，窄栏保留图标。
+快聊由 `shell.overlay` 承载，三种形态打开的是同一个全窗口弹窗。宿主没有这个插槽时，退回到面板内的弹窗。
 扫描按钮显示进度、取消和重试，维护视图保留完整扫描结论。交互细节见 [设计规范](DESIGN.md)。
 
 ### 与 DSH 其他服务的联动
@@ -261,10 +266,10 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 | --- | --- |
 | 网络监听 | 只由 DSH 的本地 web server 提供 API；无独立端口、无外部监听 |
 | API 鉴权 | `connection.admit` + owner 身份；非 owner 一律 403 |
-| 出站请求 | AI 研判经 **DSH 原生 LLM 服务**发出，目标是「你在 DSH 中配置的模型服务商」（官方账号 / API Key / 第三方 provider）；可选、可关闭、只发压缩摘要。看板自身无其它出站请求（无遥测、无更新检查、无远程配置） |
+| 出站请求 | 模型请求经 **DSH 原生 LLM 服务**发出，目标是「你在 DSH 中配置的模型服务商」（官方账号 / API Key / 第三方 provider）。研判可选、可关闭，只发压缩摘要；润色和快聊仅在用户使用时发送对应内容。看板自身无其它出站请求（无遥测、无更新检查、无远程配置） |
 | 凭证 | 不再由插件读取或保存：凭证由 DSH 的 credentials 机制解析，经 `ctx.llm` 使用；插件日志与导出中不含任何 token |
 | 请求内容 | system prompt + 压缩会话摘要（≤1.5KB/会话）：标题、最近用户请求、最近回复、todo、错误、文件与工具摘要；不含全文、不含文件内容；不传 `sessionId`（不会附带官方会话日志扩展字段）、不传 tools / 图片 |
-| 第三方模型 | 用户选择第三方 provider 时，压缩摘要会发送给该服务商（由用户自行在 DSH 中配置并承担其条款）；设置页与 README / SECURITY 均明确披露 |
+| 第三方模型 | 用户选择第三方 provider 时，相关请求内容会发送给该服务商（由用户自行在 DSH 中配置并承担其条款）；模型选择弹窗标明提供方，README / SECURITY 明确披露 |
 
 ## 扩展点一览
 
@@ -282,7 +287,7 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 - **profile 依赖规格决定升级行为**：
   - 插件页/npm 安装写入**精确版本**（`pnpm add --save-exact`）；
   - 源码/本地目录安装写入 `link:`；
-  - 手工写成范围时，`^0.8.0` 只覆盖 0.8.x。升级到 0.9.x 时使用目标精确版本。
+  - 手工写成范围时，`^0.9.0` 只覆盖 0.9.x。升级到 0.10.x 时使用目标精确版本。
 - **升级动作由 DSH 完成**：第三方插件没有自动升级，也没有官方「更新」按钮；升级 = 卸载旧版 → 安装目标版本，然后刷新窗口（客户端 bundle 有缓存，必要时完全退出 DSH）。
 - 用户侧步骤、版本验证与排障见 [INSTALL.md](INSTALL.md) 与 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)；插件数据（`state.json`）与插件版本解耦（存储格式版本见 `store.mjs`）。
 

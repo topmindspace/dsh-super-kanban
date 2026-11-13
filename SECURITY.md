@@ -4,11 +4,11 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.9.x | ✅ (current release line) |
-| 0.8.x | 🟡 (previous line, best-effort fixes) |
-| < 0.8 | ❌ (end of support) |
+| 0.10.x | ✅ (current release line) |
+| 0.9.x | 🟡 (previous line, best-effort fixes) |
+| < 0.9 | ❌ (end of support) |
 
-Security fixes land on `0.9.x`. The `0.8.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
+Security fixes land on `0.10.x`. The `0.9.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
 
 ## Reporting a vulnerability
 
@@ -66,16 +66,24 @@ does not collect telemetry.
 - Project and task notes stay in board state and are included in local exports.
 - Quick chat sends its mode instruction and the submitted text (up to 4,000
   characters). Q&A can include up to four recent completed exchanges from the
-  same provider and model. Translation sends the current passage. Switching
-  routes starts fresh context. The open dialog holds the local transcript in
-  memory and clears it on close. The selected provider may account for quick
+  same provider and model. The one-shot modes (prompt writing, explain,
+  summarize, polish, translation) send only the current passage. Switching
+  routes starts fresh context. When you choose **就此任务快聊**, the task's
+  summary (goal, acceptance criteria, key facts, open issues, next steps,
+  artifact paths and notes, up to 6,000 characters) is sent as reference with
+  each Q&A request until you remove it. The transcript lives only in the
+  memory of the current window. It survives closing the dialog, is never
+  written to disk or to board state, and is cleared when you reload the
+  window or start a new chat. **存为任务** saves the selected question and
+  answer into a new task in local board state. **放入会话** fills the DSH
+  input draft without sending it. The selected provider may account for quick
   chat separately from the board's analysis budget.
 - The plugin does **not** pass a `sessionId` (which would let DSH's official
   routes attach their session-log payload), so no session log is uploaded to a
   model provider by the board.
 - If you follow the DSH default model, requests go to whatever provider DSH is
   configured to use (for example the DeepSeek account or an API-key provider).
-  If you explicitly select a third-party model in the board settings, the
+  If you explicitly select a third-party model in the board's model picker, the
   relevant request data goes to that provider under its terms and data policy.
   The model picker names the provider.
 - Model requests may also be observed by LLM middleware installed in your DSH
@@ -107,7 +115,7 @@ does not collect telemetry.
 - Keep DSH and the plugin up to date.
 - Only configure model providers you trust: with a third-party provider the
   compacted session digest is sent to that provider. Review the provider list
-  in **DSH Settings → Models** and choose the model in the board settings
+  in **DSH Settings → Models** and choose the board's model in its model picker
   deliberately.
 - Run untrusted repositories/workspaces with an isolated `DSH_HOME` and AI
   disabled.

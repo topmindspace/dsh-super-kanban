@@ -17,26 +17,33 @@
 ### Install
 
 - **Plugin market** · In DSH, open **Plugins → Discover** and add `https://topmindspace.github.io/dsh-super-kanban/index.json`. Open **Super Kanban**, choose a version, and install it. If Discover is missing, enable the experimental plugin market using the [installation guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐).
-- **npm** · Open **Plugins → Add plugin** and enter `dsh-super-kanban@0.9.0`. Replace `0.9.0` with the version you want.
+- **npm** · Open **Plugins → Add plugin** and enter `dsh-super-kanban@0.10.0`. Replace `0.10.0` with the version you want.
 - **Git or local folder** · Add the repository URL or select a local folder in the plugin page. To pin a version, check out its tag and follow the [source installation steps](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本).
 
 Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or uninstall](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)
 
 ### First run
 
-1. Open **任务看板** (Task board) from the left sidebar, or use the board icon at the top of a conversation to open it on the right.
+1. Open **任务看板** (Task board) from the left sidebar. Inside a conversation, use the board icon at the top to dock the board on the right, or select the floating entry to expand the floating board.
 2. Confirm the activity window in settings and select **扫描** (Scan). By default, incremental scans cover sessions active in the last 30 days. Check the scan button tooltip or Maintenance for results.
 3. Open **待处理** (Inbox) to find sessions that need you, or open a task to see its acceptance criteria and main deliverable.
 4. Review the deliverables and select **确认验收** (Confirm acceptance). To do more work, choose **继续此任务** (Continue task), review the draft, place it in a linked or new session, and send it yourself.
 
 ## Features
 
+### Core concepts
+
+- **Workspace** · A DSH working directory. It appears on the board automatically.
+- **Project** · A group you create. It can collect tasks from several workspaces and carries notes, a due date, and an archive state.
+- **Task** · One piece of work you can accept. It belongs to one workspace, can join one project, and can link several sessions, one of which is primary.
+- **Session** · The DSH conversation where the work runs. The board extracts progress, blockers, and deliverables from sessions. Approvals and sending stay in the session.
+
 ### Follow multiple sessions
 
 - **AI task organization** · Incremental scans extract goals, progress, blockers, and deliverables to create or update task cards. Link multiple sessions to one task. When auto-scan is enabled, a completed turn can bring the next scan forward.
-- **Live status and inbox** · Filter running tasks, find requests for approval, answers or review, and see blockers and pending deliverables. Open the corresponding session directly.
-- **Full board, sidebar, and floating panel** · Switch from the conversation header or board toolbar. The optional floating entry shows pending acceptance, inbox items, and running tasks. Open the deliverable or exact session, accept the result, or draft a continuation from the panel.
-- **Long columns and quick actions** · Each column scrolls independently and displays up to 30 cards per page. The Done column accepts drops while collapsed. Right-click a card or use its menu to move, pin, or archive it.
+- **Live status and inbox** · Filter running tasks. See pending approvals, questions, plan reviews, blockers, and work awaiting acceptance in one place, then jump straight to the session.
+- **Full board, sidebar, and floating board** · The same board can fill the main area, dock beside the conversation, or float above it. Only one form shows at a time. The floating entry is on by default in conversations. Drag it where you like, or hide it from its context menu or in settings. Expand it to handle tasks awaiting acceptance, inbox items, running tasks, and recent tasks, jot down a quick to-do, or open quick chat.
+- **Long columns and quick actions** · Each column scrolls independently and shows up to 30 cards per page. The Done column can collapse and still accepts drops. Right-click a card or use its menu to move, pin, or archive it.
 
 ### Plan and deliver
 
@@ -48,7 +55,7 @@ Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or u
 ### Models and quick chat
 
 - **Shared model selection** · Scans, reanalysis, polishing, and quick chat share the board's selected model. Follow the DSH default or choose another model configured in DSH. Scans use local rules when AI analysis is disabled or the model is unavailable.
-- **Streaming quick chat** · Ask follow-up questions, translate between Chinese and English, stop a response, copy individual replies, or clear the conversation. Switching models starts fresh context with the next message and keeps previous replies visible.
+- **Streaming quick chat** · Ask follow-up questions, or use one-shot modes to write a task prompt, explain, summarize, polish, or translate between Chinese and English. Replies render Markdown. Copy a reply, place it in the current session's input, save it as a task, or regenerate it. From task details, start a quick chat about that task with its summary attached as reference. The conversation lives only in the window's memory and clears when you reload the window or start a new chat.
 
 ## Interface demo
 
@@ -64,9 +71,9 @@ Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or u
 | --- | --- |
 | ![Dark board](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-dark.png) | ![Task details](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-light.png) |
 
-| Model picker | Conversation sidebar |
+| Floating board | Quick chat |
 | --- | --- |
-| ![Model picker](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/model-picker.png) | ![Conversation sidebar](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/side-panel.png) |
+| ![Floating board with pending acceptance, criteria and actions](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/floating-summary.png) | ![Quick chat modes and a Markdown reply](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/quick-chat.png) |
 
 > Screenshots use fictional demo data.
 

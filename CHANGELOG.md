@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-13
+
+### 新增
+
+- 悬浮入口默认在会话界面常驻。可以拖动调整位置，右键菜单可展开悬浮看板、切换到其他形态、打开快聊或隐藏入口，隐藏后可撤销。
+- 悬浮看板的面板更大，可放大和固定。面板包含待验收、待处理、运行中和最近四个类别，支持搜索，底部可随手记一条待办。
+- 快聊新增写提示词、解释、总结和润色模式。回答按 Markdown 显示，可放入当前会话的输入框、存为任务或重新生成。任务详情可「就此任务快聊」，把任务摘要作为参考资料。
+- 快聊可从悬浮看板、悬浮入口菜单和会话页头菜单打开。记录在当前窗口内保留，刷新窗口或开始新对话时清空。
+
+### 改进
+
+- 全局、右侧和悬浮三种形态同一时刻只显示一种。打开悬浮看板会回到会话并关闭右侧的看板标签页，打开全局或右侧看板会收起悬浮面板。全局或右侧看板显示时，悬浮入口暂时让位。
+- 会话页头入口改为图标加菜单，看板工具栏用三个图标切换形态。设置分为三组，「显示与入口」排在最前。
+- 卡片、列表和任务详情用「工作区 › 项目」显示任务归属。「项目」页说明工作区、自建项目、任务和会话的关系。
+- 快聊用 Enter 发送，Shift + Enter 换行。单次回答限时 60 秒，输出上限提高到 2,000 tokens。重新生成成功后才替换原回答。
+- 浮层和快聊使用与看板一致的细滚动条，输入框不再出现双重焦点框。
+- 更新 README 封面、悬浮看板和快聊截图，文档补充核心概念、三种形态和快聊工作流。
+
+### 修复
+
+- Windows 上产物、写入重叠和研判摘要里的相对路径统一使用 `/`。
+- 浮层渲染出错时静默退出，不再出现覆盖整个窗口的错误页。
+- 输入法组词时按 Enter 不再触发发送或提交。
+- 快聊回答过程中点「新对话」不会再把中断的回答写回记录；重试成功后清空已发送的输入。
+- DSH 收起右侧栏后，悬浮入口会重新出现。
+
 ## [0.9.0] - 2026-11-12
 
 ### 新增
@@ -438,7 +464,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.8.0
 [0.7.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.7.0

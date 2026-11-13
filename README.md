@@ -17,25 +17,32 @@
 ### 安装
 
 - **插件市场** · 在 DSH 的 **插件 → 发现** 添加索引源 `https://topmindspace.github.io/dsh-super-kanban/index.json`，打开 **Super Kanban**，选择版本并安装。找不到「发现」时，按[安装指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐)开启实验性插件市场。
-- **npm** · 在 **插件 → 添加插件** 输入 `dsh-super-kanban@0.9.0`。这里以 `0.9.0` 为例，可换成目标版本。
+- **npm** · 在 **插件 → 添加插件** 输入 `dsh-super-kanban@0.10.0`。这里以 `0.10.0` 为例，可换成目标版本。
 - **Git 或本地目录** · 在插件页添加仓库地址或选择本地目录。需要固定版本时，先检出对应标签，再按[源码安装步骤](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本)安装。
 
 安装后启用插件并刷新 DSH。[验证版本、升级、回滚与卸载](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)
 
 ### 第一次使用
 
-1. 从左侧栏打开 **任务看板**，或从会话右上角打开右侧栏看板。
+1. 从左侧栏打开 **任务看板**。在会话里可点右上角的看板图标打开右侧看板，或点常驻的悬浮入口展开悬浮看板。
 2. 在设置中确认活跃周期，然后点击 **扫描**。默认扫描最近 30 天有活动的会话，结果可在扫描按钮提示或「维护」中查看。
 3. 在 **待处理** 打开需要介入的会话，或进入任务详情查看验收条件和主交付物。
 4. 核对交付物后点 **确认验收**。还需要补做时，点 **继续此任务**，检查草稿并放入关联会话或新会话，由你发送。
 
 ## 功能特色
 
+### 核心概念
+
+- **工作区** · 对应 DSH 的一个工作目录，自动出现在看板里。
+- **项目** · 你自建的分组，可以把多个工作区的任务归到一起，带备注、到期日和归档。
+- **任务** · 一件可验收的工作。属于一个工作区，可选归入一个项目，可关联多条会话，其中一条为主会话。
+- **会话** · DSH 里实际执行工作的对话。看板从会话提取进展、阻塞和交付物，审批和发送仍在会话里完成。
+
 ### 跟进多条会话
 
 - **AI 自动整理任务** · 增量扫描提取任务目标、进展、阻塞和交付物，用来创建或更新任务卡。同一任务可关联多条会话。开启自动扫描后，会话轮次结束可提前触发更新。
 - **实时状态与待处理** · 筛选正在运行的任务，集中查看待审批、待回答、待审阅、阻塞和待验收事项，直接跳转到对应会话。
-- **全局、右侧与悬浮** · 从会话页头或看板工具栏切换形态。可选常驻悬浮入口显示待验收、待处理和运行中的摘要，可直接查看交付物、打开准确的会话、确认验收或继续工作。
+- **全局、右侧与悬浮** · 同一块看板可以占满主区域、停靠在会话右侧，或悬浮在会话之上，同一时刻只显示一种。悬浮入口默认常驻会话界面，可拖动位置，可从右键菜单或设置里隐藏。展开后处理待验收、待处理、运行中和最近的任务，也能随手记一条待办或打开快聊。
 - **长列与快捷操作** · 各列独立滚动，每页最多显示 30 张卡。「已完成」可折叠，折叠后仍可拖入任务。右键或点「⋯」即可移动、置顶和归档任务。
 
 ### 规划与交付
@@ -48,13 +55,13 @@
 ### 模型与快聊
 
 - **共享模型选择** · 扫描、重新研判、润色和快聊共用看板选择。默认跟随 DSH，也可在工具栏选用 DSH 已配置的模型。关闭 AI 研判或模型不可用时，扫描使用本地规则。
-- **流式快聊** · 支持连续追问、中英翻译、停止、逐条复制和清空问答。切换模型后从下一条开始新的上下文，之前的回答仍可查看。
+- **流式快聊** · 问答可连续追问，另有写提示词、解释、总结、润色和中英翻译。回答按 Markdown 显示，可复制、放入当前会话的输入框、存为任务或重新生成。在任务详情可就此任务快聊，任务摘要会作为参考。记录只在当前窗口的内存里，刷新窗口或点「新对话」即清空。
 
 ## 界面演示
 
 [观看演示动图](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/demo.gif) · [查看全部截图](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/SCREENSHOTS.md)
 
-![浅色主题的全页任务看板](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-light.png)
+![浅色主题的全局看板](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-light.png)
 
 | 项目管理 | 项目日程 |
 | --- | --- |
@@ -64,9 +71,9 @@
 | --- | --- |
 | ![深色看板](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/board-dark.png) | ![任务详情](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/drawer-light.png) |
 
-| 模型选择 | 会话侧栏 |
+| 悬浮看板 | 快聊 |
 | --- | --- |
-| ![模型选择](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/model-picker.png) | ![会话侧栏](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/side-panel.png) |
+| ![悬浮看板的待验收列表、验收条件和操作](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/floating-summary.png) | ![快聊的模式切换和 Markdown 回答](https://raw.githubusercontent.com/topmindspace/dsh-super-kanban/main/docs/screenshots/quick-chat.png) |
 
 > 界面截图使用虚构的演示数据。
 

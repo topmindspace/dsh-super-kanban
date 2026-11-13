@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Super Kanban · DSH 智能任务看板</title>
-    <meta name="description" content="Super Kanban — 面向 DeepSeek Harness 的 AI 任务看板插件：从会话自动研判任务目标、进度、完成情况与问题，支持 AI 模型可选、一键继续任务、全页/右侧栏双形态。" />
+    <meta name="description" content="Super Kanban — 面向 DeepSeek Harness 的 AI 任务看板插件：从会话自动研判任务目标、进度、完成情况与问题，支持 AI 模型可选、一键继续任务、全局 / 右侧 / 悬浮三种看板形态和快聊。" />
     <link rel="alternate" hreflang="en" href="https://github.com/topmindspace/dsh-super-kanban/blob/main/README.en.md" />
     <style>
       :root { color-scheme: light dark; --bg: #f9fafb; --fg: #151517; --muted: #61666b; --line: #e5e7eb; --card: #ffffff; --accent: #151517; }
@@ -58,13 +58,13 @@
       <section>
         <h2>功能</h2>
         <ul class="features">
-          <li><strong>项目与日程</strong><span>归属跨工作区任务，记备注、设到期日，按项目查看进度与日程。</span></li>
+          <li><strong>项目与归属</strong><span>自建项目可跨工作区收纳任务，记备注、设到期日。卡片和详情以「工作区 › 项目」显示归属。</span></li>
           <li><strong>实时会话状态</strong><span>筛出运行中的任务。会话结束后，增量扫描可更新卡片和交付证据。</span></li>
-          <li><strong>快聊</strong><span>使用看板当前模型连续追问或做中英翻译，可停止流式回答并复制。</span></li>
-          <li><strong>待处理集中入口</strong><span>同一张卡列出需要你介入的会话，直接打开审批、提问或方案审阅。</span></li>
+          <li><strong>快聊</strong><span>连续追问，或写提示词、解释、总结、润色、中英翻译。回答可放入会话输入框或存为任务，记录只留在当前窗口。</span></li>
+          <li><strong>待处理集中入口</strong><span>集中列出需要你介入的会话，直接打开审批、提问或方案审阅。</span></li>
           <li><strong>AI 模型可选</strong><span>工具栏直接切换模型，研判、润色和快聊共用选择。不可用时扫描使用本地规则。</span></li>
           <li><strong>带着上下文继续</strong><span>本地模板汇总验收条件、未完成事项和交付物，草稿由你检查和发送。</span></li>
-          <li><strong>全局、右侧与悬浮</strong><span>从会话页头切换形态。悬浮摘要可查看交付物、打开来源、确认验收或续做。</span></li>
+          <li><strong>全局、右侧与悬浮</strong><span>同一块看板的三种形态，同一时刻只显示一种。悬浮入口默认常驻会话界面，可拖动、可隐藏。</span></li>
           <li><strong>项目时间线与日程</strong><span>自动聚合工作区项目。按日期回看任务变更和交付，跟进即将到期的事项。</span></li>
           <li><strong>本地优先，无遥测</strong><span>看板数据保存在本机。可选 AI 请求由 DSH 配置的模型服务处理。</span></li>
           <li><strong>交付可验收</strong><span>详情首屏显示验收条件和主交付物。产物菜单支持复制路径、预览和用默认应用打开。</span></li>
@@ -76,12 +76,12 @@
         <ol>
           <li><strong>插件市场（推荐）</strong>：DSH → 插件 → 发现（Discover）→ 添加索引源
             <code>https://topmindspace.github.io/dsh-super-kanban/index.json</code> → 打开 <strong>Super Kanban</strong> 详情
-            → 在<strong>版本列表</strong>选择精确版本（如 <code>0.9.0</code>）→ 安装 → 启用 → <code>Cmd+R</code> 刷新。</li>
+            → 在<strong>版本列表</strong>选择精确版本（如 <code>0.10.0</code>）→ 安装 → 启用 → <code>Cmd+R</code> 刷新。</li>
           <li><strong>npm（可安装特定版本）</strong>：DSH → 插件 → 添加插件 → 输入
             <code>dsh-super-kanban</code>（最新）或精确版本 <code>dsh-super-kanban@&lt;version&gt;</code>，例如
-            <code>dsh-super-kanban@0.9.0</code> → 安装 → 启用 → 刷新窗口。</li>
+            <code>dsh-super-kanban@0.10.0</code> → 安装 → 启用 → 刷新窗口。</li>
           <li><strong>Git / 源码（可固定 tag）</strong>：克隆仓库 → <code>git checkout v&lt;version&gt;</code>（例如
-            <code>v0.9.0</code>）→ <code>./install.sh -y</code>（需 <code>bash</code> + <code>python3</code>）；不想用命令行可在 DSH 插件页添加仓库地址或选择本地目录。</li>
+            <code>v0.10.0</code>）→ <code>./install.sh -y</code>（需 <code>bash</code> + <code>python3</code>）；不想用命令行可在 DSH 插件页添加仓库地址或选择本地目录。</li>
         </ol>
         <p class="muted">安装后可在 <strong>DSH 插件页</strong>查看版本，或按
           <a href="https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#23-命令行查看实际安装版本">安装指南 2.3 节</a>
@@ -92,10 +92,10 @@
       <section>
         <h2>第一次使用</h2>
         <ol>
-          <li>从左侧栏打开 <strong>任务看板</strong>，也可以在会话页头选择看板形态。</li>
+          <li>从左侧栏打开 <strong>任务看板</strong>。在会话里也可以点页头的看板图标，或点悬浮入口展开悬浮看板。</li>
           <li>打开 <strong>设置</strong>确认扫描范围。启用 AI 时模型默认跟随 DSH。</li>
           <li>点 <strong>扫描</strong>。按会话量需要几秒到几分钟，结束后悬停按钮或在「维护」查看结论。</li>
-          <li>打开 <strong>待处理</strong>，查看来源会话、验收条件和主交付物。</li>
+          <li>在 <strong>待处理</strong> 打开需要介入的会话，或在任务详情查看验收条件和主交付物。</li>
           <li>核对交付物后 <strong>确认验收</strong>。还需补做时，用 <strong>继续此任务</strong> 编辑并放入续做草稿，由你发送。</li>
         </ol>
       </section>
@@ -144,7 +144,7 @@
 
       <footer>
         Super Kanban 是社区第三方插件，非 DeepSeek 官方产品。只读本机 DSH 会话；
-        AI 研判请求经 DSH 发送给你在 DSH 中配置的模型服务商，看板自身无遥测。
+        AI 请求经 DSH 发送给你在 DSH 中配置的模型服务商，看板自身无遥测。
       </footer>
     </main>
     <script>
