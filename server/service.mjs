@@ -1706,7 +1706,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         // Earlier caches preferred the projcache placeholder over a later
         // session/title event. Re-parse once so existing cards can pick up the
         // real title without waiting for a file change or a full scan.
-        const titleRevStale = Boolean(cached?.meta) && cached.meta.titleRev !== 2;
+        // An unchanged file that already failed to parse must not be retried
+        // every incremental scan (the error path stores the current signature
+        // for that reason). A later file change still retries via `changed`.
+        const titleRevStale =
+          Boolean(cached?.meta) && cached.meta.titleRev !== 2 && !cached.meta.parseError;
         if (changed || cached?.unparsed || forceMainParse || titleRevStale) {
           try {
             const result = parseDiscovered(discovered);

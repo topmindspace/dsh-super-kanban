@@ -186,7 +186,8 @@ async function setup(t, { prepare = null, ctx = {} } = {}) {
   const previousHome = process.env.DSH_HOME;
   process.env.DSH_HOME = home;
   if (prepare) prepare(home);
-  const service = createKanbanService({ ctx: { ...ctx, logger: { info() {}, warn() {} } } });
+  const logger = ctx.logger || { info() {}, warn() {} };
+  const service = createKanbanService({ ctx: { ...ctx, logger } });
   await command(service, "settings.update", { patch: { autoScan: false } });
   t.after(() => {
     try {
@@ -522,4 +523,92 @@ test("a long session title on the card follows readableTitle clipping", async (t
   assert.ok(task.title.length <= 80);
   assert.equal(task.title.startsWith("重构"), true);
   assert.notEqual(task.title, PLACEHOLDER);
+});
+
+test("an unchanged file with a cached parseError is not retried on every incremental scan", async (t) => {
+  const warns = [];
+  const { service } = await setup(t, {
+    ctx: {
+      logger: {
+        info() {},
+        warn(message) {
+          warns.push(String(message));
+        },
+      },
+    },
+    prepare(home) {
+      seedTitleHome(home);
+      const file = path.join(home, "sessions", "escaped-demo", SESSION_ID, SESSION_FILE_NAME);
+      fs.writeFileSync(file, "");
+      const stat = fs.statSync(file);
+      const sigKey = `${stat.size}:${stat.mtimeMs}`;
+      const taskId = stableTaskId(SESSION_ID, 0);
+      const now = new Date().toISOString();
+      writeFileDeep(
+        path.join(home, "storages", "super-kanban", "state.json"),
+        JSON.stringify({
+          version: 2,
+          tasks: [
+            {
+              id: taskId,
+              title: PLACEHOLDER,
+              status: "in_progress",
+              origin: "auto",
+              primarySessionId: SESSION_ID,
+              sessions: [{ id: SESSION_ID, title: PLACEHOLDER, seqEnd: 1, evidenceCount: 0 }],
+              workspaceId: "ws-demo",
+              lockedFields: [],
+              createdAt: now,
+              updatedAt: now,
+              lastActivityAt: T0,
+              archived: false,
+              history: [],
+            },
+          ],
+        }),
+      );
+      writeFileDeep(
+        path.join(home, "storages", "super-kanban", "sessions-cache.json"),
+        JSON.stringify({
+          version: 2,
+          sessions: {
+            [SESSION_ID]: {
+              sigKey,
+              meta: {
+                id: SESSION_ID,
+                file,
+                dir: path.dirname(file),
+                sig: { size: stat.size, mtimeMs: stat.mtimeMs },
+                sigKey,
+                title: PLACEHOLDER,
+                origin: "main",
+                hasUserMessages: true,
+                userCount: 1,
+                lastActivityAt: T0,
+                lastEventSeq: 1,
+                eventCount: 1,
+                turnCount: 1,
+                isLive: false,
+                hasOpenTurn: false,
+                workspaceId: "ws-demo",
+                workspaceTitle: "Demo Workspace",
+                parseError: "empty-session-log",
+                aiAt: now,
+                aiLastSeq: 1,
+                aiUserCount: 1,
+              },
+            },
+          },
+        }),
+      );
+    },
+  });
+  warns.length = 0;
+  await scanBoard(service);
+  await scanBoard(service);
+  assert.equal(
+    warns.filter((message) => message.includes(`skip session ${SESSION_ID}`)).length,
+    0,
+    `unchanged corrupt cache must not be retried, got: ${warns.join(" | ")}`,
+  );
 });
