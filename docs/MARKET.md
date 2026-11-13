@@ -50,7 +50,7 @@ DSH 当前**没有内置的公共插件商店**。它的插件分发有四种官
 
 ### 方式 B：npm 包名
 
-DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.10.0`，升级时推荐）→ 安装 → 启用 → 刷新。
+DSH → 插件 → 添加插件 → 输入包名：`dsh-super-kanban`（安装 npm latest），或写**精确版本**（如 `dsh-super-kanban@0.10.1`，升级时推荐）→ 安装 → 启用 → 刷新。
 
 ### 方式 C：Git 仓库
 

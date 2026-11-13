@@ -23,7 +23,7 @@
 
 ## 1. 安装（四种方式）
 
-> 每种方式都支持**安装特定版本**；下例用当前版本 `0.10.0`，换成你的目标版本号即可。
+> 每种方式都支持**安装特定版本**；下例用当前版本 `0.10.1`，换成你的目标版本号即可。
 > 安装后可用 [2.3 节](#23-命令行查看实际安装版本)的命令验证实际版本。
 
 ### 方式 A：插件市场索引（推荐）
@@ -38,7 +38,7 @@
    ```
 
 3. 打开 **Super Kanban** 的详情页：这里会列出该插件在索引中的**全部可用版本**（按新→旧排列）；
-4. **安装特定版本**：在版本列表里选择精确版本（如 `0.10.0`）→ **安装** → **启用**；选定哪个就安装哪个，第三方插件不会自动升级；
+4. **安装特定版本**：在版本列表里选择精确版本（如 `0.10.1`）→ **安装** → **启用**；选定哪个就安装哪个，第三方插件不会自动升级；
 5. 回到主窗口按 `Cmd+R` 刷新。左侧栏出现「任务看板」即安装成功。
 
 > 市场索引来自第三方（本仓库 `docs/`）。DSH 会在安装前提示信任风险，请确认来源为本仓库后再继续。
@@ -49,7 +49,7 @@
 1. DSH → 插件 → **添加插件**；
 2. 输入包名：
    - 不带版本：`dsh-super-kanban`（安装 npm latest）；
-   - 带版本：`dsh-super-kanban@0.10.0`（**推荐写精确版本**，见第 3 节）；
+   - 带版本：`dsh-super-kanban@0.10.1`（**推荐写精确版本**，见第 3 节）；
 3. 安装 → 启用 → 刷新窗口。
 
 适合能访问 npm registry 的用户。插件无第三方运行时依赖。
@@ -57,7 +57,7 @@
 **安装特定版本**（命令行等价写法，先完全退出 DSH）：
 
 ```bash
-dsh plugin --profile desktop add dsh-super-kanban@0.10.0
+dsh plugin --profile desktop add dsh-super-kanban@0.10.1
 ```
 
 ### 方式 C：Git 仓库
@@ -74,7 +74,7 @@ dsh plugin --profile desktop add dsh-super-kanban@0.10.0
 > ```bash
 > git clone https://github.com/topmindspace/dsh-super-kanban.git
 > cd dsh-super-kanban
-> git checkout v0.10.0        # 换成目标 Release 的 tag
+> git checkout v0.10.1        # 换成目标 Release 的 tag
 > ./install.sh -y
 > ```
 
@@ -84,14 +84,14 @@ dsh plugin --profile desktop add dsh-super-kanban@0.10.0
 
 **D1. 插件页选择本地目录**：DSH → 插件 → 添加插件 → 选择本仓库根目录 → 安装 → 启用 → 刷新。
 
-**安装特定版本**：先在克隆目录 `git checkout v0.10.0`（换成目标 tag），再在插件页选择该目录安装。
+**安装特定版本**：先在克隆目录 `git checkout v0.10.1`（换成目标 tag），再在插件页选择该目录安装。
 
 **D2. 命令行安装**（把工作区链接进 DSH profile）：
 
 ```bash
 git clone https://github.com/topmindspace/dsh-super-kanban.git
 cd dsh-super-kanban
-git checkout v0.10.0        # 安装特定版本：固定到目标 Release；跟随 main 则省略此行
+git checkout v0.10.1        # 安装特定版本：固定到目标 Release；跟随 main 则省略此行
 ./install.sh -y            # 交互式运行可去掉 -y
 ```
 
@@ -118,7 +118,7 @@ DSH 插件页安装 **npm/市场来源** 的包时，会把**精确版本**写�
 ```jsonc
 // ~/.dsh/profiles/desktop/package.json
 "dependencies": {
-  "dsh-super-kanban": "0.10.0",                    // 插件页/npm 安装：精确版本
+  "dsh-super-kanban": "0.10.1",                    // 插件页/npm 安装：精确版本
   // 或
   "dsh-super-kanban": "link:/path/to/checkout"    // 源码/本地目录安装
 }
@@ -162,7 +162,7 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 | 输出 | 含义 |
 | --- | --- |
-| `0.10.0` | 精确版本（插件页/npm 安装的典型结果） |
+| `0.10.1` | 精确版本（插件页/npm 安装的典型结果） |
 | `^0.10.0` | 可安装 0.10.x 补丁版本 |
 | `^0.9.0` | 可安装 0.9.x 补丁版本 |
 | `link:/path/to/checkout` | 源码安装，版本跟随该目录，无需按版本升级 |
@@ -176,7 +176,7 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 3. 通过插件页/npm 安装的依赖是**精确版本**，所以升级 = **卸载旧版 → 安装目标版本**（不会只改个 `package.json` 就自动生效）。
 4. 更新完成后：**先按 `Cmd+R` 刷新窗口**；如果界面没变，**完全退出 DSH 再重新打开**（客户端 bundle 有缓存）。
 5. 跨 minor 升级必须用**精确版本**（见 3.3）；`^0.9.0` 只解析 0.9.x。
-6. **升级到 0.10.0** 后会保留任务、项目、已选模型和活跃周期。悬浮入口改为默认常驻，不需要时右键入口选「隐藏悬浮入口」，或在「看板设置 → 显示与入口」关闭。默认看板形态沿用你之前的选择。
+6. **升级到 0.10.1** 后会保留任务、项目、已选模型和活跃周期。从 0.9.x 升级时，悬浮入口改为默认常驻，不需要时可右键入口选「隐藏悬浮入口」，或在「看板设置 → 显示与入口」关闭；默认看板形态沿用你之前的选择。新一轮结束后，入口上方会钉一张待审批卡片，点对号确认验收；安装时不会把历史轮次一次性堆上。
 
 ### 3.2 推荐升级步骤（所有安装方式通用）
 
@@ -190,18 +190,18 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 3. **完全退出 DSH**（不是只关窗口）。插件文件被占用时安装可能失败或残留旧文件。
 4. 按安装来源升级：
 
-   **A. 市场（发现）**：插件 → 已安装 → Super Kanban → **卸载** → 插件 → 发现 → 打开 Super Kanban 详情 → 在版本列表里**选择目标版本**（如 `0.10.0`）→ **安装** → **启用**。
+   **A. 市场（发现）**：插件 → 已安装 → Super Kanban → **卸载** → 插件 → 发现 → 打开 Super Kanban 详情 → 在版本列表里**选择目标版本**（如 `0.10.1`）→ **安装** → **启用**。
 
-   **B. npm**：插件 → 已安装 → Super Kanban → **卸载** → 添加插件 → 输入**精确版本** `dsh-super-kanban@0.10.0` → 安装 → 启用。
+   **B. npm**：插件 → 已安装 → Super Kanban → **卸载** → 添加插件 → 输入**精确版本** `dsh-super-kanban@0.10.1` → 安装 → 启用。
 
-   **C. Git**：插件 → 已安装 → 卸载 → 添加插件 → 重新粘贴仓库地址（DSH 会 pin 到当前 commit）→ 安装 → 启用。要**指定版本**，先按方式 C 的 tag 流程 `git checkout v0.10.0`，再用方式 D 的本地目录安装。
+   **C. Git**：插件 → 已安装 → 卸载 → 添加插件 → 重新粘贴仓库地址（DSH 会 pin 到当前 commit）→ 安装 → 启用。要**指定版本**，先按方式 C 的 tag 流程 `git checkout v0.10.1`，再用方式 D 的本地目录安装。
 
    **D. 源码 / 本地目录**：
 
    ```bash
    cd /path/to/dsh-super-kanban
    git fetch --tags
-   git checkout v0.10.0     # 用目标 Release 的 tag；跟随 main 则用 git pull
+   git checkout v0.10.1     # 用目标 Release 的 tag；跟随 main 则用 git pull
    ./install.sh -y         # 重新链接（首次安装已 link 的可省略，但仍建议刷新 profile）
    ```
 
@@ -213,9 +213,9 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 | --- | --- |
 | `^0.9.0` | `>=0.9.0 <0.10.0` |
 | `^0.10.0` | `>=0.10.0 <0.11.0` |
-| `0.10.0` | 仅 `0.10.0` |
+| `0.10.1` | 仅 `0.10.1` |
 
-从旧版升级时，卸载后安装目标精确版本，例如 `dsh-super-kanban@0.10.0`。刷新窗口后按第 2 节核对实际运行版本。
+从旧版升级时，卸载后安装目标精确版本，例如 `dsh-super-kanban@0.10.1`。刷新窗口后按第 2 节核对实际运行版本。
 
 ### 3.4 高级：命令行升级（可选）
 
@@ -223,7 +223,7 @@ node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh/
 
 ```bash
 # 安装/升级到精确版本（dsh plugin 会把参数转发给 profile 里的 pnpm）
-dsh plugin --profile desktop add dsh-super-kanban@0.10.0
+dsh plugin --profile desktop add dsh-super-kanban@0.10.1
 
 # 卸载
 dsh plugin --profile desktop remove dsh-super-kanban
@@ -252,7 +252,7 @@ dsh plugin --profile desktop remove dsh-super-kanban
 
 2. 完全退出 DSH；
 3. 卸载当前版本（插件页或 `dsh plugin --profile desktop remove dsh-super-kanban`）；
-4. 安装目标旧版本的**精确版本**（例如从 `0.10.0` 回滚到 `0.9.0`）：
+4. 安装目标旧版本的**精确版本**（例如从 `0.10.1` 回滚到 `0.9.0`）：
    - 插件页：在市场详情页选择 `0.9.0`，或添加 `dsh-super-kanban@0.9.0`。
    - 源码：`git checkout v0.9.0 && ./install.sh -y`。
 5. 启用 → 刷新窗口 → 按第 2 节验证。
@@ -327,8 +327,8 @@ dsh plugin --profile web add dsh-super-kanban@^0.4.0
 node -p "JSON.parse(require('fs').readFileSync(require('os').homedir() + '/.dsh-dev/profiles/web/package.json', 'utf8')).dependencies['dsh-super-kanban']"
 node -p "require(require('os').homedir() + '/.dsh-dev/profiles/web/node_modules/dsh-super-kanban/package.json').version"
 
-# 3) 换成精确版本重装，确认界面换成 v0.10.0
-dsh plugin --profile web add dsh-super-kanban@0.10.0
+# 3) 换成精确版本重装，确认界面换成 v0.10.1
+dsh plugin --profile web add dsh-super-kanban@0.10.1
 ```
 
 > 桌面版 profile（`desktop`）由桌面 App 持有：命令行操作前**完全退出 DSH**，否则会提示 profile 被占用或安装失败。

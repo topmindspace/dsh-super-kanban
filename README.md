@@ -17,7 +17,7 @@
 ### 安装
 
 - **插件市场** · 在 DSH 的 **插件 → 发现** 添加索引源 `https://topmindspace.github.io/dsh-super-kanban/index.json`，打开 **Super Kanban**，选择版本并安装。找不到「发现」时，按[安装指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐)开启实验性插件市场。
-- **npm** · 在 **插件 → 添加插件** 输入 `dsh-super-kanban@0.10.0`。这里以 `0.10.0` 为例，可换成目标版本。
+- **npm** · 在 **插件 → 添加插件** 输入 `dsh-super-kanban@0.10.1`。这里以 `0.10.1` 为例，可换成目标版本。
 - **Git 或本地目录** · 在插件页添加仓库地址或选择本地目录。需要固定版本时，先检出对应标签，再按[源码安装步骤](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本)安装。
 
 安装后启用插件并刷新 DSH。[验证版本、升级、回滚与卸载](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)

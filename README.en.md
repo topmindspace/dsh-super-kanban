@@ -17,7 +17,7 @@
 ### Install
 
 - **Plugin market** · In DSH, open **Plugins → Discover** and add `https://topmindspace.github.io/dsh-super-kanban/index.json`. Open **Super Kanban**, choose a version, and install it. If Discover is missing, enable the experimental plugin market using the [installation guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐).
-- **npm** · Open **Plugins → Add plugin** and enter `dsh-super-kanban@0.10.0`. Replace `0.10.0` with the version you want.
+- **npm** · Open **Plugins → Add plugin** and enter `dsh-super-kanban@0.10.1`. Replace `0.10.1` with the version you want.
 - **Git or local folder** · Add the repository URL or select a local folder in the plugin page. To pin a version, check out its tag and follow the [source installation steps](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本).
 
 Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or uninstall](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)

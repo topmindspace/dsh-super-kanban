@@ -7,11 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### 修复
-
-- 实时 `turn/end` 尚未带上序号（`review.seq` 为 0）时，若用户先点对号验收，结算扫描只会补记账本，不会把同一轮再钉回待审批条；若在扫描前同一会话又结束了新轮次，仍会钉一张新卡。尚未看到该轮的提前扫描（日志还停在更早的序号）不会把清除标记吃掉。
-- 忽略来源会话时把该轮记入 `reviewSeen`，取消忽略后再扫描不会把已清除的卡片重新挂上。
-- 待审批卡片只在它自己的会话正在运行或等待回答时收起；同一任务上其他关联会话的活动不再把它藏起来，条上的对号也仍可点。
+## [0.10.1] - 2026-11-13
 
 ### 新增
 
@@ -20,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 改进
 
 - 扫描按会话记录已处理到的 `turn/end` 序号（`state.reviewSeen`，上限 500 个会话）：安装时只播种账本，历史会话不会一次性堆满待审批条，此后每个新轮次只弹一次。验收、手动改状态、拖到完成或忽略来源会话都会清空 `review`。
+
+### 修复
+
+- 实时 `turn/end` 尚未带上序号（`review.seq` 为 0）时，若用户先点对号验收，结算扫描只会补记账本，不会把同一轮再钉回待审批条；若在扫描前同一会话又结束了新轮次，仍会钉一张新卡。尚未看到该轮的提前扫描（日志还停在更早的序号）不会把清除标记吃掉。
+- 忽略来源会话时把该轮记入 `reviewSeen`，取消忽略后再扫描不会把已清除的卡片重新挂上。
+- 待审批卡片只在它自己的会话正在运行或等待回答时收起；同一任务上其他关联会话的活动不再把它藏起来，条上的对号也仍可点。
+
+感谢 [@mufanmu](https://github.com/mufanmu) 贡献待审批卡片条。
 
 ## [0.10.0] - 2026-11-13
 
@@ -478,7 +482,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/topmindspace/dsh-super-kanban/tree/v0.8.0

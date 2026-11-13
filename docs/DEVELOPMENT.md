@@ -165,10 +165,10 @@ await page.screenshot({ path: "board-light.png" });
   node -p "require(require('os').homedir() + '/.dsh/profiles/desktop/node_modules/dsh-super-kanban/package.json').version"
   ```
 
-- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.4.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.10.0` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
+- **复现升级陷阱**（隔离环境）：把隔离 profile 的依赖写成 `^0.4.0` 再安装，可观察到 semver 不会跨 minor；改成精确版本 `dsh-super-kanban@0.10.1` 重装后界面才更新。完整命令见 [INSTALL.md 第 8 节](INSTALL.md#8-开发者隔离环境安装与升级验证)。
 - **文档同步**：涉及安装/升级/UI 入口的改动，需同步更新 [INSTALL.md](INSTALL.md)、[TROUBLESHOOTING.md](TROUBLESHOOTING.md)、[MARKET.md](MARKET.md) 以及中英文 README 的截图与描述。
 - **文档检查（CI 强制）**：`npm run check:docs` 会校验公开文档的相对链接与锚点、README 中英结构（章节数 / 表格 / 代码块 / 截图集合）、截图引用、GitHub Pages 落地页与历史 `plugin/` 布局残留；`npm run check:version` 会校验 `package.json`、`CHANGELOG.md`、`docs/index.json`、`SECURITY.md` 与文档中兼容范围的一致性。改文档后必须跑这两项。
-- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.10.0`）只用于演示精确安装，实际以 npm latest / 插件页为准。
+- **发布包与文档版本**：README 不写死当前版本；示例版本号（如 `0.10.1`）只用于演示精确安装，实际以 npm latest / 插件页为准。
 
 ## 8. 代码风格
 

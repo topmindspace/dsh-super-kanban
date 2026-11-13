@@ -42,7 +42,7 @@ node -p "require(require('os').homedir() + '/.dsh/profiles/desktop/node_modules/
 ```
 
 - 跨 minor 升级时，按 [安装指南第 3.2 节](INSTALL.md#32-推荐升级步骤所有安装方式通用) 卸载后安装目标精确版本。
-- 如果依赖是 `link:/path/...`：这是源码安装，升级方式是更新该目录的代码（`git pull` / `git checkout v0.10.0` 固定到目标版本），刷新窗口即可；各安装方式的「安装特定版本」示例见 [INSTALL.md 第 1 节](INSTALL.md#1-安装四种方式)。
+- 如果依赖是 `link:/path/...`：这是源码安装，升级方式是更新该目录的代码（`git pull` / `git checkout v0.10.1` 固定到目标版本），刷新窗口即可；各安装方式的「安装特定版本」示例见 [INSTALL.md 第 1 节](INSTALL.md#1-安装四种方式)。
 
 ### 原因二：客户端 bundle 缓存 / 旧进程
 
@@ -57,7 +57,7 @@ DSH 桌面版使用 `desktop` profile；如果你在隔离 home（`DSH_HOME=/pat
 ### 仍不生效
 
 按 [INSTALL.md 第 3.5 节](INSTALL.md#35-更新后界面仍旧4-步快速排查) 走完整 4 步；再不行则卸载插件、重启 DSH、重新安装目标精确版本
-（如 `dsh-super-kanban@0.10.0`；市场版本列表、npm 精确版本、Git tag 等写法见 [INSTALL.md 第 1 节](INSTALL.md#1-安装四种方式)），
+（如 `dsh-super-kanban@0.10.1`；市场版本列表、npm 精确版本、Git tag 等写法见 [INSTALL.md 第 1 节](INSTALL.md#1-安装四种方式)），
 并带上 [诊断信息](#如何收集诊断信息) 反馈。回滚步骤见 [INSTALL.md 第 4 节](INSTALL.md#4-回滚到旧版本)。
 
 ---
