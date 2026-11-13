@@ -2142,6 +2142,8 @@ button.sk-task-row-main{cursor:pointer}
 .sk-pin-card:hover .sk-pin-check,.sk-pin-card:focus-within .sk-pin-check{opacity:1;transform:none;pointer-events:auto}
 .sk-pin-check:hover{filter:brightness(1.07)}
 .sk-pin-check:disabled{opacity:.5;cursor:progress;filter:none}
+.sk-pin-check.is-floating{justify-self:end;width:30px;height:30px;opacity:1;transform:none;pointer-events:auto;
+  box-shadow:0 4px 14px rgba(0,0,0,.18)}
 .sk-pin-spin{width:10px;height:10px;border-radius:50%;border:1.6px solid color-mix(in srgb,currentColor 28%,transparent);border-top-color:currentColor;
   animation:sk-pin-spin .9s linear infinite}
 .sk-pin-more{justify-self:end;height:26px;padding:0 10px;border:1px solid var(--sk-line);border-radius:999px;background:var(--sk-surface);
@@ -5076,8 +5078,14 @@ button.sk-task-row-main{cursor:pointer}
         const timer = setInterval(sync, 600);
         return () => clearInterval(timer);
       }, [host]);
+      const allReviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now),
+        [tasks, sessionStatuses, now]);
       const reviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now, currentSessionId),
         [tasks, sessionStatuses, now, currentSessionId]);
+      // 当前会话的卡先收起，但它还需要一个「点完成」的入口：留一颗悬浮对号。
+      const activeReview = currentSessionId
+        ? allReviews.find((row) => row.sessionId === currentSessionId) || null
+        : null;
       const [stripExpanded, setStripExpanded] = React.useState(false);
       React.useEffect(() => {
         if (!reviews.length) setStripExpanded(false);
@@ -5380,10 +5388,19 @@ button.sk-task-row-main{cursor:pointer}
                 ...visibleMetrics.map(({ label, count }) => `${label} ${count}`)].filter(Boolean).join(" · ") || "任务看板")
             : [reviewCount ? h("span", { key: "review" }, "待审批 ", h("b", null, reviewCount)) : null,
                 ...metrics.map(({ id, label, count }) => h("span", { key: id }, label, " ", h("b", null, count)))]) : null;
+      const activeCheck = activeReview && !showPanel && dialogs === 0
+        ? h("button", { type: "button", className: "sk-pin-check is-floating",
+            disabled: Boolean(busyId || error),
+            title: `确认完成：${activeReview.folder || activeReview.task.title}`,
+            "aria-label": `确认完成：${activeReview.task.title}`,
+            onClick: () => accept(activeReview.task, "已确认完成") },
+            busyId === activeReview.task.id ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 15 }))
+        : null;
       return h("div", { ref: root, className: cx("sk-floating", "is-" + side, showPanel && "is-open"), popover: topLayer ? "manual" : undefined,
         style: { "--sk-float-offset": `${showPanel ? 0 : offset}px` } },
         panel,
         strip,
+        activeCheck,
         entry,
         notice ? h("div", { className: "sk-float-notice", role: "status" }, h("span", null, notice.text),
           h("button", { type: "button", className: "sk-text", onClick: () => { notice.undo(); setNotice(null); } }, "撤销"),

@@ -924,6 +924,33 @@ test("a finished turn stays pinned until its hover check mark is clicked", async
   assert.deepEqual(opens, ["source"]);
 });
 
+test("the open conversation keeps a lone approve check when its card is tucked away", async () => {
+  const now = Date.now();
+  const task = { id: "active", title: "整理组件规范", status: "in_progress", updatedAt: "rev-1",
+    primarySessionId: "current", workspaceTitle: "设计系统", lastActivityAt: now - 5000,
+    review: { at: now - 5000, sessionId: "current", seq: 7, kind: "completed" } };
+  const requests = [];
+  const { host, registrations } = loadClient({}, {
+    snapshot: { tasks: [task] },
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return options.body
+        ? { ok: true, json: async () => ({ ok: true, data: { ...task, status: "done", completionBasis: "user" } }) }
+        : { ok: true, json: async () => ({ ok: true, tasks: [{ ...task, completionBasis: "user" }] }) };
+    },
+  });
+  host.currentSession = () => "current";
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const view = panel.type(panel.props);
+  assert.equal([...elements(view)].some((node) => node.type?.name === "ReviewStrip"), false);
+  const check = [...elements(view)].find((node) => node.props?.className === "sk-pin-check is-floating");
+  assert.ok(check, "the active conversation keeps an approve check");
+  await check.props.onClick();
+  assert.deepEqual(requests[0],
+    ["/super-kanban/api/command", { op: "task.accept", payload: { id: "active", expectedUpdatedAt: "rev-1" } }]);
+});
+
 test("more than three pinned cards collapse behind a count and expand in place", () => {
   const now = Date.now();
   const tasks = Array.from({ length: 5 }, (_, index) => ({
