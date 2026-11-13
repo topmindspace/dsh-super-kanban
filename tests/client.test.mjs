@@ -877,16 +877,18 @@ test("a review card hides while its session runs or waits, and for the open sess
   ]);
   const rows = plugin.floatingReview(items, statuses, now);
   assert.deepEqual(Array.from(rows, (row) => [row.kind, row.task.id]), [
-    ["review", "review-new"], ["review", "review-old"],
+    ["review", "accepted"], ["review", "review-new"], ["review", "review-old"],
   ]);
-  assert.deepEqual(Array.from(rows, (row) => row.sessionId), ["review-new", "review-old"]);
-  assert.ok(!rows.some((row) => ["running", "pending", "accepted", "archived"].includes(row.task.id)));
+  assert.deepEqual(Array.from(rows, (row) => row.sessionId), ["accepted", "review-new", "review-old"]);
+  // A later turn on an already accepted task still gets a card; archived and
+  // running/waiting turns do not.
+  assert.ok(!rows.some((row) => ["running", "pending", "archived"].includes(row.task.id)));
   // The card of the conversation you are viewing hides too, and comes back
   // as soon as the open session is something else.
   const other = plugin.floatingReview(items, statuses, now, "review-new");
-  assert.deepEqual(Array.from(other, (row) => row.task.id), ["review-old"]);
+  assert.deepEqual(Array.from(other, (row) => row.task.id), ["accepted", "review-old"]);
   const away = plugin.floatingReview(items, statuses, now, "elsewhere");
-  assert.deepEqual(Array.from(away, (row) => row.task.id), ["review-new", "review-old"]);
+  assert.deepEqual(Array.from(away, (row) => row.task.id), ["accepted", "review-new", "review-old"]);
 });
 
 test("a finished turn stays pinned until its hover check mark is clicked", async () => {
@@ -922,6 +924,34 @@ test("a finished turn stays pinned until its hover check mark is clicked", async
   const open = [...elements(strip)].find((node) => node.props?.["aria-label"] === "打开会话：生成本周周报");
   open.props.onClick();
   assert.deepEqual(opens, ["source"]);
+});
+
+test("a new turn on an already accepted task can be approved from its card", async () => {
+  const now = Date.now();
+  const task = { id: "again", title: "再看一版", status: "done", completionBasis: "user",
+    primarySessionId: "source", workspaceTitle: "数据管道", updatedAt: "rev-2", lastActivityAt: now - 2000,
+    review: { at: now - 10_000, sessionId: "source", seq: 21, kind: "completed" } };
+  const requests = [];
+  const { registrations } = loadClient({}, {
+    snapshot: { tasks: [task] },
+    fetch: async (url, options) => {
+      requests.push([url.pathname, options.body ? JSON.parse(options.body) : null]);
+      return options.body
+        ? { ok: true, json: async () => ({ ok: true, data: { ...task, review: null } }) }
+        : { ok: true, json: async () => ({ ok: true, tasks: [{ ...task, review: null }] }) };
+    },
+  });
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const rendered = panel.type(panel.props);
+  const stripElement = [...elements(rendered)].find((node) => node.type?.name === "ReviewStrip");
+  assert.ok(stripElement, "the accepted task with a fresh review is pinned again");
+  const strip = stripElement.type(stripElement.props);
+  const check = [...elements(strip)].find((node) => node.props?.["aria-label"] === "确认完成：再看一版");
+  assert.ok(check);
+  await check.props.onClick({ stopPropagation() {} });
+  assert.deepEqual(requests[0],
+    ["/super-kanban/api/command", { op: "task.accept", payload: { id: "again", expectedUpdatedAt: "rev-2" } }]);
 });
 
 test("the open conversation keeps a lone approve check when its card is tucked away", async () => {

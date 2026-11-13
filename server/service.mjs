@@ -1155,7 +1155,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
    */
   function markTaskReview(task, { sessionId, seq = 0, at = Date.now(), kind = "completed" } = {}) {
     if (!task || task.archived || !sessionId) return false;
-    if (task.status === "done" && task.completionBasis === "user") return false;
     const nextSeq = Number(seq) > 0 ? Math.floor(Number(seq)) : 0;
     const previous = task.review;
     if (previous && previous.sessionId === sessionId && Number(previous.seq) === nextSeq && nextSeq > 0) return false;
@@ -2583,7 +2582,15 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const task = requireTask(payload);
       checkRevision(task, payload.expectedUpdatedAt);
       if (task.archived) throw conflict("请先恢复归档任务再确认验收");
-      if (task.status === "done" && task.completionBasis === "user") return task;
+      if (task.status === "done" && task.completionBasis === "user") {
+        // A later turn on an accepted task pins a fresh review; accepting it
+        // clears the notice without changing the already-locked completion.
+        if (task.review) {
+          dismissReview(task);
+          touchTask(task);
+        }
+        return task;
+      }
       const from = task.status;
       task.status = "done";
       task.attention = null;
@@ -3598,7 +3605,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           // Prefer the event's own sequence; the cached lastTurnEnd is the
           // previous turn and would dedupe a fresh turn into nothing.
           const liveSeq = Number(event?.seq) > 0 ? Number(event.seq) : 0;
-          if (task && markTaskReview(task, {
+          const alreadySeen = liveSeq > 0 && (Number(state.reviewSeen[id]) || 0) >= liveSeq;
+          if (task && !alreadySeen && markTaskReview(task, {
             sessionId: id,
             seq: liveSeq,
             at: Date.now(),

@@ -4929,7 +4929,7 @@ button.sk-task-row-main{cursor:pointer}
       for (const task of tasks || []) {
         if (!task || task.archived) continue;
         const review = task.review;
-        if (!review?.sessionId || isAccepted(task)) continue;
+        if (!review?.sessionId) continue;
         if (currentSessionId && review.sessionId === currentSessionId) continue;
         const projected = withSessionStatus(task, statuses, now);
         const running = projected.runningSessionIds?.length ||
@@ -5178,7 +5178,9 @@ button.sk-task-row-main{cursor:pointer}
         };
       }, [showPanel, prefs.floatPinned]);
       const accept = async (task, doneLabel = "已验收") => {
-        if (busy.current || !canAcceptTask(task) || isAccepted(task)) return;
+        // A later turn on an already accepted task still pins a review; its
+        // check must be able to clear that notice.
+        if (busy.current || !canAcceptTask(task) || (isAccepted(task) && !task.review?.sessionId)) return;
         busy.current = true;
         heading.current?.focus({ preventScroll: true });
         setBusyId(task.id);

@@ -1863,6 +1863,43 @@ test("a finished turn is pinned on the task until the user approves it", async (
   assert.deepEqual([saved.status, saved.completionBasis], ["done", "user"]);
 });
 
+test("a conversation accepted once still pins its next turn", async (t) => {
+  let observe = null;
+  const { service } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
+  const first = (await request(service, {})).json.tasks[0];
+  assert.equal((await command(service, "task.accept", { id: first.id, expectedUpdatedAt: first.updatedAt })).status, 200);
+
+  // The user keeps talking in the accepted conversation: the next turn must
+  // pin a fresh card even though completion was already locked.
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 20, data: { reason: { kind: "completed" } } });
+  const next = (await request(service, {})).json.tasks[0];
+  assert.equal(next.review.sessionId, "sess-alpha");
+  assert.equal(next.review.seq, 20);
+  assert.deepEqual([next.status, next.completionBasis], ["done", "user"]);
+
+  const accepted = await command(service, "task.accept", { id: next.id, expectedUpdatedAt: next.updatedAt });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.json.data.review, null);
+  assert.deepEqual([accepted.json.data.status, accepted.json.data.completionBasis], ["done", "user"]);
+
+  // A rescan of the accepted turn must not resurrect the notice.
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const after = (await request(service, {})).json.tasks[0];
+  assert.equal(after.review, null);
+});
+
 test("a manual status change dismisses the card and the settle scan does not re-queue it", async (t) => {
   let observe = null;
   const { service } = await setup(t, {
