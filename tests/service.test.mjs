@@ -1848,9 +1848,10 @@ test("a finished turn is pinned on the task until the user approves it", async (
   // The ledger seeded this old turn during the first scan: no pinned card.
   assert.equal(scanned.review || null, null);
 
-  observe({ id: "sess-alpha" }, { type: "turn/end", data: { reason: { kind: "completed" } } });
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
   const queued = (await request(service, {})).json.tasks[0];
   assert.equal(queued.review.sessionId, "sess-alpha");
+  assert.equal(queued.review.seq, 12, "the live event sequence wins over the cached previous turn");
   assert.equal(queued.review.kind, "completed");
   assert.ok(queued.review.at > 0);
   assert.notEqual(queued.updatedAt, scanned.updatedAt);
@@ -1860,6 +1861,59 @@ test("a finished turn is pinned on the task until the user approves it", async (
   const saved = (await request(service, {})).json.tasks[0];
   assert.equal(saved.review, null);
   assert.deepEqual([saved.status, saved.completionBasis], ["done", "user"]);
+});
+
+test("a manual status change dismisses the card and the settle scan does not re-queue it", async (t) => {
+  let observe = null;
+  const { service } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  await command(service, "scan.start");
+  await waitForScan(service);
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
+  const queued = (await request(service, {})).json.tasks[0];
+  assert.equal(queued.review.seq, 12);
+  const moved = await command(service, "task.update", {
+    id: queued.id, expectedUpdatedAt: queued.updatedAt, patch: { status: "backlog" },
+  });
+  assert.equal(moved.status, 200);
+  assert.equal(moved.json.data.review, null);
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const after = (await request(service, {})).json.tasks.find((task) => task.id === queued.id);
+  assert.equal(after.review, null, "the dismissed turn must not come back from the scan");
+});
+
+test("a supporting session never owns a card whose primary is another session", async (t) => {
+  let observe = null;
+  const { service } = await setup(t, {
+    withSessions: true,
+    prepare(home) {
+      writeFileDeep(path.join(home, "storages", "super-kanban", "state.json"), JSON.stringify({
+        version: 2,
+        tasks: [{
+          id: "t_owner", title: "另一个会话", status: "in_progress", origin: "auto",
+          primarySessionId: "sess-other",
+          sessions: [{ id: "sess-other" }, { id: "sess-alpha" }],
+        }],
+      }));
+    },
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {};
+      },
+    },
+  });
+  observe({ id: "sess-alpha" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
+  const task = (await request(service, {})).json.tasks.find((item) => item.id === "t_owner");
+  assert.equal(task.review || null, null, "the supporting link must not steal a review");
 });
 
 test("the scan pins a turn that ended after the session was first seen, but never replays history", async (t) => {

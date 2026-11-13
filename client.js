@@ -2114,7 +2114,8 @@ button.sk-task-row-main{cursor:pointer}
 .sk-float-notice .sk-text{flex:none;color:inherit;text-decoration:underline;text-underline-offset:2px}
 .sk-floating .sk-modal-mask{padding:12px}
 /* ---------- review strip: finished turns pinned above the launcher ---------- */
-.sk-pin-stack{display:grid;gap:6px;justify-self:end;width:min(240px,calc(100vw - 32px))}
+.sk-pin-stack{display:grid;gap:6px;justify-self:end;width:min(240px,calc(100vw - 32px));
+  max-height:calc(100vh - var(--sk-float-offset,0px) - 120px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .sk-floating.is-left .sk-pin-stack{justify-self:start}
 .sk-pin-card{position:relative;display:flex;align-items:center;gap:8px;min-height:52px;padding:7px 8px 7px 9px;
   cursor:pointer;user-select:none;-webkit-user-select:none;
@@ -2150,6 +2151,8 @@ button.sk-task-row-main{cursor:pointer}
   color:var(--sk-ink-2);font-size:11px;cursor:pointer;font-variant-numeric:tabular-nums}
 .sk-pin-more:hover{background:var(--sk-hover);color:var(--sk-ink)}
 .sk-pin-status{margin:0;padding:0 6px;font-size:11px;line-height:1.4;color:var(--sk-ink-3);text-align:end;overflow-wrap:anywhere}
+.sk-pin-status.is-floating{justify-self:end;max-width:240px;padding:5px 9px;border:1px solid var(--sk-line);border-radius:9px;
+  background:var(--sk-surface);box-shadow:0 4px 14px rgba(0,0,0,.12);color:var(--sk-ink-2);text-align:start}
 @keyframes sk-pin-spin{to{transform:rotate(360deg)}}
 @media (hover:none){.sk-pin-check{opacity:1;transform:none;pointer-events:auto}}
 @media (prefers-reduced-motion:reduce){
@@ -5132,7 +5135,8 @@ button.sk-task-row-main{cursor:pointer}
       const showPanel = open && !onBoardPage;
       // 全局或右侧看板正在显示时入口让位：同一时刻只出现一种看板形态。
       const showTrigger = !showPanel && !onBoardPage && sideBoards === 0 && prefs.floatEnabled &&
-        (!prefs.floatHideEmpty || visibleMetrics.length > 0 || reviews.length > 0 || Boolean(error));
+        (!prefs.floatHideEmpty || visibleMetrics.length > 0 || reviews.length > 0 || Boolean(activeReview) ||
+          Boolean(message) || Boolean(error));
       const showRoot = showPanel || showTrigger || Boolean(notice);
       const topLayer = typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.showPopover === "function";
       React.useLayoutEffect(() => {
@@ -5397,10 +5401,15 @@ button.sk-task-row-main{cursor:pointer}
             onClick: () => accept(activeReview.task, "已确认完成") },
             busyId === activeReview.task.id ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 15 }))
         : null;
+      // 验收反馈在条子/面板都不在场时也要可见（最后一张卡、只有悬浮对号时）。
+      const floatingStatus = message && (showPanel || !reviews.length)
+        ? h("p", { className: "sk-pin-status is-floating", role: "status" }, message)
+        : null;
       return h("div", { ref: root, className: cx("sk-floating", "is-" + side, showPanel && "is-open"), popover: topLayer ? "manual" : undefined,
         style: { "--sk-float-offset": `${showPanel ? 0 : offset}px` } },
         panel,
         strip,
+        floatingStatus,
         activeCheck,
         entry,
         notice ? h("div", { className: "sk-float-notice", role: "status" }, h("span", null, notice.text),

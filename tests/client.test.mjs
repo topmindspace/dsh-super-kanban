@@ -951,6 +951,23 @@ test("the open conversation keeps a lone approve check when its card is tucked a
     ["/super-kanban/api/command", { op: "task.accept", payload: { id: "active", expectedUpdatedAt: "rev-1" } }]);
 });
 
+test("the lone approve check survives an empty floating entry", () => {
+  const now = Date.now();
+  const task = { id: "active", title: "整理组件规范", status: "in_progress", primarySessionId: "current",
+    workspaceTitle: "设计系统", lastActivityAt: now - 5000,
+    review: { at: now - 5000, sessionId: "current", seq: 7, kind: "completed" } };
+  const { host, registrations } = loadClient({}, {
+    snapshot: { tasks: [task] },
+    prefs: { floatHideEmpty: true, floatEnabled: true },
+  });
+  host.currentSession = () => "current";
+  const entry = registrations.get("shell.overlay").render({}).children[0];
+  const panel = entry.type(entry.props);
+  const view = panel.type(panel.props);
+  assert.ok(view, "the floating root must stay mounted for the lone check");
+  assert.ok([...elements(view)].some((node) => node.props?.className === "sk-pin-check is-floating"));
+});
+
 test("more than three pinned cards collapse behind a count and expand in place", () => {
   const now = Date.now();
   const tasks = Array.from({ length: 5 }, (_, index) => ({

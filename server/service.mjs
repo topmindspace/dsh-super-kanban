@@ -1141,7 +1141,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     for (const task of state.tasks) {
       if (!task || task.archived) continue;
       if (task.primarySessionId === sessionId) return task;
-      if (!fallback && task.sessions?.some((session) => session?.id === sessionId)) fallback = task;
+      // Legacy cards without an explicit primary can still be adopted; a card
+      // that names another session as primary never owns this session's review.
+      if (!fallback && !task.primarySessionId && task.sessions?.some((session) => session?.id === sessionId)) fallback = task;
     }
     return fallback;
   }
@@ -1165,6 +1167,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     };
     touchTask(task);
     return true;
+  }
+
+  /** Clear the notice and remember the dismissed turn so the settle scan cannot re-queue it. */
+  function dismissReview(task) {
+    const review = task?.review;
+    if (review?.sessionId) recordReviewSeen(review.sessionId, review.seq);
+    if (task) task.review = null;
   }
 
   /** Remember the newest processed turn-end seq for one session (bounded). */
@@ -1780,6 +1789,12 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         if (job.llm) {
           if (job.llm.ignore) {
             applyAiMeta(meta.id, meta, { digestBytes: job.digestBytes });
+            // The analyzer may skip task fields, but the turn still ended:
+            // keep the review ledger moving so a missed live event catches up.
+            if (!scanCancel && markScanReview(meta)) {
+              addedReviews += 1;
+              schedulePersist();
+            }
             continue;
           }
           const llmModel = job.llm.model || "";
@@ -2475,7 +2490,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
             task.status = next;
             task.completionBasis = next === "done" ? "user" : null;
             task.attention = null;
-            task.review = null;
+            dismissReview(task);
             pushHistory(task, { kind: "status", from, to: next, by: "user", note: "用户编辑" });
           }
           continue;
@@ -2572,7 +2587,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const from = task.status;
       task.status = "done";
       task.attention = null;
-      task.review = null;
+      dismissReview(task);
       task.completionBasis = "user";
       task.lockedFields = [...new Set([...(task.lockedFields || []), "status"])];
       if (task.origin === "auto") task.origin = "auto+edited";
@@ -2594,7 +2609,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         task.status = nextStatus;
         task.completionBasis = nextStatus === "done" ? "user" : null;
         task.attention = null;
-        task.review = null;
+        dismissReview(task);
         task.lockedFields = [...new Set([...(task.lockedFields || []), "status"])];
         syncGoalStatus(task);
         // Same rule as task.update: only a real column change marks the card as
@@ -3580,9 +3595,12 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         // scan is busy, deferred or disabled. The scan fills in the exact seq.
         if (id && meta?.origin !== "subagent" && !(Number(meta?.delegationDepth) > 0)) {
           const task = primaryTaskForSession(id);
+          // Prefer the event's own sequence; the cached lastTurnEnd is the
+          // previous turn and would dedupe a fresh turn into nothing.
+          const liveSeq = Number(event?.seq) > 0 ? Number(event.seq) : 0;
           if (task && markTaskReview(task, {
             sessionId: id,
-            seq: meta?.lastTurnEnd?.seq || 0,
+            seq: liveSeq,
             at: Date.now(),
             kind: event?.data?.reason?.kind || "completed",
           })) {
