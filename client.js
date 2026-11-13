@@ -221,8 +221,13 @@ window.__ModuleLoader__.load({
     }
 
     function canAcceptTask(task, artifact = primaryArtifactOf(artifactsOf(task))) {
-      return !task.archived && (isAccepted(task) || (!task.pendingSessions?.length && !taskRunningLabel(task) &&
-        Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done" || task.review?.sessionId)));
+      if (task.archived) return false;
+      if (isAccepted(task)) return true;
+      if (task.pendingSessions?.length) return false;
+      // 待审批卡代表已经结束的那一轮：会话又跑起来也不妨碍点头，点进会话才不会白等。
+      if (task.review?.sessionId) return true;
+      return !taskRunningLabel(task) &&
+        Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done");
     }
 
     function taskActivityAt(task) {
@@ -2117,14 +2122,16 @@ button.sk-task-row-main{cursor:pointer}
 .sk-pin-stack{display:grid;gap:6px;justify-self:end;width:min(240px,calc(100vw - 32px))}
 .sk-floating.is-left .sk-pin-stack{justify-self:start}
 .sk-pin-card{position:relative;display:flex;align-items:center;gap:8px;min-height:52px;padding:7px 8px 7px 9px;
+  cursor:pointer;user-select:none;-webkit-user-select:none;
   border:1px solid var(--sk-line);border-radius:12px;background:color-mix(in srgb,var(--sk-surface) 94%,transparent);
   box-shadow:0 1px 2px rgba(0,0,0,.04),0 6px 18px rgba(0,0,0,.10);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   transition:border-color .16s var(--sk-ease),box-shadow .16s var(--sk-ease),transform .16s var(--sk-ease);overflow:hidden}
 .sk-pin-card:hover{border-color:var(--sk-line-strong);transform:translateY(-1px);box-shadow:0 2px 4px rgba(0,0,0,.06),0 14px 30px rgba(0,0,0,.17)}
+.sk-pin-card:focus-visible{outline:2px solid color-mix(in srgb,var(--sk-green) 65%,transparent);outline-offset:2px}
 .sk-pin-avatar{flex:none;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;
   background:var(--sk-folder,#64748B);color:#fff;font-size:10.5px;font-weight:700;line-height:1;
   box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
-.sk-pin-open{flex:1;min-width:0;display:grid;gap:1px;padding:0;border:0;background:none;color:inherit;text-align:start;cursor:pointer}
+.sk-pin-open{flex:1;min-width:0;display:grid;gap:1px;padding:0;text-align:start}
 .sk-pin-marquee{display:block;min-width:0;overflow:hidden}
 .sk-pin-title{display:block;font-size:12.5px;font-weight:600;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* 只有真的放不下时才在悬停时切成跑马灯；静止状态保持干净的省略号。 */
@@ -4914,8 +4921,8 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     /**
-     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话：正在跑或正在等你
-     * 回答的任务交给悬浮面板，避免同一张卡同时说两件事。审批只来自勾选（task.accept）。
+     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话。卡片一旦出现就留到
+     * 用户点对号：会话又跑起来也不会把它撤掉，否则点进会话就看不到它了。
      */
     function floatingReview(tasks, statuses, now = Date.now()) {
       const rows = [];
@@ -4924,10 +4931,6 @@ button.sk-task-row-main{cursor:pointer}
         const review = task.review;
         if (!review?.sessionId || isAccepted(task)) continue;
         const projected = withSessionStatus(task, statuses, now);
-        // 新的一轮或待回答请求已经接管这张卡；上一轮的待审批先让位。
-        const running = projected.runningSessionIds?.length ||
-          (projected.sessionContext?.isLive ? projected.sessionContext.sessionId : null);
-        if (running || projected.pendingSessions?.length) continue;
         const folder = projected.workspaceTitle || projected.projectName || "";
         rows.push({ kind: "review", task: projected, scope: taskScopeLabel(projected), folder,
           folderSeed: projected.workspaceId || folder || projected.id,
@@ -4965,15 +4968,27 @@ button.sk-task-row-main{cursor:pointer}
       return h("div", { ref: stack, className: "sk-pin-stack", role: "group", "aria-label": "待审批任务" },
         visible.map((row) => {
           const busy = busyId === row.task.id;
-          return h("article", { key: row.task.id, className: "sk-pin-card is-review" },
+          // 整张卡就是打开会话的按钮；对号是卡内的独立控件，点它只验收。
+          return h("article", {
+            key: row.task.id, className: "sk-pin-card is-review", role: "button", tabIndex: 0,
+            title: "打开对应会话", "aria-label": `打开会话：${row.task.title}`,
+            onClick: (event) => {
+              if (event?.target?.closest?.(".sk-pin-check")) return;
+              onOpen(row);
+            },
+            onKeyDown: (event) => {
+              if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+              event.preventDefault();
+              onOpen(row);
+            },
+          },
             h("span", { className: "sk-pin-avatar", style: { "--sk-folder": folderColor(row.folderSeed) },
               "aria-hidden": "true" }, folderGlyph(row.folder)),
-            h("button", { type: "button", className: "sk-pin-open", title: "打开对应会话",
-              "aria-label": `打开会话：${row.task.title}`, onClick: () => onOpen(row) },
+            h("span", { className: "sk-pin-open" },
               h("span", { className: "sk-pin-marquee", "data-marquee": "" },
                 h("span", { className: "sk-pin-title" }, row.task.title)),
               h("span", { className: "sk-pin-meta" }, [row.scope, relTime(row.at)].filter(Boolean).join(" · "))),
-            h("button", { type: "button", className: "sk-pin-check", disabled: Boolean(busyId || error),
+            h("button", { type: "button", className: "sk-pin-check", disabled: Boolean(busyId || error || row.task.pendingSessions?.length),
               title: "确认完成", "aria-label": `确认完成：${row.task.title}`,
               onClick: (event) => { event.stopPropagation(); onAccept(row.task); } },
               busy ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 13 })));

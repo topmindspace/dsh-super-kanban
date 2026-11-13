@@ -858,7 +858,7 @@ test("folder badges keep a stable colour and a readable initial", () => {
   assert.ok(spread.size >= 5, "a handful of workspaces should not collapse onto one colour");
 });
 
-test("floating review pins only finished turns, never running or waiting work", () => {
+test("a review card stays until approved even if the session runs again", () => {
   const { plugin } = loadClient({}, { inspect: true });
   const now = Date.now();
   const task = (id, fields = {}) => ({ id, title: id, status: "in_progress", primarySessionId: id, origin: "auto",
@@ -876,13 +876,18 @@ test("floating review pins only finished turns, never running or waiting work", 
     ["pending", { pendingInteraction: { kind: "approval" } }],
   ]);
   const rows = plugin.floatingReview(items, statuses, now);
+  // A new turn or a pending request does not retract the finished-turn card;
+  // only approval (done + user) or archival keeps it off the strip.
   assert.deepEqual(Array.from(rows, (row) => [row.kind, row.task.id]), [
-    ["review", "review-new"], ["review", "review-old"],
+    ["review", "review-new"], ["review", "pending"], ["review", "running"], ["review", "review-old"],
   ]);
-  assert.deepEqual(Array.from(rows, (row) => row.sessionId), ["review-new", "review-old"]);
-  // The running turn owns the "running" card, the approval request owns the
-  // "pending" one; neither should float a finished-turn notice at the same time.
-  assert.ok(!rows.some((row) => ["running", "pending", "accepted", "archived"].includes(row.task.id)));
+  assert.deepEqual(Array.from(rows, (row) => row.sessionId),
+    ["review-new", "pending", "running", "review-old"]);
+  assert.ok(!rows.some((row) => ["accepted", "archived"].includes(row.task.id)));
+  const running = rows.find((row) => row.task.id === "running").task;
+  assert.equal(plugin.canAcceptTask(running), true, "a finished turn can be approved while a new turn runs");
+  const waiting = rows.find((row) => row.task.id === "pending").task;
+  assert.equal(plugin.canAcceptTask(waiting), false, "a pending interaction still owns the accept guard");
 });
 
 test("a finished turn stays pinned until its hover check mark is clicked", async () => {
