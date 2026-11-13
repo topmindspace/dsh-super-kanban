@@ -45,6 +45,7 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
   };
   const script = inspect ? source.replace("return { apply, inject:",
     "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, floatingReview, canAcceptTask, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
+    "folderGlyph, folderColor, " +
     "markdownBlocks, renderInline, taskChatReference, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
@@ -845,6 +846,17 @@ test("the inbox distinguishes a failed turn from a running retry", () => {
 /* ------------------------------------------------------------------ */
 /* Review strip pinned above the launcher                              */
 /* ------------------------------------------------------------------ */
+
+test("folder badges keep a stable colour and a readable initial", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  assert.equal(plugin.folderGlyph("产品文档"), "产");
+  assert.equal(plugin.folderGlyph("data-pipeline"), "D");
+  assert.equal(plugin.folderGlyph(""), "任");
+  assert.equal(plugin.folderColor("ws_alpha"), plugin.folderColor("ws_alpha"));
+  assert.match(plugin.folderColor("ws_alpha"), /^#[0-9A-F]{6}$/);
+  const spread = new Set(Array.from({ length: 12 }, (_, index) => plugin.folderColor(`ws_${index}`)));
+  assert.ok(spread.size >= 5, "a handful of workspaces should not collapse onto one colour");
+});
 
 test("floating review pins only finished turns, never running or waiting work", () => {
   const { plugin } = loadClient({}, { inspect: true });
