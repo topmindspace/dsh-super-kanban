@@ -34,7 +34,7 @@ window.__ModuleLoader__.load({
     // 悬浮入口上方的待审批条：只收刚结束、还没点头的会话。
     const REVIEW_STRIP_LIMIT = 3;
     // 文件夹圆标的固定调色板：按工作区 id 稳定取色，超出后循环。
-    const FOLDER_COLORS = ["#2563EB", "#7C3AED", "#0F766E", "#B45309", "#BE123C", "#4338CA", "#0369A1", "#15803D"];
+    const FOLDER_COLORS = ["#2563EB", "#7C3AED", "#0F766E", "#B45309", "#BE123C", "#A21CAF", "#A16207", "#15803D"];
 
     function folderGlyph(name) {
       const first = Array.from(String(name || "").trim())[0];
@@ -221,13 +221,8 @@ window.__ModuleLoader__.load({
     }
 
     function canAcceptTask(task, artifact = primaryArtifactOf(artifactsOf(task))) {
-      if (task.archived) return false;
-      if (isAccepted(task)) return true;
-      if (task.pendingSessions?.length) return false;
-      // 待审批卡代表已经结束的那一轮：会话又跑起来也不妨碍点头，点进会话才不会白等。
-      if (task.review?.sessionId) return true;
-      return !taskRunningLabel(task) &&
-        Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done");
+      return !task.archived && (isAccepted(task) || (!task.pendingSessions?.length && !taskRunningLabel(task) &&
+        Boolean(task.acceptanceCriteria || artifact?.kind === "deliverable" || task.status === "done" || task.review?.sessionId)));
     }
 
     function taskActivityAt(task) {
@@ -4921,16 +4916,20 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     /**
-     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话。卡片一旦出现就留到
-     * 用户点对号：会话又跑起来也不会把它撤掉，否则点进会话就看不到它了。
+     * 悬浮入口上方的待审批条。只收「刚结束、还没点头」的会话：正在跑、正在等你
+     * 回答、或者就是你当前打开的那条会话，都先让位，切走或闲下来再回来。
      */
-    function floatingReview(tasks, statuses, now = Date.now()) {
+    function floatingReview(tasks, statuses, now = Date.now(), currentSessionId = "") {
       const rows = [];
       for (const task of tasks || []) {
         if (!task || task.archived) continue;
         const review = task.review;
         if (!review?.sessionId || isAccepted(task)) continue;
+        if (currentSessionId && review.sessionId === currentSessionId) continue;
         const projected = withSessionStatus(task, statuses, now);
+        const running = projected.runningSessionIds?.length ||
+          (projected.sessionContext?.isLive ? projected.sessionContext.sessionId : null);
+        if (running || projected.pendingSessions?.length) continue;
         const folder = projected.workspaceTitle || projected.projectName || "";
         rows.push({ kind: "review", task: projected, scope: taskScopeLabel(projected), folder,
           folderSeed: projected.workspaceId || folder || projected.id,
@@ -4971,7 +4970,8 @@ button.sk-task-row-main{cursor:pointer}
           // 整张卡就是打开会话的按钮；对号是卡内的独立控件，点它只验收。
           return h("article", {
             key: row.task.id, className: "sk-pin-card is-review", role: "button", tabIndex: 0,
-            title: "打开对应会话", "aria-label": `打开会话：${row.task.title}`,
+            title: [row.folder, row.task.title].filter(Boolean).join(" · ") || "打开会话",
+            "aria-label": `打开会话：${row.task.title}`,
             onClick: (event) => {
               if (event?.target?.closest?.(".sk-pin-check")) return;
               onOpen(row);
@@ -4986,9 +4986,9 @@ button.sk-task-row-main{cursor:pointer}
               "aria-hidden": "true" }, folderGlyph(row.folder)),
             h("span", { className: "sk-pin-open" },
               h("span", { className: "sk-pin-marquee", "data-marquee": "" },
-                h("span", { className: "sk-pin-title" }, row.task.title)),
-              h("span", { className: "sk-pin-meta" }, [row.scope, relTime(row.at)].filter(Boolean).join(" · "))),
-            h("button", { type: "button", className: "sk-pin-check", disabled: Boolean(busyId || error || row.task.pendingSessions?.length),
+                h("span", { className: "sk-pin-title" }, row.folder || row.task.title)),
+              h("span", { className: "sk-pin-meta" }, relTime(row.at))),
+            h("button", { type: "button", className: "sk-pin-check", disabled: Boolean(busyId || error),
               title: "确认完成", "aria-label": `确认完成：${row.task.title}`,
               onClick: (event) => { event.stopPropagation(); onAccept(row.task); } },
               busy ? h("span", { className: "sk-pin-spin" }) : h(Icon, { name: "check", size: 13 })));
@@ -5063,7 +5063,21 @@ button.sk-task-row-main{cursor:pointer}
       }, [data?.tasks, data?.projects]);
       const summary = React.useMemo(() => floatingSummary(tasks, sessionStatuses, data?.settings?.initialDays, now),
         [tasks, sessionStatuses, data?.settings?.initialDays, now]);
-      const reviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now), [tasks, sessionStatuses, now]);
+      // 当前打开的会话：它自己的待审批卡先收起，切到别的会话再露出来。
+      const [currentSessionId, setCurrentSessionId] = React.useState(() => host.currentSession?.() || "");
+      const currentSessionGrace = React.useRef(0);
+      React.useEffect(() => {
+        const sync = () => {
+          if (Date.now() < currentSessionGrace.current) return;
+          const id = host.currentSession?.() || "";
+          setCurrentSessionId((previous) => (previous === id ? previous : id));
+        };
+        sync();
+        const timer = setInterval(sync, 600);
+        return () => clearInterval(timer);
+      }, [host]);
+      const reviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now, currentSessionId),
+        [tasks, sessionStatuses, now, currentSessionId]);
       const [stripExpanded, setStripExpanded] = React.useState(false);
       React.useEffect(() => {
         if (!reviews.length) setStripExpanded(false);
@@ -5336,7 +5350,11 @@ button.sk-task-row-main{cursor:pointer}
       const strip = showTrigger && dialogs === 0 && reviews.length
         ? h(ReviewStrip, {
             rows: reviews, busyId, error: Boolean(error), expanded: stripExpanded, message,
-            onOpen: (row) => navigate(host.openSession, row.sessionId),
+            onOpen: (row) => {
+              currentSessionGrace.current = Date.now() + 1500;
+              setCurrentSessionId(row.sessionId);
+              navigate(host.openSession, row.sessionId);
+            },
             onAccept: (task) => accept(task, "已确认完成"),
             onExpand: () => setStripExpanded((value) => !value),
           })

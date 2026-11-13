@@ -858,7 +858,7 @@ test("folder badges keep a stable colour and a readable initial", () => {
   assert.ok(spread.size >= 5, "a handful of workspaces should not collapse onto one colour");
 });
 
-test("a review card stays until approved even if the session runs again", () => {
+test("a review card hides while its session runs or waits, and for the open session", () => {
   const { plugin } = loadClient({}, { inspect: true });
   const now = Date.now();
   const task = (id, fields = {}) => ({ id, title: id, status: "in_progress", primarySessionId: id, origin: "auto",
@@ -876,18 +876,17 @@ test("a review card stays until approved even if the session runs again", () => 
     ["pending", { pendingInteraction: { kind: "approval" } }],
   ]);
   const rows = plugin.floatingReview(items, statuses, now);
-  // A new turn or a pending request does not retract the finished-turn card;
-  // only approval (done + user) or archival keeps it off the strip.
   assert.deepEqual(Array.from(rows, (row) => [row.kind, row.task.id]), [
-    ["review", "review-new"], ["review", "pending"], ["review", "running"], ["review", "review-old"],
+    ["review", "review-new"], ["review", "review-old"],
   ]);
-  assert.deepEqual(Array.from(rows, (row) => row.sessionId),
-    ["review-new", "pending", "running", "review-old"]);
-  assert.ok(!rows.some((row) => ["accepted", "archived"].includes(row.task.id)));
-  const running = rows.find((row) => row.task.id === "running").task;
-  assert.equal(plugin.canAcceptTask(running), true, "a finished turn can be approved while a new turn runs");
-  const waiting = rows.find((row) => row.task.id === "pending").task;
-  assert.equal(plugin.canAcceptTask(waiting), false, "a pending interaction still owns the accept guard");
+  assert.deepEqual(Array.from(rows, (row) => row.sessionId), ["review-new", "review-old"]);
+  assert.ok(!rows.some((row) => ["running", "pending", "accepted", "archived"].includes(row.task.id)));
+  // The card of the conversation you are viewing hides too, and comes back
+  // as soon as the open session is something else.
+  const other = plugin.floatingReview(items, statuses, now, "review-new");
+  assert.deepEqual(Array.from(other, (row) => row.task.id), ["review-old"]);
+  const away = plugin.floatingReview(items, statuses, now, "elsewhere");
+  assert.deepEqual(Array.from(away, (row) => row.task.id), ["review-new", "review-old"]);
 });
 
 test("a finished turn stays pinned until its hover check mark is clicked", async () => {
@@ -912,8 +911,9 @@ test("a finished turn stays pinned until its hover check mark is clicked", async
   const stripElement = [...elements(rendered)].find((node) => node.type?.name === "ReviewStrip");
   assert.ok(stripElement, "the strip is pinned above the launcher");
   const strip = stripElement.type(stripElement.props);
-  assert.match(renderedText(strip), /生成本周周报.*数据管道 · (刚刚|\d+ 分钟前)/);
-  assert.doesNotMatch(renderedText(strip), /待审批|已完成|本轮结束/);
+  assert.match(renderedText(strip), /数据管道/);
+  assert.match(renderedText(strip), /(刚刚|\d+ 分钟前)/);
+  assert.doesNotMatch(renderedText(strip), /生成本周周报|待审批|已完成|本轮结束/);
   const check = [...elements(strip)].find((node) => node.props?.["aria-label"] === "确认完成：生成本周周报");
   assert.ok(check, "the check mark is present (revealed by hover in CSS)");
   await check.props.onClick({ stopPropagation() {} });
