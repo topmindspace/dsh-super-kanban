@@ -9,6 +9,7 @@ test("legacy text projection changes descriptions without changing task authorit
   const task = {
     id: "t_opaque", title: "旧标题", origin: "auto", status: "done", progress: 100,
     goal: { text: "旧目标", source: "session", status: "done" },
+    ai: { reason: "旧标题", engine: "ai", confidence: 0.9, analyzedAt: "2028-01-01" },
     lockedFields: ["status"], review: { seq: 4 }, completionBasis: "session_goal",
     sessions: [{ id: "s1", title: "旧标题" }], parentId: "t_parent", projectId: "p1",
     artifacts: [{ path: "旧标题", description: "旧标题" }],
@@ -20,6 +21,10 @@ test("legacy text projection changes descriptions without changing task authorit
   const result = projectTaskText(task, { "旧标题": "Legacy title", "旧目标": "Legacy goal" });
   assert.equal(result.title, "Legacy title");
   assert.equal(result.goal.text, "Legacy goal");
+  assert.equal(result.ai.reason, "Legacy title");
+  assert.equal(result.ai.engine, "ai");
+  assert.equal(result.ai.confidence, 0.9);
+  assert.equal(result.ai.analyzedAt, "2028-01-01");
   assert.equal(result.subtasks[0].text, "Legacy title");
   assert.equal(result.history[0].note, "Legacy title");
   for (const key of ["id", "origin", "status", "progress", "lockedFields", "review", "completionBasis", "sessions", "parentId", "projectId", "artifacts", "evidence"]) assert.deepEqual(result[key], before[key], key);

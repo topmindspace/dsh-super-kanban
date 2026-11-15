@@ -17,6 +17,7 @@ export function projectTaskText(task, messages) {
   const result = { ...task };
   for (const field of TEXT_FIELDS) if (typeof task[field] === "string") result[field] = translate(task[field]);
   if (task.goal && typeof task.goal === "object") result.goal = { ...task.goal, text: translate(task.goal.text) };
+  if (task.ai && typeof task.ai === "object") result.ai = { ...task.ai, reason: translate(task.ai.reason) };
   for (const field of ["tags", "nextSteps"]) if (Array.isArray(task[field])) result[field] = task[field].map(translate);
   for (const field of RECORD_FIELDS) if (Array.isArray(task[field])) {
     result[field] = task[field].map((item) => item && typeof item === "object" ? { ...item, text: translate(item.text) } : translate(item));
