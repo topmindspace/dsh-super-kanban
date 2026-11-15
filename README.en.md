@@ -98,4 +98,8 @@ Requires DSH `>= 0.2.1-rc.5 < 0.3.0` and Node.js `>= 22.19.0` (bundled with DSH)
 
 Run `npm run check` for tests and validation. Please report security issues privately as described in the security policy.
 
+## Contributors
+
+- [@mufanmu](https://github.com/mufanmu) added the finished-turn review strip above the floating launcher in [PR #3](https://github.com/topmindspace/dsh-super-kanban/pull/3). The same author explained why automatic task titles stayed on the “session + id” placeholder in [issue #4](https://github.com/topmindspace/dsh-super-kanban/issues/4). The title-update code is in the maintainer's [PR #6](https://github.com/topmindspace/dsh-super-kanban/pull/6).
+
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace

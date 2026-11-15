@@ -98,4 +98,8 @@
 
 运行 `npm run check` 执行测试和校验。安全问题请按安全说明私下报告。
 
+## 贡献者
+
+- [@mufanmu](https://github.com/mufanmu) 在 [PR #3](https://github.com/topmindspace/dsh-super-kanban/pull/3) 为悬浮入口增加了已结束轮次的审阅条。同一作者在 [issue #4](https://github.com/topmindspace/dsh-super-kanban/issues/4) 说明了自动任务标题停留在「会话 + id」占位符的原因；标题更新的代码在维护者的 [PR #6](https://github.com/topmindspace/dsh-super-kanban/pull/6)。
+
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace
