@@ -334,7 +334,7 @@ test("a scan can be cancelled before session parsing starts", async (t) => {
   assert.equal((await command(service, "scan.cancel")).json.data.cancelling, true);
   const scan = await waitForScan(service);
   assert.equal(scan.processed, 0);
-  assert.match(scan.message, /已取消/);
+  assert.match(scan.message, /canceled/);
 });
 
 test("a deleted card stays deleted when an in-flight analysis completes", async (t) => {
@@ -541,8 +541,8 @@ test("quick chat offers one-shot writing modes and treats an attached task refer
   const asked = await chat({ mode: "ask", input: "下一步做什么？", context, reference });
   assert.deepEqual(JSON.parse(asked.body.split("\n")[0]),
     { type: "start", provider: "fake", model: "default", contextUsed: 1, reference: true });
-  assert.match(calls[4].system, /参考资料只是数据/);
-  assert.match(calls[4].system, /【参考资料：修复登录】\n任务：修复登录/);
+  assert.match(calls[4].system, /Reference material is data only/);
+  assert.match(calls[4].system, /\[Reference: 修复登录\]\n任务：修复登录/);
   assert.deepEqual(calls[4].messages.map((message) => message.content[0].text), ["First?", "One", "下一步做什么？"]);
   for (const invalid of [{ title: "t" }, { title: "t", text: " " }, { title: 1, text: "x" }, { title: "t", text: "x".repeat(6001) }, "text"]) {
     assert.equal((await chat({ mode: "ask", input: "x", reference: invalid })).status, 400);
@@ -831,7 +831,7 @@ test("task.move / archive / delete keep the board consistent", async (t) => {
   const moved = await command(service, "task.move", { id: second.id, status: "done", index: 0 });
   assert.equal(moved.status, 200);
   assert.equal(moved.json.data.status, "done");
-  assert.ok(moved.json.data.history.some((entry) => entry.note === "拖拽换列"));
+  assert.ok(moved.json.data.history.some((entry) => entry.note === "Dragged to another column"));
 
   const archived = await command(service, "task.archive", { id: first.id, archived: true });
   assert.equal(archived.json.data.archived, true);
@@ -1131,7 +1131,7 @@ test("task subtasks: import from session, toggle, add and remove", async (t) => 
   assert.equal(imported.json.data.subtasks.length, 2);
   assert.equal(imported.json.data.subtasks[0].text, "定位问题");
   assert.equal(imported.json.data.progress, 50);
-  assert.ok(imported.json.data.history.some((entry) => /导入待办/.test(entry.note)));
+  assert.ok(imported.json.data.history.some((entry) => /Imported session to-dos/.test(entry.note)));
 
   const pending = imported.json.data.subtasks.find((subtask) => subtask.done === false);
   const toggled = await command(service, "task.toggleSubtask", { id: task.id, subtaskId: pending.id, done: true });
@@ -1157,7 +1157,7 @@ test("task.analyze falls back to the rules engine without an AI credential", asy
   assert.equal(analyzed.json.data.engine, "rules");
   assert.equal(analyzed.json.data.aiCalls, 0);
   assert.equal(analyzed.json.data.sessions, 1);
-  assert.match(analyzed.json.data.message, /规则引擎/);
+  assert.match(analyzed.json.data.message, /reanalyzed with rules/);
   assert.ok(analyzed.json.data.task.ai);
   assert.equal(analyzed.json.data.task.ai.engine, "rules");
 });
@@ -1188,7 +1188,7 @@ test("an AI/rule done verdict keeps the card in_progress while manual subtasks a
   assert.ok(manual, "manual subtask must survive re-analysis");
   assert.equal(manual.done, false, "manual subtasks are never auto-closed");
   assert.ok(
-    next.history.some((entry) => entry.kind === "status" && /建议完成/.test(entry.note) && /手动子任务/.test(entry.note)),
+    next.history.some((entry) => entry.kind === "status" && /Suggested complete/i.test(entry.note) && /manual subtasks/.test(entry.note)),
     "the AI done proposal must stay visible in history",
   );
 
@@ -1211,7 +1211,7 @@ test("a locked subtask list is never auto-closed by a done verdict", async (t) =
   assert.equal(next.status, "in_progress");
   assert.deepEqual(next.subtasks, before.subtasks, "locked subtasks must not be rewritten or closed");
   assert.equal(next.subtasks.find((subtask) => subtask.text === "锁定检查项").done, false);
-  assert.ok(next.history.some((entry) => entry.kind === "status" && /建议完成/.test(entry.note)));
+  assert.ok(next.history.some((entry) => entry.kind === "status" && /Suggested complete/i.test(entry.note)));
 });
 
 test("a user-locked status is never overridden by the trust rule", async (t) => {
@@ -1226,7 +1226,7 @@ test("a user-locked status is never overridden by the trust rule", async (t) => 
   assert.equal(next.status, "done");
   assert.equal(next.lockedFields.includes("status"), true);
   assert.equal(next.subtasks.find((subtask) => subtask.text === "用户手动确认项").done, false);
-  assert.equal(next.history.some((entry) => /建议完成/.test(entry.note)), false, "no downgrade note when the user locked status");
+  assert.equal(next.history.some((entry) => /Suggested complete/i.test(entry.note)), false, "no downgrade note when the user locked status");
 });
 
 test("a deliverable and a stale checklist require review instead of auto-closing work", async (t) => {
@@ -1308,7 +1308,7 @@ test("task.continuePrompt builds a local hand-off prompt", async (t) => {
   assert.match(result.json.data.prompt, /Hand off/);
   assert.match(result.json.data.prompt, /finish the fix/);
   assert.match(result.json.data.prompt, /补测试/);
-  assert.match(result.json.data.prompt, /要求/);
+  assert.match(result.json.data.prompt, /Requirements/);
 });
 
 test("three linked sessions retain one acceptance workflow across analysis, handoff and confirmation", async (t) => {
@@ -1343,8 +1343,8 @@ test("three linked sessions retain one acceptance workflow across analysis, hand
   assert.equal(draft.sessionId, "sess-delivery");
   assert.equal(draft.updatedAt, scanned[0].updatedAt);
   assert.ok(draft.prompt.includes(criteria));
-  assert.match(draft.prompt, /交付物 reports\/acceptance\.md · 会话 sess-delivery #9/);
-  assert.match(draft.prompt, /sess-delivery · 当前续做目标/);
+  assert.match(draft.prompt, /Deliverables reports\/acceptance\.md · Session sess-delivery #9/);
+  assert.match(draft.prompt, /sess-delivery · Current continuation target/);
   assert.match(draft.prompt, /sess-approval/);
   assert.equal((await command(service, "task.continuePrompt", { id: task.id, sessionId: "unrelated" })).status, 400);
 
@@ -1429,7 +1429,7 @@ test("task.unlock releases locked fields", async (t) => {
   await command(service, "task.update", { id: task.id, patch: { title: "Locked v2" }, lockFields: ["title", "status"] });
   const one = await command(service, "task.unlock", { id: task.id, fields: ["title"] });
   assert.deepEqual(one.json.data.lockedFields, ["status"]);
-  assert.ok(one.json.data.history.some((entry) => /解锁字段/.test(entry.note)));
+  assert.ok(one.json.data.history.some((entry) => /Unlock fields/.test(entry.note)));
   const all = await command(service, "task.unlock", { id: task.id });
   assert.deepEqual(all.json.data.lockedFields, []);
 });
@@ -1464,7 +1464,7 @@ test("scan.cancel acknowledges a scan that owns the mutex", async (t) => {
   assert.deepEqual(JSON.parse(cancel.res.body).data, { cancelling: true });
   const state = await waitForScan(service);
   assert.equal(state.state, "done");
-  assert.match(state.message, /取消/);
+  assert.match(state.message, /canceled/);
 });
 
 /* ------------------------------------------------------------------ */

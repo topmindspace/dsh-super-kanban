@@ -11,7 +11,11 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
   let nextId = 0;
   const React = {
     Component: class {},
-    createElement(type, props, ...children) { return { type, props, children }; },
+    createElement(type, props, ...children) {
+      if (["LocaleBoundary", "HeaderEntry"].includes(type?.name)) return type(props);
+      return { type, props, children };
+    },
+    useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot(); },
     useState(initial) {
       // Seed the initial /state result without mounting polling or DOM effects.
       if (nextState && initial === nextState.initial) {
@@ -45,11 +49,11 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
   };
   const script = inspect ? source.replace("return { apply, inject:",
     "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, floatingReview, canAcceptTask, canAcceptReview, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
-    "folderGlyph, folderColor, " +
+    "folderGlyph, folderColor, t, STATUS_META, FLOAT_TABS, displayLocale, " +
     "markdownBlocks, renderInline, taskChatReference, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
-    get: (name) => services[name],
+    get: (name) => name === "locale" ? services.locale || { getSnapshot: () => ({ active: "zh" }) } : services[name],
     effect() { /* no DOM in the contract test */ },
     sidebarRightTabs: { register() {} },
     slots: {
@@ -1086,4 +1090,26 @@ test("more than three pinned cards collapse behind a count and expand in place",
   const expanded = stripElement.type({ ...stripElement.props, expanded: true });
   assert.equal(cards(expanded).length, 5);
   assert.ok([...elements(expanded)].some((node) => renderedText(node) === "收起"));
+});
+
+test("English follows native locale and static label tables update after a language switch", () => {
+  let active = "en";
+  const locale = { getSnapshot: () => ({ active }) };
+  const { plugin, registrations } = loadClient({ locale }, { inspect: true, snapshot: { tasks: [] } });
+  assert.equal(plugin.t("任务看板"), "Task board");
+  assert.equal(plugin.STATUS_META.done.label, "Done");
+  assert.equal(plugin.FLOAT_TABS.acceptance, "Awaiting review");
+  assert.equal(plugin.displayLocale(), "en");
+  assert.equal(registrations.get("sidebar.panellist").config.label(), "Task board");
+  const root = registrations.get("main").render({}).children[0];
+  const view = root.type(root.props);
+  assert.doesNotMatch(renderedText(view), /\p{Script=Han}/u);
+  assert.match(renderedText(view), /Task board/);
+  active = "zh";
+  assert.equal(plugin.STATUS_META.done.label, "已完成");
+  assert.equal(plugin.FLOAT_TABS.acceptance, "待验收");
+  assert.equal(registrations.get("sidebar.panellist").config.label(), "任务看板");
+  assert.equal(plugin.displayLocale(), "zh-CN");
+  active = "ru";
+  assert.equal(plugin.STATUS_META.done.label, "Done");
 });

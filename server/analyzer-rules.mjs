@@ -1,3 +1,4 @@
+import { t } from "./i18n.mjs";
 /**
  * Super Kanban — zero-dependency rules analyzer.
  *
@@ -42,12 +43,12 @@ const NEGATIVE_PATTERNS = [
 const STRONG_NEGATIVE = [/还是不行/, /报错/, /失败/, /不对/, /坏了/, /崩了/, /无法/, /回滚/];
 
 const TAG_RULES = [
-  { tag: "开发", keywords: [/代码/, /开发/, /插件/, /修复/, /bug/i, /重构/, /脚本/, /python/i, /node/i, /typescript/i, /api/i, /前端/, /后端/, /测试/, /部署/i, /database/i] },
-  { tag: "文档整理", keywords: [/文档/, /readme/i, /索引/, /整理/, /链接/, /路径/, /目录/, /归档/, /规范/, /说明/, /markdown/i] },
-  { tag: "视觉设计", keywords: [/svg/i, /动画/, /截图/, /视觉/, /设计/, /图片/, /海报/, /封面/, /配色/, /ui/i, /样式/, /长图/, /排版/] },
-  { tag: "内容创作", keywords: [/文案/, /文章/, /公众号/, /推文/, /写作/, /标题/, /故事/, /脚本创作/, /书评/, /创作/] },
-  { tag: "调研", keywords: [/调研/, /研究/, /收集/, /搜索/, /论文/, /对比/, /分析/, /选型/] },
-  { tag: "数据处理", keywords: [/数据/, /表格/, /csv/i, /excel/i, /统计/, /压缩/, /爬取/] },
+  { tag: t("开发"), keywords: [/代码/, /开发/, /插件/, /修复/, /bug/i, /重构/, /脚本/, /python/i, /node/i, /typescript/i, /api/i, /前端/, /后端/, /测试/, /部署/i, /database/i] },
+  { tag: t("文档整理"), keywords: [/文档/, /readme/i, /索引/, /整理/, /链接/, /路径/, /目录/, /归档/, /规范/, /说明/, /markdown/i] },
+  { tag: t("视觉设计"), keywords: [/svg/i, /动画/, /截图/, /视觉/, /设计/, /图片/, /海报/, /封面/, /配色/, /ui/i, /样式/, /长图/, /排版/] },
+  { tag: t("内容创作"), keywords: [/文案/, /文章/, /公众号/, /推文/, /写作/, /标题/, /故事/, /脚本创作/, /书评/, /创作/] },
+  { tag: t("调研"), keywords: [/调研/, /研究/, /收集/, /搜索/, /论文/, /对比/, /分析/, /选型/] },
+  { tag: t("数据处理"), keywords: [/数据/, /表格/, /csv/i, /excel/i, /统计/, /压缩/, /爬取/] },
 ];
 
 function clamp(value, min, max) {
@@ -168,36 +169,36 @@ function inferStatus(parsed) {
   const requestsDecision = /(?:请(?:先)?(?:确认|选择|提供|告知|决定)|等待(?:你|用户)(?:确认|选择|回复)|(?:please|could you) (?:confirm|choose|provide|clarify))/i.test(latestReply.slice(-600));
   if (parsed.isLive) {
     status = "in_progress";
-    reason = "会话仍在进行中（最后一轮尚未结束）";
+    reason = t("会话仍在进行中（最后一轮尚未结束）");
   } else if (!lastTurnEnd) {
     status = daysIdle > 14 ? "backlog" : "in_progress";
-    reason = daysIdle > 14 ? "会话没有结束标记且已多日无活动" : "会话没有完整的轮次结束标记";
+    reason = daysIdle > 14 ? t("会话没有结束标记且已多日无活动") : t("会话没有完整的轮次结束标记");
   } else if (lastTurnEnd.kind === "error") {
     status = "blocked";
-    reason = "最后一轮以错误结束";
+    reason = t("最后一轮以错误结束");
   } else if (lastTurnEnd.kind === "aborted" || lastTurnEnd.kind === "interrupted") {
     status = daysIdle > 7 ? "backlog" : "in_progress";
-    reason = daysIdle > 7 ? "最后一轮被中止且已多日无活动" : "最后一轮被中止";
+    reason = daysIdle > 7 ? t("最后一轮被中止且已多日无活动") : t("最后一轮被中止");
     attention = "interrupted";
   } else if (requestsDecision) {
     status = "in_progress";
     attention = "waiting_user";
-    reason = "最近回复请求用户确认或提供信息";
+    reason = t("最近回复请求用户确认或提供信息");
   } else if (todoFresh && pendingTodos > 0) {
     status = "in_progress";
-    reason = `最新待办仍有 ${pendingTodos} 项未完成`;
+    reason = t("最新待办仍有 {0} 项未完成", [pendingTodos]);
   } else if (lastTurnEnd.kind === "completed" && parsed.goal?.status === "done") {
     status = "done";
     completionBasis = "session_goal";
-    reason = "DSH 会话目标已标记完成";
+    reason = t("DSH 会话目标已标记完成");
   } else if (lastTurnEnd.kind === "completed" && todoFresh && todoCounts.total > 0 && pendingTodos === 0) {
     status = "done";
     completionBasis = "session_todos";
-    reason = "最新待办全部完成且本轮正常结束";
+    reason = t("最新待办全部完成且本轮正常结束");
   } else {
     status = "in_progress";
     attention = "review";
-    reason = parsed.deliverables.length ? "已有交付物，等待验收" : "本轮已结束，任务完成情况待确认";
+    reason = parsed.deliverables.length ? t("已有交付物，等待验收") : t("本轮已结束，任务完成情况待确认");
   }
   return {
     status,
@@ -245,7 +246,7 @@ function negativeFeedbackIssues(parsed, decision, limit = 3) {
     const strong = STRONG_NEGATIVE.some((pattern) => pattern.test(text));
     if (!strong && text.length > 120) continue;
     issues.push({
-      text: clip(`用户反馈：${text}`, 140),
+      text: clip(t("用户反馈：{0}", [text]), 140),
       severity: strong ? "high" : message.seq === lastSeq ? "medium" : "low",
       seq: message.seq,
     });
@@ -268,7 +269,7 @@ function errorIssues(parsed, decision, limit = 4) {
     if (seen.has(key)) continue;
     seen.add(key);
     issues.push({
-      text: clip(`执行错误：${text}`, 140),
+      text: clip(t("执行错误：{0}", [text]), 140),
       severity: error.source === "turn" ? "high" : "medium",
       seq: error.seq,
     });
@@ -287,10 +288,10 @@ function buildNextSteps(parsed, decision) {
   }
   if (steps.length === 0 && decision.status === "blocked") {
     const error = [...parsed.errors].reverse().find((item) => item.source === "turn") || parsed.errors.at(-1);
-    if (error) steps.push(`排查并修复错误：${clip(String(error.text).replace(/\s+/g, " "), 100)}`);
+    if (error) steps.push(t("排查并修复错误：{0}", [clip(String(error.text).replace(/\s+/g, " "), 100)]));
   }
   if (steps.length === 0 && decision.status === "in_progress") {
-    steps.push(parsed.isLive ? "完成当前轮次并向用户同步进展" : "继续推进当前工作并向用户同步进展");
+    steps.push(parsed.isLive ? t("完成当前轮次并向用户同步进展") : t("继续推进当前工作并向用户同步进展"));
   }
   return dedupeStrings(steps, 5);
 }
@@ -309,12 +310,12 @@ function buildReason(parsed, decision) {
   const parts = [decision.reason];
   if (decision.todoCounts.total > 0) {
     parts.push(
-      `待办 ${decision.todoCounts.completed}/${decision.todoCounts.total} 完成${decision.todoFresh ? "" : "（快照较早，仅供参考）"}`,
+      t("待办 {0}/{1} 完成{2}", [decision.todoCounts.completed, decision.todoCounts.total, decision.todoFresh ? "" : t("（快照较早，仅供参考）")]),
     );
   }
-  if (parsed.deliverables.length > 0) parts.push(`${parsed.deliverables.length} 次交付展示`);
-  if (parsed.errors.length > 0) parts.push(`${parsed.errors.length} 处错误记录`);
-  if (parsed.isLive) parts.push("会话活跃");
+  if (parsed.deliverables.length > 0) parts.push(t("{0} 次交付展示", [parsed.deliverables.length]));
+  if (parsed.errors.length > 0) parts.push(t("{0} 处错误记录", [parsed.errors.length]));
+  if (parsed.isLive) parts.push(t("会话活跃"));
   return clip(parts.join("；"), 300);
 }
 
@@ -347,18 +348,18 @@ function buildKeyFacts(parsed, { goalText, subtasks, issues, artifacts, decision
   };
   if (goalText) push("goal", goalText, parsed.users[0]?.seq || 0);
   const done = subtasks.filter((subtask) => subtask.done).length;
-  if (subtasks.length > 0) push("progress", `子任务完成 ${done}/${subtasks.length}`, subtasks[0]?.seq || 0);
+  if (subtasks.length > 0) push("progress", t("子任务完成 {0}/{1}", [done, subtasks.length]), subtasks[0]?.seq || 0);
   for (const issue of issues.slice(0, 2)) push("issue", issue.text, issue.seq);
   if (artifacts.length > 0) {
-    push("artifact", `产出产物 ${artifacts.length} 个：${artifacts.map((item) => item.name).slice(0, 3).join("、")}`, artifacts[0].seq);
+    push("artifact", t("产出产物 {0} 个：{1}", [artifacts.length, artifacts.map((item) => item.name).slice(0, 3).join("、")]), artifacts[0].seq);
   }
   if (decision.lastTodo && subtasks.length === 0) {
     const todos = decision.lastTodo.todos;
     const completed = todos.filter((todo) => todo.status === "completed").length;
-    push("progress", `待办完成 ${completed}/${todos.length}`, decision.lastTodo.seq);
+    push("progress", t("待办完成 {0}/{1}", [completed, todos.length]), decision.lastTodo.seq);
   }
   const lastUser = parsed.users[parsed.users.length - 1];
-  if (lastUser && parsed.users.length > 1) push("decision", `用户最新要求：${lastUser.text}`, lastUser.seq);
+  if (lastUser && parsed.users.length > 1) push("decision", t("用户最新要求：{0}", [lastUser.text]), lastUser.seq);
   if (parsed.lastAssistantText) push("status", parsed.lastAssistantText.text, parsed.lastAssistantText.seq);
   return facts.slice(0, 5);
 }
@@ -372,7 +373,7 @@ function buildKeyFacts(parsed, { goalText, subtasks, issues, artifacts, decision
  */
 export function analyzeSessionRules(parsed, { workspaceTitle = null, workspacePath = null, maxTasks = 3 } = {}) {
   if (!parsed.users.length) {
-    return { engine: "rules", sessionSummary: "无用户消息，跳过", tasks: [] };
+    return { engine: "rules", sessionSummary: t("无用户消息，跳过"), tasks: [] };
   }
   const decision = inferStatus(parsed);
   const status = decision.status;
@@ -440,7 +441,7 @@ export function analyzeSessionRules(parsed, { workspaceTitle = null, workspacePa
   ].slice(0, Math.max(1, maxTasks));
   return {
     engine: "rules",
-    sessionSummary: `${parsed.title}（${status}，${parsed.users.length} 条用户消息）`,
+    sessionSummary: t("{0}（{1}，{2} 条用户消息）", [parsed.title, status, parsed.users.length]),
     tasks,
   };
 }

@@ -294,7 +294,7 @@ test("one provider failure is isolated without exposing its raw diagnostic", asy
     { id: "minimax-cn", name: "MiniMax CN", modelCount: 0 },
   ]);
   assert.deepEqual(json.models, [{ provider: "deepseek-account", id: "deepseek-flash", name: "deepseek-flash" }]);
-  assert.deepEqual(json.failures, [{ provider: "minimax-cn", name: "MiniMax CN", message: "读取模型目录失败" }]);
+  assert.deepEqual(json.failures, [{ provider: "minimax-cn", name: "MiniMax CN", message: "Could not read model catalog" }]);
   assert.doesNotMatch(JSON.stringify(json), /credential unavailable/);
 });
 
@@ -314,7 +314,7 @@ test("a hanging provider is cut off by the catalog timeout without hiding the ot
     { id: "fast", name: "fast", modelCount: 1 },
   ]);
   assert.deepEqual(json.models, [{ provider: "fast", id: "fast-model", name: "fast-model" }]);
-  assert.deepEqual(json.failures, [{ provider: "slow", name: "slow", message: "读取模型目录超时" }]);
+  assert.deepEqual(json.failures, [{ provider: "slow", name: "slow", message: "Model catalog read timed out" }]);
 });
 
 /* ------------------------------------------------------------------ */

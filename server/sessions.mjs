@@ -1,3 +1,4 @@
+import { t } from "./i18n.mjs";
 /**
  * Super Kanban — session source.
  *
@@ -469,16 +470,16 @@ export function buildDigest(
   };
 
   const endKind = parsed.lastTurnEnd?.kind || "none";
-  const goal = parsed.goal?.text ? ` | 目标:${clip(parsed.goal.text, 60)}` : "";
+  const goal = parsed.goal?.text ? t(" | 目标:{0}", [clip(parsed.goal.text, 60)]) : "";
   add(
     "",
-    `会话:${clip(parsed.title, 36)} | 工作区:${workspaceTitle || "?"} | live:${parsed.isLive ? 1 : 0} | turns:${parsed.turnCount} | end:${endKind}${goal}`,
+    t("会话:{0} | 工作区:{1} | live:{2} | turns:{3} | end:{4}{5}", [clip(parsed.title, 36), workspaceTitle || "?", parsed.isLive ? 1 : 0, parsed.turnCount, endKind, goal]),
     260,
   );
   const bound = (Array.isArray(existingTasks) ? existingTasks : [])
     .slice(0, 3)
     .map((task) => `${task.id}「${clip(task.title, 24)}」${task.status}`);
-  if (bound.length) add("已有任务:", bound.join("；"), 160);
+  if (bound.length) add(t("已有任务:"), bound.join("；"), 160);
 
   // Recent-change priority: latest user instruction, latest assistant summary,
   // then todos/errors/tools, then older context.
@@ -491,7 +492,7 @@ export function buildDigest(
   if (lastTodo) {
     const mark = (status) => (status === "completed" ? "[x]" : status === "in_progress" ? "[~]" : "[ ]");
     add(
-      "待办:",
+      t("待办:"),
       lastTodo.todos
         .slice(0, 6)
         .map((todo) => `${mark(todo.status)}${clip(todo.content, 24)}`)
@@ -500,11 +501,11 @@ export function buildDigest(
     );
   }
   const errors = (parsed.errors || []).filter((error) => error.seq > baselineSeq).slice(-2);
-  if (errors.length) add("错误:", errors.map((error) => `[${error.seq}] ${clip(error.text.replace(/\s+/g, " "), 90)}`).join(" "), 260);
+  if (errors.length) add(t("错误:"), errors.map((error) => `[${error.seq}] ${clip(error.text.replace(/\s+/g, " "), 90)}`).join(" "), 260);
   const brief = toolBrief(parsed, { baselineSeq, workspacePath: parsed.session?.cwd });
   const toolParts = [];
-  if (brief.files.length) toolParts.push(`写入:${brief.files.slice(0, 5).join(",")}`);
-  if (brief.commandNames.length) toolParts.push(`工具:${brief.commandNames.join(",")}`);
+  if (brief.files.length) toolParts.push(t("写入:{0}", [brief.files.slice(0, 5).join(",")]));
+  if (brief.commandNames.length) toolParts.push(t("工具:{0}", [brief.commandNames.join(",")]));
   if (toolParts.length) add("", toolParts.join(" | "), 220);
 
   // Fill remaining room with older context (never sacrifices the sections above).
@@ -1100,7 +1101,7 @@ export function createSessionSource({ dshHome } = {}) {
     const resolvedTitle =
       fromEvent ||
       readableTitle(meta.title, users[0]?.text) ||
-      `会话 ${meta.id.slice(-6)}`;
+      t("会话 {0}", [meta.id.slice(-6)]);
     const lastTurnEnd = turnEnds[turnEnds.length - 1] || null;
     const hasOpenTurn = (turnStarts.at(-1)?.seq || 0) > Math.max(lastTurnEnd?.seq || 0, lastSeedSeq);
     const isLive = sessionLiveness({ ...meta, lastActivityAt, hasOpenTurn });
@@ -1239,11 +1240,11 @@ export function createSessionSource({ dshHome } = {}) {
 
     const firstUser = parsed.users[0];
     if (firstUser) {
-      push(100, 0, "user", "用户提出初始需求", firstUser.text, firstUser.seq, firstUser.time);
+      push(100, 0, "user", t("用户提出初始需求"), firstUser.text, firstUser.seq, firstUser.time);
     }
     const lastUser = parsed.users[parsed.users.length - 1];
     if (lastUser && lastUser !== firstUser) {
-      push(80, 1, "user", "用户最新指令", lastUser.text, lastUser.seq, lastUser.time);
+      push(80, 1, "user", t("用户最新指令"), lastUser.text, lastUser.seq, lastUser.time);
     }
 
     parsed.deliverables.forEach((item, index) => {
@@ -1252,24 +1253,24 @@ export function createSessionSource({ dshHome } = {}) {
         .map((file) => file.description)
         .filter(Boolean)
         .join("；");
-      push(98, 10 + index, "deliverable", `交付物：${clip(names, 160)}`, descriptions || item.files.map((file) => file.path).join("\n"), item.seq, item.time);
+      push(98, 10 + index, "deliverable", t("交付物：{0}", [clip(names, 160)]), descriptions || item.files.map((file) => file.path).join("\n"), item.seq, item.time);
     });
 
     parsed.workspaceChanges.forEach((change, index) => {
-      push(60, 20 + index, "artifact", `第 ${change.turn || "?"} 轮产生了工作区文件变更`, "", change.seq, change.time);
+      push(60, 20 + index, "artifact", t("第 {0} 轮产生了工作区文件变更", [change.turn || "?"]), "", change.seq, change.time);
     });
 
     const lastAssistant = parsed.lastAssistantText;
     if (lastAssistant) {
-      push(90, 30, "assistant", "助手最新总结", lastAssistant.text, lastAssistant.seq, lastAssistant.time);
+      push(90, 30, "assistant", t("助手最新总结"), lastAssistant.text, lastAssistant.seq, lastAssistant.time);
     }
     const finalAssistant = [...parsed.assistants].reverse().find((message) => message.seq < (parsed.lastTurnEnd?.seq ?? Number.MAX_SAFE_INTEGER));
     if (finalAssistant && finalAssistant !== lastAssistant) {
-      push(70, 31, "assistant", "上一轮完成时的答复", finalAssistant.text, finalAssistant.seq, finalAssistant.time);
+      push(70, 31, "assistant", t("上一轮完成时的答复"), finalAssistant.text, finalAssistant.seq, finalAssistant.time);
     }
 
     parsed.errors.slice(-6).forEach((error, index) => {
-      push(92, 40 + index, "error", `错误：${clip(error.text.replace(/\s+/g, " "), 140)}`, error.text, error.seq, error.time);
+      push(92, 40 + index, "error", t("错误：{0}", [clip(error.text.replace(/\s+/g, " "), 140)]), error.text, error.seq, error.time);
     });
 
     const lastTodos = parsed.todoSnapshots[parsed.todoSnapshots.length - 1];
@@ -1279,7 +1280,7 @@ export function createSessionSource({ dshHome } = {}) {
         .map((todo) => `${todo.status === "completed" ? "[x]" : todo.status === "in_progress" ? "[~]" : "[ ]"} ${todo.content}`)
         .join("\n");
       const done = lastTodos.todos.filter((todo) => todo.status === "completed").length;
-      push(88, 50, "todo", `待办进度 ${done}/${lastTodos.todos.length}`, summary, lastTodos.seq, lastTodos.time);
+      push(88, 50, "todo", t("待办进度 {0}/{1}", [done, lastTodos.todos.length]), summary, lastTodos.seq, lastTodos.time);
     }
 
     const interestingCalls = parsed.toolCalls.filter((call) =>
@@ -1287,16 +1288,16 @@ export function createSessionSource({ dshHome } = {}) {
     );
     interestingCalls.slice(-10).forEach((call, index) => {
       const label = toolCallLabel(call);
-      push(50, 60 + index, "tool", `工具：${label}`, label, call.seq, call.time);
+      push(50, 60 + index, "tool", t("工具：{0}", [label]), label, call.seq, call.time);
     });
 
     const olderUsers = parsed.users.slice(Math.max(0, parsed.users.length - 8), -1);
     olderUsers.forEach((message, index) => {
-      push(55, 80 + index, "user", "用户反馈", message.text, message.seq, message.time);
+      push(55, 80 + index, "user", t("用户反馈"), message.text, message.seq, message.time);
     });
 
     parsed.assistants.slice(-5).forEach((message, index) => {
-      push(45, 100 + index, "assistant", "助手进展", message.text, message.seq, message.time);
+      push(45, 100 + index, "assistant", t("助手进展"), message.text, message.seq, message.time);
     });
 
     // Rank, dedupe by (kind,seq), then present in timeline order.
@@ -1398,7 +1399,7 @@ export function createSessionSource({ dshHome } = {}) {
         time: end.time,
         kind: "error",
         role: "system",
-        text: clip(`本轮${end.kind === "error" ? "失败" : "中止"}：${end.error || end.kind}`, 2000),
+        text: clip(t("本轮{0}：{1}", [end.kind === "error" ? t("失败") : t("中止"), end.error || end.kind]), 2000),
         toolName: null,
         todos: null,
         isError: true,

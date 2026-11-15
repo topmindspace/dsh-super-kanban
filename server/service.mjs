@@ -1,3 +1,5 @@
+import { t } from "./i18n.mjs";
+import { createTextProjection } from "./text-projection.mjs";
 /**
  * Super Kanban — host service.
  *
@@ -78,7 +80,7 @@ const FIELD_NAMES = ["title", "goal", "status", "progress", "priority", "tags", 
 const LOCKABLE_FIELDS = [...FIELD_NAMES, "keyFacts", "subtasks", "artifacts", "goalObject"];
 const STATUSES = ["backlog", "in_progress", "blocked", "done"];
 /** Chinese labels for generated prompt text (users read the prompt, not the raw key). */
-const STATUS_LABELS = { backlog: "待办", in_progress: "进行中", blocked: "受阻", done: "已完成" };
+const STATUS_LABELS = { backlog: t("待办"), in_progress: t("进行中"), blocked: t("受阻"), done: t("已完成") };
 const PRIORITIES = ["P0", "P1", "P2", "P3"];
 const SSE_HEARTBEAT_MS = 15_000;
 const SSE_MAX_CLIENTS = 32;
@@ -99,6 +101,7 @@ const SCAN_SLICE_MS = 25;
 export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {}) {
   const logger = ctx?.logger;
   const dshHome = process.env.DSH_HOME || path.join(homedir(), ".dsh");
+  const textProjection = createTextProjection(dshHome, logger);
   const source = createSessionSource({ dshHome, logger });
   // The analyzer resolves the DSH native llm service lazily from `ctx`; a host
   // composition without one degrades AI analysis to the rules engine.
@@ -128,6 +131,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   let parentToChildren = new Map();
 
   let scanPromise = null;
+  let scanHasConclusion = false;
   let scanCancel = false;
   let scanAbort = null;
   /**
@@ -173,7 +177,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   /** Adapter error messages can contain URLs, headers or response bodies. */
   function catalogErrorLabel(error) {
-    return error?.code === "timeout" ? "读取模型目录超时" : "读取模型目录失败";
+    return error?.code === "timeout" ? t("读取模型目录超时") : t("读取模型目录失败");
   }
 
   /** Reject with `code:"timeout"` after `timeoutMs`; the timer is always cleared. */
@@ -261,15 +265,15 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   function aiRouteFailureMessage(selection) {
     switch (selection.reason) {
       case "llm-unavailable":
-        return "当前 DSH 未提供 AI 模型服务，请检查 DSH 版本和模型配置";
+        return t("当前 DSH 未提供 AI 模型服务，请检查 DSH 版本和模型配置");
       case "provider-unavailable":
         return selection.source === "default"
-          ? `DSH 默认模型提供方 ${selection.provider} 不可用，请在 DSH 设置 → 模型 中配置`
-          : `所选模型提供方 ${selection.provider} 已不可用，请在看板中重新选择模型`;
+          ? t("DSH 默认模型提供方 {0} 不可用，请在 DSH 设置 → 模型 中配置", [selection.provider])
+          : t("所选模型提供方 {0} 已不可用，请在看板中重新选择模型", [selection.provider]);
       case "no-default-model":
-        return "DSH 尚未设置默认模型，请在看板中选择模型，或在 DSH 设置 → 模型中配置默认模型";
+        return t("DSH 尚未设置默认模型，请在看板中选择模型，或在 DSH 设置 → 模型中配置默认模型");
       default:
-        return "AI 模型不可用";
+        return t("AI 模型不可用");
     }
   }
 
@@ -341,9 +345,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
    * through the shared http.classifyError.
    */
   function acquireAiTask() {
-    if (stopped) throw Object.assign(new Error("服务已停止"), { code: "stopped" });
-    if (scanPromise) throw conflict("扫描进行中，请稍后再试");
-    if (aiBusy) throw conflict("其他 AI 任务进行中，请稍后再试");
+    if (stopped) throw Object.assign(new Error(t("服务已停止")), { code: "stopped" });
+    if (scanPromise) throw conflict(t("扫描进行中，请稍后再试"));
+    if (aiBusy) throw conflict(t("其他 AI 任务进行中，请稍后再试"));
     aiBusy = true;
     explicitAiAbort = new AbortController();
     return explicitAiAbort.signal;
@@ -363,27 +367,27 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     aiPending = 0,
     aiFailureCount = 0,
   } = {}) {
-    const parts = [`扫描完成：${state.scan.processed}/${state.scan.total} 个会话`];
+    const parts = [t("扫描完成：{0}/{1} 个会话", [state.scan.processed, state.scan.total])];
     const usedAfter = state.usage.budgetUsed;
     const dailyLimit = Number(state.settings.dailyAiCallLimit) || DEFAULT_SETTINGS.dailyAiCallLimit;
     const pending = Math.max(0, Math.round(Number(aiPending) || 0));
-    if (state.scan.aiCalls > 0) parts.push(`AI ${state.scan.aiCalls} 次/${state.scan.tokens} tokens`);
-    else if (state.settings.aiEnabled && !state.scan.aiBudgetUsed) parts.push("本次无 AI 调用");
-    if (lowValueSkipped > 0) parts.push(`低价值跳过 ${lowValueSkipped}`);
+    if (state.scan.aiCalls > 0) parts.push(t("AI {0} 次/{1} tokens", [state.scan.aiCalls, state.scan.tokens]));
+    else if (state.settings.aiEnabled && !state.scan.aiBudgetUsed) parts.push(t("本次无 AI 调用"));
+    if (lowValueSkipped > 0) parts.push(t("低价值跳过 {0}", [lowValueSkipped]));
     if (aiRouteMessage) parts.push(aiRouteMessage);
     if (aiDeferredReason === "daily") {
-      parts.push(`今日 AI 预算已用完（${usedAfter}/${dailyLimit}）`);
-      if (pending > 0) parts.push(`剩余 ${pending} 个会话明日继续（本次其余仅规则）`);
+      parts.push(t("今日 AI 预算已用完（{0}/{1}）", [usedAfter, dailyLimit]));
+      if (pending > 0) parts.push(t("剩余 {0} 个会话明日继续（本次其余仅规则）", [pending]));
     } else if (aiDeferredReason === "time") {
-      parts.push("本次 AI 阶段已达 10 分钟上限");
-      if (pending > 0) parts.push(`剩余 ${pending} 个会话下次扫描继续`);
+      parts.push(t("本次 AI 阶段已达 10 分钟上限"));
+      if (pending > 0) parts.push(t("剩余 {0} 个会话下次扫描继续", [pending]));
     } else if (aiDeferredReason === "budget") {
-      parts.push(`本次 AI 预算已用完（${Math.max(0, Math.round(Number(aiBudget) || 0))} 次）其余仅规则`);
-      if (pending > 0) parts.push(`剩余 ${pending} 个会话下次扫描继续`);
+      parts.push(t("本次 AI 预算已用完（{0} 次）其余仅规则", [Math.max(0, Math.round(Number(aiBudget) || 0))]));
+      if (pending > 0) parts.push(t("剩余 {0} 个会话下次扫描继续", [pending]));
     } else if (pending > 0) {
-      parts.push(`剩余 ${pending} 个会话下次扫描继续`);
+      parts.push(t("剩余 {0} 个会话下次扫描继续", [pending]));
     }
-    if (aiFailureCount > 0) parts.push(`${aiFailureCount} 个会话研判失败${aiDeferredReason === "daily" ? "" : "，5 分钟后重试"}`);
+    if (aiFailureCount > 0) parts.push(t("{0} 个会话研判失败{1}", [aiFailureCount, aiDeferredReason === "daily" ? "" : t("，5 分钟后重试")]));
     return parts.join(" · ");
   }
 
@@ -578,7 +582,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     try {
       const result = change();
       if (!persistState()) {
-        throw Object.assign(new Error("无法保存看板，请检查存储后重试"), { code: "storage-unavailable" });
+        throw Object.assign(new Error(t("无法保存看板，请检查存储后重试")), { code: "storage-unavailable" });
       }
       emitChanged(reason, reason === "task" ? 1 : 0);
       return result;
@@ -756,19 +760,19 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return {
       ok: true,
       generatedAt: new Date().toISOString(),
-      tasks: state.tasks,
+      tasks: textProjection.tasks(state.tasks),
       projects: state.projects,
       writeOverlaps: fileWriteOverlaps(),
       storage: { writable: !storageFailed, savedAt: state.savedAt },
       maintenance: {
-        recovery: state.recovery.map((entry) => ({ id: entry.task.id, title: entry.task.title, at: entry.at, kind: entry.kind })),
+        recovery: state.recovery.map((entry) => ({ id: entry.task.id, title: textProjection.text(entry.task.title), at: entry.at, kind: entry.kind })),
         ignoredSessions: state.ignoredSessions.map((id) => ({ id, title: metaForSessionId(id)?.title || id })),
         parseFailures: Object.values(cache.sessions).filter((entry) => entry?.meta?.parseError).length,
       },
       stats: computeStats(),
       activity: state.activity,
       workspaces: boardWorkspaces(),
-      scan: state.scan,
+      scan: { ...state.scan, message: textProjection.text(state.scan.message) },
       settings: state.settings,
       aiRoute: resolveAiRoute(),
       usage: state.usage,
@@ -914,15 +918,15 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const unfinished = trustedUnfinishedSubtasks(task);
     if (unfinished.length === 0) return false;
     const manual = unfinished.filter((subtask) => subtask.source === "manual").length;
-    const reason = manual > 0 ? `${manual} 个手动子任务` : `${unfinished.length} 个锁定的子任务`;
-    const label = engine === "llm" ? "AI" : "规则引擎";
+    const reason = manual > 0 ? t("{0} 个手动子任务", [manual]) : t("{0} 个锁定的子任务", [unfinished.length]);
+    const label = engine === "llm" ? "AI" : t("规则引擎");
     task.status = "in_progress";
     pushHistory(task, {
       kind: "status",
       from: "done",
       to: "in_progress",
       by: "ai",
-      note: `${label}建议完成，但仍有 ${reason}未完成；保持进行中，请手动确认后归档`,
+      note: t("{0}建议完成，但仍有 {1}未完成；保持进行中，请手动确认后归档", [label, reason]),
     });
     return true;
   }
@@ -952,7 +956,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     task.completionBasis = null;
     task.attention = null;
     syncGoalStatus(task);
-    pushHistory(task, { kind: "status", from: "done", to: "in_progress", by: "user", note: "子任务未完成，任务回到进行中" });
+    pushHistory(task, { kind: "status", from: "done", to: "in_progress", by: "user", note: t("子任务未完成，任务回到进行中") });
     return true;
   }
 
@@ -1287,17 +1291,17 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     for (const session of source.sessions || []) {
       if (!sessions.has(session.id)) sessions.set(session.id, session);
     }
-    if (sessions.size > MAX_SESSIONS_PER_TASK) throw badRequest("合并后关联会话过多");
+    if (sessions.size > MAX_SESSIONS_PER_TASK) throw badRequest(t("合并后关联会话过多"));
     const subtasks = mergeSubtasks(target.subtasks, source.subtasks);
     const manualTexts = new Set([...target.subtasks, ...source.subtasks].filter((item) => item.source === "manual").map((item) => item.text));
-    if (manualTexts.size > MANUAL_SUBTASK_LIMIT) throw badRequest("合并后手动子任务过多");
+    if (manualTexts.size > MANUAL_SUBTASK_LIMIT) throw badRequest(t("合并后手动子任务过多"));
     const acceptanceCriteria = [...new Set([target.acceptanceCriteria, source.acceptanceCriteria].filter(Boolean))].join("\n\n");
-    if (acceptanceCriteria.length > ACCEPTANCE_TEXT_LIMIT) throw badRequest("合并后验收条件过长，请先精简验收条件");
+    if (acceptanceCriteria.length > ACCEPTANCE_TEXT_LIMIT) throw badRequest(t("合并后验收条件过长，请先精简验收条件"));
     if (target.projectId && source.projectId && target.projectId !== source.projectId) {
-      throw badRequest("两张任务属于不同项目，请先调整项目归属");
+      throw badRequest(t("两张任务属于不同项目，请先调整项目归属"));
     }
     const notes = [...new Set([target.notes, source.notes].filter(Boolean))].join("\n\n");
-    if (notes.length > NOTES_LIMIT) throw badRequest("合并后备注过长，请先精简备注");
+    if (notes.length > NOTES_LIMIT) throw badRequest(t("合并后备注过长，请先精简备注"));
     target.projectId ||= source.projectId;
     target.notes = notes;
     target.dueDate = [target.dueDate, source.dueDate].filter(Boolean).sort()[0] || null;
@@ -1323,7 +1327,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     syncGoalStatus(target);
     refreshSessionEvidenceCounts(target);
     touchTask(target);
-    pushHistory(target, { kind: "merge", by: "user", note: `合并任务：${source.title}` });
+    pushHistory(target, { kind: "merge", by: "user", note: t("合并任务：{0}", [source.title]) });
     state.recovery.push({
       task: source,
       kind: "merge",
@@ -1336,7 +1340,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   }
 
   function sessionPlaceholderTitle(sessionId) {
-    return `会话 ${String(sessionId || "").slice(-6)}`;
+    return t("会话 {0}", [String(sessionId || "").slice(-6)]);
   }
 
   function clippedTitleVariants(title) {
@@ -1406,7 +1410,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   function sessionEntryFromMeta(meta, evidenceCount = 0) {
     return {
       id: meta.id,
-      title: meta.title || `会话 ${String(meta.id).slice(-6)}`,
+      title: meta.title || t("会话 {0}", [String(meta.id).slice(-6)]),
       seqEnd: meta.lastEventSeq || 0,
       evidenceCount,
     };
@@ -1535,13 +1539,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     for (const childId of childIds) {
       const child = childSummaries.get(childId);
       if (!child) continue;
-      const outcome = { completed: "本轮结束", error: "以错误结束", aborted: "已中止", interrupted: "已中断" };
-      const stateLabel = child.isLive ? "运行中" : outcome[child.turnEndKind] || "状态待确认";
+      const outcome = { completed: t("本轮结束"), error: t("以错误结束"), aborted: t("已中止"), interrupted: t("已中断") };
+      const stateLabel = child.isLive ? t("运行中") : outcome[child.turnEndKind] || t("状态待确认");
       const kind = child.isLive ? "tool" : "artifact";
       extra.push({
         id: `e_${childId.slice(-6)}_subagent`,
         kind,
-        text: `子代理会话「${clipText(child.title, 40)}」${stateLabel}（${child.eventCount} 事件${child.deliverables ? `，${child.deliverables} 次交付` : ""}）`,
+        text: t("子代理会话「{0}」{1}（{2} 事件{3}）", [clipText(child.title, 40), stateLabel, child.eventCount, child.deliverables ? t("，{0} 次交付", [child.deliverables]) : ""]),
         quote: clipText(child.lastAssistantText || child.title, 240),
         seq: child.lastEventSeq,
         time: child.lastActivityAt,
@@ -1561,11 +1565,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   }
 
   function startScan(mode = "incremental") {
-    if (stopped) return { ok: false, error: "stopped", message: "服务已停止" };
+    if (stopped) return { ok: false, error: "stopped", message: t("服务已停止") };
     // The analyzer instance (budget/transport) is shared with explicit AI
     // commands, so a scan must never overlap task.analyze/task.polishPrompt.
-    if (aiBusy) return { ok: false, error: "busy", message: "AI 任务进行中，请稍后再试" };
-    if (scanPromise) return { ok: false, error: "busy", message: "扫描正在进行中" };
+    if (aiBusy) return { ok: false, error: "busy", message: t("AI 任务进行中，请稍后再试") };
+    if (scanPromise) return { ok: false, error: "busy", message: t("扫描正在进行中") };
     const scanMode = mode === "full" ? "full" : "incremental";
     scanCancel = false;
     scanAbort = new AbortController();
@@ -1578,11 +1582,12 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       // A burst can trigger a scan while its most recent event is still settling.
       turnScanDeadline = lastScanStartedAt + TURN_SCAN_MAX_WAIT_MS;
     }
+    scanHasConclusion = false;
     state.scan = {
       ...emptyScanState(),
       state: "running",
       startedAt: startedAt.toISOString(),
-      message: "正在发现会话…",
+      message: t("正在发现会话…"),
     };
     scanDigestBytes = [];
     broadcastScan(true);
@@ -1617,10 +1622,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     state.scan.state = failure ? "error" : "done";
     state.scan.finishedAt = finishedAt.toISOString();
     state.scan.error = failure ? String(failure?.message || failure) : null;
-    if (failure) state.scan.message = `扫描失败：${state.scan.error}`;
-    else if (scanCancel) state.scan.message = "扫描已取消（已完成部分保留）";
-    else if (!state.scan.message || !String(state.scan.message).startsWith("扫描完成")) {
-      state.scan.message = `扫描完成：${state.scan.processed}/${state.scan.total} 个会话`;
+    if (failure) state.scan.message = t("扫描失败：{0}", [state.scan.error]);
+    else if (scanCancel) state.scan.message = t("扫描已取消（已完成部分保留）");
+    else if (!scanHasConclusion) {
+      state.scan.message = t("扫描完成：{0}/{1} 个会话", [state.scan.processed, state.scan.total]);
     }
     state.settings.lastScanAt = finishedAt.toISOString();
     state.activity = computeActivity();
@@ -1638,8 +1643,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     recordUsage({ calls: state.scan.aiCalls, tokens: state.scan.tokens });
     if (!persistState()) {
       state.scan.state = "error";
-      state.scan.error = "无法保存扫描结果";
-      state.scan.message = "扫描结果尚未保存，请检查存储后重试";
+      state.scan.error = t("无法保存扫描结果");
+      state.scan.message = t("扫描结果尚未保存，请检查存储后重试");
     } else {
       persistCache();
     }
@@ -1659,7 +1664,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     }
     const discoverySessions = discovery.sessions;
     state.scan.total = discoverySessions.length;
-    state.scan.message = `发现 ${discoverySessions.length} 个会话，开始分析…`;
+    state.scan.message = t("发现 {0} 个会话，开始分析…", [discoverySessions.length]);
     broadcastScan(true);
 
     const cutoff = mode === "full" ? 0 : activeCutoff();
@@ -1784,7 +1789,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           });
         }
         if (state.scan.processed % 4 === 0) {
-          state.scan.message = `分析 ${state.scan.processed}/${state.scan.total} 个会话…`;
+          state.scan.message = t("分析 {0}/{1} 个会话…", [state.scan.processed, state.scan.total]);
           broadcastScan();
         }
       } catch (error) {
@@ -1828,10 +1833,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
             aiBudgetExhausted = true;
             state.scan.aiPending = aiJobs.length;
             for (const job of aiJobs) job.llmBudgetExceeded = true;
-            state.scan.message = `今日 AI 预算已用完（${state.usage.budgetUsed}/${state.settings.dailyAiCallLimit}），本次仅规则分析`;
+            state.scan.message = t("今日 AI 预算已用完（{0}/{1}），本次仅规则分析", [state.usage.budgetUsed, state.settings.dailyAiCallLimit]);
             logWarn("[super-kanban] daily AI budget exhausted; rules only this scan");
           } else {
-            state.scan.message = `AI 研判 ${aiJobs.length} 个会话（预算 ${scanBudget}）…`;
+            state.scan.message = t("AI 研判 {0} 个会话（预算 {1}）…", [aiJobs.length, scanBudget]);
             broadcastScan(true);
             // Wall-clock guard for the whole AI stage: a slow/retrying provider
             // must never keep the scan mutex for hours.
@@ -1885,7 +1890,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
                 }),
               );
               state.scan.aiBudgetUsed = readAnalyzerBudget().calls;
-              state.scan.message = `AI 研判 ${state.scan.aiBudgetUsed}/${aiJobs.length} 个会话（今日 ${state.usage.budgetUsed}/${state.settings.dailyAiCallLimit}）…`;
+              state.scan.message = t("AI 研判 {0}/{1} 个会话（今日 {2}/{3}）…", [state.scan.aiBudgetUsed, aiJobs.length, state.usage.budgetUsed, state.settings.dailyAiCallLimit]);
               broadcastScan();
               if (phaseTimeout.aborted) {
                 aiDeferredReason = "time";
@@ -2002,7 +2007,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     state.workspaces = computeWorkspaces(discovery.workspaces, [...sessionsById.values()]);
     state.activity = computeActivity();
     if (scanCancel) {
-      state.scan.message = "扫描已取消";
+      state.scan.message = t("扫描已取消");
     } else {
       state.scan.message = buildScanMessage({
         lowValueSkipped,
@@ -2012,7 +2017,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         aiPending: state.scan.aiPending,
         aiFailureCount,
       });
-      if (state.scan.historicalSkipped) state.scan.message += ` · 跳过 ${state.scan.historicalSkipped} 个历史会话`;
+      if (state.scan.historicalSkipped) state.scan.message += t(" · 跳过 {0} 个历史会话", [state.scan.historicalSkipped]);
+      scanHasConclusion = true;
     }
     broadcastScan(true);
     // Cache entries for sessions that were never parsed keep their old meta.
@@ -2165,7 +2171,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       progress: rules.progress,
       attention: rules.attention || "review",
       completionBasis: null,
-      reason: `${analysis.reason || "AI 建议完成"}；等待完成依据`,
+      reason: t("{0}；等待完成依据", [analysis.reason || t("AI 建议完成")]),
     };
   }
 
@@ -2217,7 +2223,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     pushHistory(task, {
       kind: "create",
       by: "ai",
-      note: `${options.engine} 引擎从会话「${clipText(meta.title || meta.id, 40)}」自动建卡`,
+      note: t("{0} 引擎从会话「{1}」自动建卡", [options.engine, clipText(meta.title || meta.id, 40)]),
     });
     truncateTask(task);
     state.tasks.push(task);
@@ -2307,7 +2313,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (previous !== subtaskProgress) {
         task.progress = subtaskProgress;
         if (previous === null || previous === undefined || Math.abs(subtaskProgress - previous) >= 5) {
-          pushHistory(task, { kind: "progress", from: previous, to: subtaskProgress, by: "ai", note: "按子任务完成率更新" });
+          pushHistory(task, { kind: "progress", from: previous, to: subtaskProgress, by: "ai", note: t("按子任务完成率更新") });
         }
       }
     } else {
@@ -2318,7 +2324,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           const delta = previous === null || previous === undefined ? 100 : Math.abs(nextProgress - previous);
           task.progress = nextProgress;
           if (delta >= 5) {
-            pushHistory(task, { kind: "progress", from: previous, to: nextProgress, by: "ai", note: `${options.engine} 研判` });
+            pushHistory(task, { kind: "progress", from: previous, to: nextProgress, by: "ai", note: t("{0} 研判", [options.engine]) });
           }
         }
       }
@@ -2326,7 +2332,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     if (!locked.has("status") && STATUSES.includes(analysis.status) && analysis.status !== task.status) {
       const from = task.status;
       task.status = analysis.status;
-      pushHistory(task, { kind: "status", from, to: analysis.status, by: "ai", note: `${options.engine} 研判` });
+      pushHistory(task, { kind: "status", from, to: analysis.status, by: "ai", note: t("{0} 研判", [options.engine]) });
     }
     // Trust rule: an AI/rule "done" may never silently finish user-owned work.
     // Unfinished manual subtasks (or a locked subtask list) keep the card
@@ -2342,7 +2348,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       pushHistory(task, {
         kind: "ai",
         by: "ai",
-        note: `${options.engine} 更新了${options.engine === "llm" ? " AI" : ""}研判字段`,
+        note: t("{0} 更新了{1}研判字段", [options.engine, options.engine === "llm" ? " AI" : ""]),
       });
     }
 
@@ -2378,9 +2384,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return task;
   }
 
-  function checkRevision(task, expectedUpdatedAt, label = "任务") {
+  function checkRevision(task, expectedUpdatedAt, label = t("任务")) {
     if (typeof expectedUpdatedAt === "string" && expectedUpdatedAt !== task.updatedAt) {
-      throw Object.assign(new Error(`${label}已更新，请核对最新内容后再操作`), { code: "revision-conflict" });
+      throw Object.assign(new Error(t("{0}已更新，请核对最新内容后再操作", [label])), { code: "revision-conflict" });
     }
   }
 
@@ -2429,36 +2435,36 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   function projectAssignment(value, current = null) {
     if (value === null || value === "") return null;
     const project = state.projects.find((item) => item.id === value);
-    if (!project || (project.archived && project.id !== current)) throw badRequest("请选择可用项目");
+    if (!project || (project.archived && project.id !== current)) throw badRequest(t("请选择可用项目"));
     return project.id;
   }
 
   function planningDate(value) {
     if (value === null || value === "") return null;
     const normalized = dateOnly(value);
-    if (!normalized) throw badRequest("请选择有效的到期日");
+    if (!normalized) throw badRequest(t("请选择有效的到期日"));
     return normalized;
   }
 
   function planningNotes(value) {
-    if (typeof value !== "string") throw badRequest("备注必须为文本");
+    if (typeof value !== "string") throw badRequest(t("备注必须为文本"));
     return notesText(value);
   }
 
   function updateProject(project, patch) {
     const next = { ...project };
     if (Object.hasOwn(patch, "name")) next.name = clipText(typeof patch.name === "string" ? patch.name.trim() : "", PROJECT_NAME_LIMIT);
-    if (!next.name) throw badRequest("请输入项目名称");
+    if (!next.name) throw badRequest(t("请输入项目名称"));
     if (Object.hasOwn(patch, "notes")) next.notes = planningNotes(patch.notes);
     if (Object.hasOwn(patch, "dueDate")) next.dueDate = planningDate(patch.dueDate);
     if (typeof patch.archived === "boolean") next.archived = patch.archived;
     if (Object.hasOwn(patch, "workspaceId") && patch.workspaceId !== next.workspaceId) {
       const workspace = workspaceFromPayload(patch);
-      if (patch.workspaceId && !workspace) throw badRequest("请选择可用工作区");
+      if (patch.workspaceId && !workspace) throw badRequest(t("请选择可用工作区"));
       next.workspaceId = workspace?.id || null;
     }
     const other = defaultProjectForWorkspace(next.workspaceId);
-    if (!next.archived && other && other.id !== next.id) throw conflict("该工作区已指定其他项目，请先调整自动归入设置");
+    if (!next.archived && other && other.id !== next.id) throw conflict(t("该工作区已指定其他项目，请先调整自动归入设置"));
     if (Object.keys(next).every((field) => Object.is(next[field], project[field]))) return project;
     touchTask(next);
     Object.assign(project, next);
@@ -2502,8 +2508,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
     "project.update"(payload) {
       const project = state.projects.find((item) => item.id === payload.id);
-      if (!project) throw notFound("项目不存在");
-      checkRevision(project, payload.expectedUpdatedAt, "项目");
+      if (!project) throw notFound(t("项目不存在"));
+      checkRevision(project, payload.expectedUpdatedAt, t("项目"));
       return updateProject(project, payload.patch || {});
     },
 
@@ -2581,7 +2587,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (sessionMeta) {
         state.suppressedSessions = state.suppressedSessions.filter((id) => id !== sessionMeta.id);
       }
-      pushHistory(task, { kind: "create", by: "user", note: "手动创建任务" });
+      pushHistory(task, { kind: "create", by: "user", note: t("手动创建任务") });
       state.tasks.push(task);
       return task;
     },
@@ -2625,7 +2631,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
             task.completionBasis = next === "done" ? "user" : null;
             task.attention = null;
             dismissReview(task);
-            pushHistory(task, { kind: "status", from, to: next, by: "user", note: "用户编辑" });
+            pushHistory(task, { kind: "status", from, to: next, by: "user", note: t("用户编辑") });
           }
           continue;
         }
@@ -2641,7 +2647,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           const next =
             value === null ? null : Number.isFinite(Number(value)) ? Math.max(0, Math.min(100, Math.round(Number(value)))) : task.progress;
           if (next !== task.progress) {
-            pushHistory(task, { kind: "progress", from: task.progress, to: next, by: "user", note: "用户编辑" });
+            pushHistory(task, { kind: "progress", from: task.progress, to: next, by: "user", note: t("用户编辑") });
             task.progress = next;
           }
           continue;
@@ -2705,7 +2711,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       syncGoalStatus(task);
       truncateTask(task);
       if (editableSnapshot(task) === beforeEdit) return task;
-      if (otherChanged) pushHistory(task, { kind: "edit", by: "user", note: "用户编辑任务" });
+      if (otherChanged) pushHistory(task, { kind: "edit", by: "user", note: t("用户编辑任务") });
       // Only a real user change detaches an auto card from duplicate merging; a
       // no-op or invalid patch must not wash away its auto identity.
       if (task.origin === "auto") task.origin = "auto+edited";
@@ -2716,7 +2722,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     "task.accept"(payload) {
       const task = requireTask(payload);
       checkRevision(task, payload.expectedUpdatedAt);
-      if (task.archived) throw conflict("请先恢复归档任务再确认验收");
+      if (task.archived) throw conflict(t("请先恢复归档任务再确认验收"));
       if (task.status === "done" && task.completionBasis === "user") {
         // A later turn on an accepted task pins a fresh review; accepting it
         // clears the notice without changing the already-locked completion.
@@ -2735,7 +2741,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       if (task.origin === "auto") task.origin = "auto+edited";
       if (!(task.lockedFields || []).includes("progress")) task.progress = progressFromSubtasks(task.subtasks) ?? 100;
       syncGoalStatus(task);
-      pushHistory(task, { kind: "status", from, to: "done", by: "user", note: "确认验收" });
+      pushHistory(task, { kind: "status", from, to: "done", by: "user", note: t("确认验收") });
       touchTask(task);
       return task;
     },
@@ -2747,7 +2753,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const position = state.tasks.indexOf(task);
       if (position >= 0) state.tasks.splice(position, 1);
       if (nextStatus !== task.status) {
-        pushHistory(task, { kind: "status", from: task.status, to: nextStatus, by: "user", note: "拖拽换列" });
+        pushHistory(task, { kind: "status", from: task.status, to: nextStatus, by: "user", note: t("拖拽换列") });
         task.status = nextStatus;
         task.completionBasis = nextStatus === "done" ? "user" : null;
         task.attention = null;
@@ -2778,7 +2784,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           from: task.archived,
           to: archived,
           by: "user",
-          note: archived ? "用户归档" : "用户恢复",
+          note: archived ? t("用户归档") : t("用户恢复"),
         });
         task.archived = archived;
         touchTask(task);
@@ -2807,12 +2813,12 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
     "task.restore"(payload) {
       const entry = state.recovery.findLast((item) => item.task.id === payload.id);
-      if (!entry) throw notFound("恢复记录不存在");
-      if (state.tasks.some((task) => task.id === payload.id)) throw conflict("任务已存在");
+      if (!entry) throw notFound(t("恢复记录不存在"));
+      if (state.tasks.some((task) => task.id === payload.id)) throw conflict(t("任务已存在"));
       if (entry.kind === "merge") {
         const index = state.tasks.findIndex((task) => task.id === entry.beforeTarget?.id);
         if (index < 0 || !entry.targetUpdatedAt || state.tasks[index].updatedAt !== entry.targetUpdatedAt) {
-          throw conflict("合并后的任务已变化，无法安全撤销");
+          throw conflict(t("合并后的任务已变化，无法安全撤销"));
         }
         touchRecoveredTask(entry.beforeTarget, state.recovery, Date.parse(state.tasks[index].updatedAt) || 0);
         state.tasks[index] = entry.beforeTarget;
@@ -2828,9 +2834,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     "task.merge"(payload) {
       const target = requireTask(payload);
       const source = requireTask({ id: payload.sourceId });
-      if (target === source) throw badRequest("请选择两张不同的任务");
+      if (target === source) throw badRequest(t("请选择两张不同的任务"));
       if (source.relations?.length || state.tasks.some((task) => task.relations?.some((link) => link.taskId === source.id))) {
-        throw badRequest("来源任务仍有关联，请先调整其关系");
+        throw badRequest(t("来源任务仍有关联，请先调整其关系"));
       }
       return mergeTaskInto(target, source);
     },
@@ -2839,7 +2845,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const task = requireTask(payload);
       task.relations = editRelation(state.tasks, task, payload);
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: payload.remove ? "移除任务关系" : "更新任务关系" });
+      pushHistory(task, { kind: "edit", by: "user", note: payload.remove ? t("移除任务关系") : t("更新任务关系") });
       return task;
     },
 
@@ -2851,11 +2857,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     },
 
     "task.batch"(payload) {
-      if (!isStringArray(payload.ids) || payload.ids.length === 0 || payload.ids.length > 200) throw badRequest("请选择 1–200 项任务");
+      if (!isStringArray(payload.ids) || payload.ids.length === 0 || payload.ids.length > 200) throw badRequest(t("请选择 1–200 项任务"));
       const targets = [...new Set(payload.ids)].map((id) => requireTask({ id }));
       const hasProject = Object.hasOwn(payload, "projectId");
       const projectId = hasProject ? projectAssignment(payload.projectId) : null;
-      if (typeof payload.archived !== "boolean" && !PRIORITIES.includes(payload.priority) && !hasProject) throw badRequest("请选择批量操作");
+      if (typeof payload.archived !== "boolean" && !PRIORITIES.includes(payload.priority) && !hasProject) throw badRequest(t("请选择批量操作"));
       for (const task of targets) {
         if (typeof payload.archived === "boolean") ops["task.archive"]({ id: task.id, archived: payload.archived });
         if (PRIORITIES.includes(payload.priority)) ops["task.update"]({ id: task.id, patch: { priority: payload.priority }, lockFields: ["priority"] });
@@ -2868,36 +2874,36 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const task = requireTask(payload);
       const text = clipText(typeof payload.text === "string" ? payload.text.trim() : "", ISSUE_TEXT_LIMIT);
       const key = issueKey({ text });
-      if (!key) throw badRequest("请输入问题内容");
+      if (!key) throw badRequest(t("请输入问题内容"));
       if (payload.resolve === true) {
-        if (!task.issues.some((issue) => issueKey(issue) === key)) throw notFound("问题已变化");
+        if (!task.issues.some((issue) => issueKey(issue) === key)) throw notFound(t("问题已变化"));
         task.resolvedIssues = [...new Set([...(task.resolvedIssues || []), key])].slice(-50);
         task.issues = task.issues.filter((issue) => issueKey(issue) !== key);
       } else {
-        if (task.issues.some((issue) => issueKey(issue) === key)) throw badRequest("问题已存在");
-        if (task.issues.length >= ISSUE_LIMIT) throw badRequest("待处理问题已达上限");
+        if (task.issues.some((issue) => issueKey(issue) === key)) throw badRequest(t("问题已存在"));
+        if (task.issues.length >= ISSUE_LIMIT) throw badRequest(t("待处理问题已达上限"));
         task.resolvedIssues = (task.resolvedIssues || []).filter((item) => item !== key);
         task.issues.push({ text, severity: "medium", source: "manual", sessionId: null, seq: null });
       }
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: payload.resolve ? `解决问题：${text}` : `新增问题：${text}` });
+      pushHistory(task, { kind: "edit", by: "user", note: payload.resolve ? t("解决问题：{0}", [text]) : t("新增问题：{0}", [text]) });
       return task;
     },
 
     "task.linkSession"(payload) {
       const task = requireTask(payload);
       const id = typeof payload.sessionId === "string" ? payload.sessionId : "";
-      if (!id || id.length > 200 || /[/\\\0]/.test(id)) throw badRequest("无效会话");
+      if (!id || id.length > 200 || /[/\\\0]/.test(id)) throw badRequest(t("无效会话"));
       const current = task.sessions.find((item) => item.id === id);
       if (payload.remove === true) {
         task.sessions = task.sessions.filter((item) => item.id !== id);
       } else {
         refreshSessionIndex();
         const meta = sessionsById.get(id);
-        if (!meta) throw notFound("会话不可用，请先打开或刷新 DSH 会话");
+        if (!meta) throw notFound(t("会话不可用，请先打开或刷新 DSH 会话"));
         const other = findTaskBySession(id);
-        if (other && other !== task) throw conflict("会话已关联其他任务，可先合并任务");
-        if (!current && task.sessions.length >= MAX_SESSIONS_PER_TASK) throw badRequest("关联会话已达上限");
+        if (other && other !== task) throw conflict(t("会话已关联其他任务，可先合并任务"));
+        if (!current && task.sessions.length >= MAX_SESSIONS_PER_TASK) throw badRequest(t("关联会话已达上限"));
         if (!current) {
           task.sessions.push({ ...sessionEntryFromMeta(meta), linkedByUser: true, continuedAt: payload.continuation ? new Date().toISOString() : null });
         } else if (payload.continuation) {
@@ -2916,7 +2922,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         task.workspacePath = meta?.workspacePath || null;
       }
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: payload.remove ? "解除会话关联" : payload.continuation ? "关联续做会话" : "关联来源会话" });
+      pushHistory(task, { kind: "edit", by: "user", note: payload.remove ? t("解除会话关联") : payload.continuation ? t("关联续做会话") : t("关联来源会话") });
       return task;
     },
 
@@ -2934,16 +2940,16 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     },
 
     "backup.restore"(payload) {
-      if (scanPromise || aiBusy) throw conflict("请等待扫描或研判结束后再恢复");
+      if (scanPromise || aiBusy) throw conflict(t("请等待扫描或研判结束后再恢复"));
       if (typeof payload.expectedSavedAt !== "string" || payload.expectedSavedAt !== state.savedAt) {
-        throw Object.assign(new Error("看板已变化，请重新预览备份"), { code: "revision-conflict" });
+        throw Object.assign(new Error(t("看板已变化，请重新预览备份")), { code: "revision-conflict" });
       }
       const restored = decodeBackup(payload);
-      if (payload.backupHash !== backupHash(payload)) throw conflict("备份内容已变化，请重新预览");
+      if (payload.backupHash !== backupHash(payload)) throw conflict(t("备份内容已变化，请重新预览"));
       try {
         store.saveRestorePoint(state);
       } catch {
-        throw Object.assign(new Error("无法保存当前看板的恢复点"), { code: "storage-unavailable" });
+        throw Object.assign(new Error(t("无法保存当前看板的恢复点")), { code: "storage-unavailable" });
       }
       const currentTasks = new Map(state.tasks.map((task) => [task.id, task.updatedAt]));
       const currentProjects = new Map(state.projects.map((project) => [project.id, project.updatedAt]));
@@ -2989,7 +2995,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       }
       state.suppressedSessions = state.suppressedSessions.filter((id) => !sessionIds.includes(id));
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: `重新关联 ${sessions.length} 个来源会话` });
+      pushHistory(task, { kind: "edit", by: "user", note: t("重新关联 {0} 个来源会话", [sessions.length]) });
       if (task.origin === "auto") task.origin = "auto+edited";
       return task;
     },
@@ -2999,7 +3005,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const fields = isStringArray(payload.fields) && payload.fields.length > 0 ? payload.fields : null;
       task.lockedFields = fields ? task.lockedFields.filter((field) => !fields.includes(field)) : [];
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: fields ? `解锁字段：${fields.join("、")}` : "解锁全部字段" });
+      pushHistory(task, { kind: "edit", by: "user", note: fields ? t("解锁字段：{0}", [fields.join("、")]) : t("解锁全部字段") });
       return task;
     },
 
@@ -3063,7 +3069,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
             signal,
           });
           persistExplicitAiUsage(result);
-          if (signal.aborted) throw Object.assign(new Error("服务已停止"), { code: "stopped" });
+          if (signal.aborted) throw Object.assign(new Error(t("服务已停止")), { code: "stopped" });
           if (result.ok) {
             // A successful analysis consumes one budget unit even when the model
             // says "no card needed" (ignore) — the tokens were still spent.
@@ -3101,7 +3107,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         return commitState(() => {
           const current = requireTask(payload);
           if (current.updatedAt !== task.updatedAt) {
-            throw Object.assign(new Error("研判期间任务已更新，请重新研判"), { code: "revision-conflict" });
+            throw Object.assign(new Error(t("研判期间任务已更新，请重新研判")), { code: "revision-conflict" });
           }
           if (primary) {
             updateTaskFromAnalysis(current, primary, meta, {
@@ -3117,11 +3123,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           touchTask(current);
           truncateTask(current);
           let message;
-          if (engine === "llm") message = "AI 研判完成";
-          else if (aiCalls > 0) message = `AI 判断该会话无需建卡（已消耗 ${aiCalls} 次）`;
-          else if (budgetHit || budgetExhausted) message = "今日 AI 预算已用完，已用规则引擎重判";
-          else if (state.settings.aiEnabled && !route.ok) message = `${route.message}，已用规则引擎重判`;
-          else message = "AI 不可用或未启用，已用规则引擎重判";
+          if (engine === "llm") message = t("AI 研判完成");
+          else if (aiCalls > 0) message = t("AI 判断该会话无需建卡（已消耗 {0} 次）", [aiCalls]);
+          else if (budgetHit || budgetExhausted) message = t("今日 AI 预算已用完，已用规则引擎重判");
+          else if (state.settings.aiEnabled && !route.ok) message = t("{0}，已用规则引擎重判", [route.message]);
+          else message = t("AI 不可用或未启用，已用规则引擎重判");
           return { task: current, engine, aiCalls, tokens, sessions: 1, message, model, provider };
         });
       } finally {
@@ -3133,87 +3139,87 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     /* ----------------------- v2 linkage ops ------------------------ */
 
     "task.continuePrompt"(payload) {
-      const task = requireTask(payload);
+      const task = textProjection.task(requireTask(payload));
       const target = payload.target === "newSession" ? "newSession" : "session";
       const primaryId = task.primarySessionId || task.sessionContext?.sessionId || task.sessions?.[0]?.id || null;
       const selected = typeof payload.sessionId === "string" && payload.sessionId ? payload.sessionId : primaryId;
       if (selected && selected !== primaryId && !task.sessions?.some((item) => item.id === selected)) {
-        throw badRequest("请从当前任务的关联会话中选择");
+        throw badRequest(t("请从当前任务的关联会话中选择"));
       }
       const meta = selected ? metaForSessionId(selected) : null;
       const sessionContext = selected === primaryId && task.sessionContext ? task.sessionContext : sessionContextFromMeta(meta);
       const instructions = {
-        continue: "根据当前目标推进未完成项，验证变更并汇报结果。",
-        unblock: "定位首要阻塞，验证修复。需要用户决定时列出具体选择。",
-        verify: "按验收条件检查现有产物，逐项说明通过、失败或无法验证的依据。发现问题时记录复现方式。",
-        handoff: "整理已完成内容、剩余工作、约束及可复用产物，供下一会话接手。",
+        continue: t("根据当前目标推进未完成项，验证变更并汇报结果。"),
+        unblock: t("定位首要阻塞，验证修复。需要用户决定时列出具体选择。"),
+        verify: t("按验收条件检查现有产物，逐项说明通过、失败或无法验证的依据。发现问题时记录复现方式。"),
+        handoff: t("整理已完成内容、剩余工作、约束及可复用产物，供下一会话接手。"),
       };
       const purpose = Object.hasOwn(instructions, payload.purpose) ? payload.purpose : "continue";
       const lines = [];
       lines.push(instructions[purpose], "");
-      lines.push("## 任务");
-      lines.push(`- 标题：${task.title}`);
-      lines.push(`- 目标：${task.goal?.text || "未设置（请根据标题与会话判断）"}`);
-      lines.push(`- 当前状态：${STATUS_LABELS[task.status] || task.status}${Number.isFinite(task.progress) ? `（进度 ${task.progress}%）` : ""}`);
-      if (task.workspaceTitle) lines.push(`- 工作区：${task.workspaceTitle}`);
-      if (task.updatedAt) lines.push(`- 看板快照：${task.updatedAt}`);
-      if (task.acceptanceCriteria) lines.push("", "## 验收条件", task.acceptanceCriteria);
+      lines.push(t("## 任务"));
+      lines.push(t("- 标题：{0}", [task.title]));
+      lines.push(t("- 目标：{0}", [task.goal?.text || t("未设置（请根据标题与会话判断）")]));
+      lines.push(t("- 当前状态：{0}{1}", [STATUS_LABELS[task.status] || task.status, Number.isFinite(task.progress) ? t("（进度 {0}%）", [task.progress]) : ""]));
+      if (task.workspaceTitle) lines.push(t("- 工作区：{0}", [task.workspaceTitle]));
+      if (task.updatedAt) lines.push(t("- 看板快照：{0}", [task.updatedAt]));
+      if (task.acceptanceCriteria) lines.push("", t("## 验收条件"), task.acceptanceCriteria);
       const facts = task.keyFacts || [];
       const keyFacts = [...facts.filter((fact) => fact.kind === "decision"), ...facts.filter((fact) => fact.kind !== "decision")].slice(0, 5);
       if (keyFacts.length) {
-        lines.push("", "## 关键决策与事实");
+        lines.push("", t("## 关键决策与事实"));
         for (const fact of keyFacts) {
-          const source = fact.sessionId && positiveSeqOrNull(fact.seq) ? `（会话 ${fact.sessionId} #${fact.seq}）` : "";
+          const source = fact.sessionId && positiveSeqOrNull(fact.seq) ? t("（会话 {0} #{1}）", [fact.sessionId, fact.seq]) : "";
           lines.push(`- ${fact.text}${source}`);
         }
       }
       const issues = (task.issues || []).slice(0, 3);
       if (issues.length) {
-        lines.push("", "## 待解决问题");
+        lines.push("", t("## 待解决问题"));
         for (const issue of issues) lines.push(`- [${issue.severity || "medium"}] ${issue.text}`);
       }
       const nextSteps = (task.nextSteps || []).slice(0, 3);
       if (nextSteps.length) {
-        lines.push("", "## 建议下一步");
+        lines.push("", t("## 建议下一步"));
         for (const step of nextSteps) lines.push(`- ${step}`);
       }
       const pendingSubtasks = (task.subtasks || []).filter((subtask) => !subtask.done);
       if (pendingSubtasks.length) {
-        lines.push("", `## 未完成子任务（${pendingSubtasks.length} 项）`);
+        lines.push("", t("## 未完成子任务（{0} 项）", [pendingSubtasks.length]));
         for (const subtask of pendingSubtasks.slice(0, 8)) lines.push(`- ${subtask.text}`);
-        if (pendingSubtasks.length > 8) lines.push(`- 其余 ${pendingSubtasks.length - 8} 项见任务详情`);
+        if (pendingSubtasks.length > 8) lines.push(t("- 其余 {0} 项见任务详情", [pendingSubtasks.length - 8]));
       }
       const artifacts = (task.artifacts || []).filter((item) => typeof item.path === "string" && item.path.length > 0 && item.path.length <= 4096).sort((a, b) =>
         Number(Boolean(a.missing)) - Number(Boolean(b.missing)) ||
         Number(b.kind === "deliverable") - Number(a.kind === "deliverable") || (b.time || 0) - (a.time || 0),
       ).slice(0, 4);
       if (artifacts.length) {
-        lines.push("", "## 交付物与修改记录");
+        lines.push("", t("## 交付物与修改记录"));
         for (const artifact of artifacts) {
-          const source = artifact.sessionId ? ` · 会话 ${artifact.sessionId}${positiveSeqOrNull(artifact.seq) ? ` #${artifact.seq}` : ""}` : "";
-          lines.push(`- ${artifact.kind === "deliverable" ? "交付物" : "修改文件"} ${artifact.path}${artifact.missing ? "（文件当前不可用）" : ""}${source}`);
+          const source = artifact.sessionId ? t(" · 会话 {0}{1}", [artifact.sessionId, positiveSeqOrNull(artifact.seq) ? ` #${artifact.seq}` : ""]) : "";
+          lines.push(`- ${artifact.kind === "deliverable" ? t("交付物") : t("修改文件")} ${artifact.path}${artifact.missing ? t("（文件当前不可用）") : ""}${source}`);
         }
       }
       const evidence = (task.evidence || []).filter((item) => positiveSeqOrNull(item.seq)).slice(0, 3);
       if (evidence.length) {
-        lines.push("", "## 来源证据");
-        for (const item of evidence) lines.push(`- 会话 ${item.sessionId || task.primarySessionId || "未知"} #${item.seq} ${clipText(item.text, 75)}`);
+        lines.push("", t("## 来源证据"));
+        for (const item of evidence) lines.push(t("- 会话 {0} #{1} {2}", [item.sessionId || task.primarySessionId || t("未知"), item.seq, clipText(item.text, 75)]));
       }
       const dependencies = (task.relations || []).filter((link) => link.type === "depends_on")
         .map((link) => state.tasks.find((item) => item.id === link.taskId)).filter(Boolean).slice(0, 4);
       if (dependencies.length) {
-        lines.push("", "## 依赖");
-        for (const dependency of dependencies) lines.push(`- ${dependency.title} · ${STATUS_LABELS[dependency.status] || "状态未知"}`);
+        lines.push("", t("## 依赖"));
+        for (const dependency of dependencies) lines.push(`- ${dependency.title} · ${STATUS_LABELS[dependency.status] || t("状态未知")}`);
       }
       if (task.sessions?.length || selected) {
-        lines.push("", "## 关联会话");
+        lines.push("", t("## 关联会话"));
         for (const entry of (task.sessions?.length ? task.sessions : [{ id: selected, title: sessionContext?.title }]).slice(0, 6)) {
-          const role = [entry.id === primaryId ? "主会话" : "", target === "session" && entry.id === selected ? "当前续做目标" : ""].filter(Boolean).join(" · ");
-          lines.push(`- ${entry.title || "来源会话"}（${entry.id}${role ? ` · ${role}` : ""}）`);
+          const role = [entry.id === primaryId ? t("主会话") : "", target === "session" && entry.id === selected ? t("当前续做目标") : ""].filter(Boolean).join(" · ");
+          lines.push(`- ${entry.title || t("来源会话")}（${entry.id}${role ? ` · ${role}` : ""}）`);
         }
-        if (task.sessions?.length > 6) lines.push(`- 其余 ${task.sessions.length - 6} 个会话见任务详情`);
+        if (task.sessions?.length > 6) lines.push(t("- 其余 {0} 个会话见任务详情", [task.sessions.length - 6]));
       }
-      lines.push("", "## 要求", "保留现有约束。完成后说明实际产出、验收结果和仍需处理的事项。");
+      lines.push("", t("## 要求"), t("保留现有约束。完成后说明实际产出、验收结果和仍需处理的事项。"));
       return {
         prompt: lines.join("\n"),
         target,
@@ -3243,7 +3249,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       syncProgressFromSubtasks(task);
       task.sessionContext = sessionContextFromMeta(meta, parsed);
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: `从会话导入待办 ${todoSubtasks.length} 项` });
+      pushHistory(task, { kind: "edit", by: "user", note: t("从会话导入待办 {0} 项", [todoSubtasks.length]) });
       truncateTask(task);
       return task;
     },
@@ -3257,7 +3263,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       reopenIfSubtasksUnfinished(task);
       syncProgressFromSubtasks(task);
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: `${subtask.done ? "完成" : "取消完成"}子任务：${clipText(subtask.text, 30)}` });
+      pushHistory(task, { kind: "edit", by: "user", note: t("{0}子任务：{1}", [subtask.done ? t("完成") : t("取消完成"), clipText(subtask.text, 30)]) });
       truncateTask(task);
       return task;
     },
@@ -3269,10 +3275,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const clipped = clipText(text, SUBTASK_TEXT_LIMIT);
       const items = task.subtasks || [];
       if (items.some((item) => item.text === clipped && item.source === "manual")) {
-        throw badRequest("已有同名手动子任务");
+        throw badRequest(t("已有同名手动子任务"));
       }
       if (items.filter((item) => item.source === "manual").length >= MANUAL_SUBTASK_LIMIT) {
-        throw badRequest(`手动子任务已达 ${MANUAL_SUBTASK_LIMIT} 项上限`);
+        throw badRequest(t("手动子任务已达 {0} 项上限", [MANUAL_SUBTASK_LIMIT]));
       }
       task.subtasks = mergeSubtasks(
         task.subtasks || [],
@@ -3289,7 +3295,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       reopenIfSubtasksUnfinished(task);
       syncProgressFromSubtasks(task);
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: `新增子任务：${clipText(text, 30)}` });
+      pushHistory(task, { kind: "edit", by: "user", note: t("新增子任务：{0}", [clipText(text, 30)]) });
       truncateTask(task);
       return task;
     },
@@ -3303,7 +3309,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       reopenIfSubtasksUnfinished(task);
       syncProgressFromSubtasks(task);
       touchTask(task);
-      pushHistory(task, { kind: "edit", by: "user", note: "删除子任务" });
+      pushHistory(task, { kind: "edit", by: "user", note: t("删除子任务") });
       truncateTask(task);
       return task;
     },
@@ -3354,7 +3360,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const patch = normalizeSettingsPatch({ aiProvider: provider, aiModel: model });
       if (patch.aiProvider === undefined || patch.aiModel === undefined ||
           Boolean(patch.aiProvider) !== Boolean(patch.aiModel)) {
-        throw badRequest("请提供完整的模型提供方和模型，或将两者清空以跟随 DSH 默认");
+        throw badRequest(t("请提供完整的模型提供方和模型，或将两者清空以跟随 DSH 默认"));
       }
       const settings = ops["settings.update"]({ patch });
       return { settings, aiRoute: resolveAiRoute() };
@@ -3392,7 +3398,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
     "scan.start"(payload) {
       const result = startScan(payload.mode === "full" ? "full" : "incremental");
-      if (!result.ok) throw Object.assign(new Error(result.message || "扫描进行中"), { code: result.error || "busy" });
+      if (!result.ok) throw Object.assign(new Error(result.message || t("扫描进行中")), { code: result.error || "busy" });
       return result.data;
     },
 
@@ -3404,7 +3410,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       } catch {
         /* ignore */
       }
-      state.scan.message = "正在取消扫描…";
+      state.scan.message = t("正在取消扫描…");
       broadcastScan(true);
       return { cancelling: true };
     },
@@ -3594,7 +3600,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         const candidates = state.tasks.filter((item) => item.id !== task.id && !item.archived && task.workspaceId && item.workspaceId === task.workspaceId)
           .map((item) => ({ id: item.id, title: item.title, score: titleMergeScore(task.title, item.title) }))
           .filter((item) => item.score >= 0.62).sort((left, right) => right.score - left.score).slice(0, 5);
-        json(res, 200, { ok: true, candidates });
+        json(res, 200, { ok: true, candidates: textProjection.tasks(candidates) });
         return;
       }
       if (route === "/ai/models" && method === "GET") {
@@ -3626,7 +3632,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           const payload = body.payload && typeof body.payload === "object" ? body.payload : {};
           const direct = ["task.continuePrompt", "task.analyze", "task.polishPrompt", "backup.preview"].includes(op) || op.startsWith("scan.");
           const data = direct ? await handler(payload) : commitState(() => handler(payload), op.startsWith("task.") ? "task" : "settings");
-          json(res, 200, { ok: true, data });
+          const projected = op.startsWith("task.") && data && typeof data === "object"
+            ? data.task ? { ...data, task: textProjection.task(data.task) }
+              : data.id && data.title ? textProjection.task(data) : data
+            : data;
+          json(res, 200, { ok: true, data: projected });
         } catch (error) {
           const status = classifyError(error);
           json(res, status, {

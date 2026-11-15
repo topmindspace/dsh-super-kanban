@@ -1,3 +1,4 @@
+import { t } from "./i18n.mjs";
 /**
  * Super Kanban — persistence (v2).
  *
@@ -216,7 +217,7 @@ export function emptyScanState() {
     aiAttempts: 0,
     aiPending: 0,
     aiDeferredReason: null, // null | "budget" | "time" | "daily"
-    message: "等待首次扫描",
+    message: t("等待首次扫描"),
     error: null,
   };
 }
@@ -690,19 +691,19 @@ export function createStore({ dshHome, logger } = {}) {
           // Keep a pristine copy of the v1 document before rewriting it.
           copyToBackup(stateFile, "v1");
           state = migrateStateV1V2(stateRead.data);
-          diagnostics.push({ kind: "migrate", message: `state v${version} → v${STORE_VERSION}（任务 ${state.tasks.length} 个）` });
+          diagnostics.push({ kind: "migrate", message: t("state v{0} → v{1}（任务 {2} 个）", [version, STORE_VERSION, state.tasks.length]) });
         }
       } catch (error) {
         // Migration must never brick the board: back up and rebuild.
         backupCorrupt(stateFile, error, "migrate-failed");
         state = createEmptyState();
-        diagnostics.push({ kind: "migrate", message: `迁移失败，已备份并重建：${String(error?.message || error)}` });
+        diagnostics.push({ kind: "migrate", message: t("迁移失败，已备份并重建：{0}", [String(error?.message || error)]) });
       }
       // A scan that was "running" when the process died can never finish.
       if (state.scan && state.scan.state === "running") {
         state.scan.state = "idle";
         state.scan.finishedAt = new Date().toISOString();
-        state.scan.message = "上次扫描未完成（进程重启）";
+        state.scan.message = t("上次扫描未完成（进程重启）");
       }
     }
     state.usage = rolloverUsage(state.usage);
@@ -732,7 +733,7 @@ export function createStore({ dshHome, logger } = {}) {
           delete meta.aiDigestBytes;
           delete meta.llmError;
         }
-        diagnostics.push({ kind: "migrate", message: `sessions-cache v${cacheVersion} → v${STORE_VERSION}（AI 门控标记已重置，首扫将重新研判）` });
+        diagnostics.push({ kind: "migrate", message: t("sessions-cache v{0} → v{1}（AI 门控标记已重置，首扫将重新研判）", [cacheVersion, STORE_VERSION]) });
       }
     }
     return { state, cache, diagnostics };
@@ -797,21 +798,21 @@ export function createStore({ dshHome, logger } = {}) {
 
   function readBackup(raw) {
     if (!isRecord(raw) || raw.version !== STORE_VERSION || !Array.isArray(raw.tasks) || !isRecord(raw.settings)) {
-      throw new TypeError("请选择当前看板导出的备份文件");
+      throw new TypeError(t("请选择当前看板导出的备份文件"));
     }
     const projects = normalizeProjects(raw.projects);
     if (Object.hasOwn(raw, "projects") && (!Array.isArray(raw.projects) || projects.length !== raw.projects.length ||
         projects.some((project, index) => project.workspaceId !== (raw.projects[index].workspaceId || null)))) {
-      throw new TypeError("备份中有无效项目、重复项目或重复的工作区绑定");
+      throw new TypeError(t("备份中有无效项目、重复项目或重复的工作区绑定"));
     }
     const projectIds = new Set(projects.map((project) => project.id));
     const ids = new Set();
     for (const task of raw.tasks) {
       if (!recoverableTask(task) || ids.has(task.id)) {
-        throw new TypeError("备份中有无效或重复的任务");
+        throw new TypeError(t("备份中有无效或重复的任务"));
       }
       if (task.projectId != null && task.projectId !== "" && !projectIds.has(task.projectId)) {
-        throw new TypeError("备份中的任务关联了缺失的项目");
+        throw new TypeError(t("备份中的任务关联了缺失的项目"));
       }
       ids.add(task.id);
     }

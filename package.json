@@ -14,6 +14,7 @@
     "client.js",
     "cordis.patch.yml",
     "server/",
+    "locales/",
     "icon.svg",
     "CHANGELOG.md"
   ],
@@ -43,15 +44,17 @@
     "node": ">=22.19.0"
   },
   "scripts": {
+    "build:i18n": "node scripts/build-i18n.mjs",
+    "check:i18n": "node scripts/build-i18n.mjs --check",
     "test": "node --test \"tests/**/*.test.mjs\"",
     "validate": "node scripts/validate.mjs",
     "check:privacy": "node scripts/check-privacy.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "check:version": "node scripts/check-version.mjs",
-    "check": "npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version",
+    "check": "npm run check:i18n && npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version",
     "market:index": "node scripts/build-market-index.mjs",
     "release": "node scripts/release.mjs",
-    "prepublishOnly": "npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version"
+    "prepublishOnly": "npm run check:i18n && npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version"
   },
   "publishConfig": {
     "access": "public"

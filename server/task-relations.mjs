@@ -1,3 +1,4 @@
+import { t } from "./i18n.mjs";
 import { badRequest, notFound } from "./http.mjs";
 
 export const RELATION_TYPES = ["parent", "depends_on", "related"];
@@ -17,19 +18,19 @@ export function normalizeRelations(value, taskId) {
 }
 
 export function editRelation(tasks, task, { type, taskId, remove }) {
-  if (!RELATION_TYPES.includes(type) || typeof taskId !== "string" || taskId === task.id) throw badRequest("无效的任务关系");
+  if (!RELATION_TYPES.includes(type) || typeof taskId !== "string" || taskId === task.id) throw badRequest(t("无效的任务关系"));
   const links = normalizeRelations(task.relations, task.id);
   const remaining = links.filter((link) => !(link.type === type && (link.taskId === taskId || (!remove && type === "parent"))));
   if (remove) return remaining;
   const index = new Map(tasks.map((item) => [item.id, item]));
-  if (!index.has(taskId)) throw notFound("关联任务不存在");
-  if (remaining.length >= RELATION_LIMIT) throw badRequest("任务关系数量已达上限");
+  if (!index.has(taskId)) throw notFound(t("关联任务不存在"));
+  if (remaining.length >= RELATION_LIMIT) throw badRequest(t("任务关系数量已达上限"));
   if (type !== "related") {
     const pending = [taskId];
     const seen = new Set();
     while (pending.length) {
       const id = pending.pop();
-      if (id === task.id) throw badRequest("该关系会形成循环");
+      if (id === task.id) throw badRequest(t("该关系会形成循环"));
       if (seen.has(id)) continue;
       seen.add(id);
       for (const link of index.get(id)?.relations || []) {
