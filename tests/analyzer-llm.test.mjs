@@ -120,7 +120,7 @@ test("buildUserText includes the digest and the existing-task hints", () => {
   assert.match(text, /digest-body/);
   assert.match(text, /t_1/);
   assert.match(text, /已有的卡/);
-  assert.match(buildUserText("d", []), /\(none\)/);
+  assert.match(buildUserText("d", []), /\(无\)/);
 });
 
 /* ------------------------------------------------------------------ */
@@ -197,7 +197,7 @@ test("analyze repairs malformed JSON by re-asking with a correction message", as
   assert.equal(result.ok, true);
   assert.equal(host.calls.length, 2);
   assert.equal(host.calls[1].messages.length, 2);
-  assert.match(host.calls[1].messages[1].content[0].text, /invalid JSON/);
+  assert.match(host.calls[1].messages[1].content[0].text, /合法 JSON/);
   assert.equal(analyzer.getBudget().calls, 1);
   assert.equal(analyzer.getBudget().attempts, 2);
 });

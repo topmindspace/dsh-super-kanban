@@ -438,10 +438,10 @@ test("loadParsed: builds the compact parsed structure analyzers consume", (t) =>
   // The digest is built from the parsed view and stays within its byte budget.
   const digest = source.buildDigest(parsed, { workspaceTitle: "Alpha Workspace" });
   assert.ok(Buffer.byteLength(digest, "utf8") <= 1500);
-  assert.match(digest, /Session: Fix login flow/);
+  assert.match(digest, /会话:Fix login flow/);
   assert.match(digest, /U\[3\]/);
   assert.match(digest, /A\[5\]/);
-  assert.match(digest, /To-dos:/);
+  assert.match(digest, /待办:/);
 
   const { todoTotal, todoDone } = source.latestTodos(parsed);
   assert.equal(todoTotal, 2);
@@ -729,17 +729,17 @@ test("buildDigest: prioritizes recent changes, todos, errors and tool summary", 
   assert.match(digest, /live:1/);
   assert.match(digest, /end:completed/);
   assert.match(digest, /U\[10\] 最新指令：补测试/);
-  assert.match(digest, /To-dos:/);
+  assert.match(digest, /待办:/);
   assert.match(digest, /\[x\]写测试/);
-  assert.match(digest, /Errors:\[13\]/);
-  assert.match(digest, /Writes:tests\/a\.test\.mjs/);
-  assert.match(digest, /Existing tasks:t_abc「已有卡片」in_progress/);
+  assert.match(digest, /错误:\[13\]/);
+  assert.match(digest, /写入:tests\/a\.test\.mjs/);
+  assert.match(digest, /已有任务:t_abc「已有卡片」in_progress/);
 });
 
 test("buildDigest: a bare parsed view still yields a bounded header line", () => {
   const digest = buildDigest({ id: "x" });
   assert.ok(Buffer.byteLength(digest, "utf8") <= 1500);
-  assert.match(digest, /Session:/);
+  assert.match(digest, /会话:/);
 });
 
 /* ------------------------------------------------------------------ */
@@ -1100,5 +1100,5 @@ test("loadParsed: a missing title falls back to the 会话 + id placeholder, and
     title: null,
     sigKey: `${bareStat.size}:${bareStat.mtimeMs}`,
   });
-  assert.equal(bare.title, "Session bare01");
+  assert.equal(bare.title, "会话 bare01");
 });

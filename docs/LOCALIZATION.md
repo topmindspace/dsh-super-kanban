@@ -18,11 +18,22 @@ HTML-looking text, paths and identifiers literally. This is text formatting, not
 HTML rendering or code evaluation.
 
 `server/i18n.mjs` owns the dependency-free translator. Server-authored labels,
-rule explanations, continuation templates and AI instructions now default to
-English. AI analysis requests English descriptions while retaining verbatim
-evidence quotes. The explicitly requested Translate to Chinese action remains
-available. Original session logs, user input, evidence, paths, IDs, relations and
-stored card content are not automatically rewritten.
+rule explanations, continuation templates and AI instructions use the same
+choice as the board: explicit Chinese (`zh` or `zh-*`) keeps the original
+Chinese text, and English or any other explicit language uses English. When no
+choice is available, generation stays Chinese so an existing install does not
+change language by itself.
+
+The browser sends its resolved locale on API requests. Until a request arrives,
+the host reads the durable DSH preference `locale.preference` from the active
+profile patch (`$DSH_HOME/profiles/<profile>/cordis.patch.yml`) and then from
+`$DSH_HOME/cordis.patch.yml`. The home patch wins when it has its own
+preference, matching DSH's patch order. The value is a plain scalar only;
+expressions are not evaluated. A missing, unreadable, or symbolic patch leaves
+the Chinese default in place. AI analysis asks for descriptions in that board
+language and still requires verbatim evidence quotes. The explicit Translate to
+Chinese action remains available. Original session logs, user input, evidence,
+paths, IDs, relations and stored card content are not automatically rewritten.
 
 The browser is a hand-written DSH loader module, not an ESM build. To preserve
 that deployment contract, `scripts/build-i18n.mjs` embeds the catalog and the exact
@@ -52,8 +63,12 @@ at `$DSH_HOME/storages/super-kanban/translations.en.json`: a JSON object mapping
 exact original strings to English strings. `server/text-projection.mjs` validates
 and caches this bounded, regular local file, and reloads it when it changes.
 Invalid files are ignored without logging their private contents. No translation
-service is called automatically. Only card descriptions are projected; raw
-evidence, source-session titles, paths, IDs and execution state stay untouched.
+service is called automatically. The projection can replace a card's title,
+goal, acceptance criteria, notes, tags, next steps, key facts, issues, subtask
+text, milestone text, history notes and the AI analysis reason when the stored
+string matches exactly.
+Raw evidence, artifact paths, source-session titles, IDs, status, locks,
+provenance and review state stay untouched.
 State views, task-command responses and continuation drafts use the projection;
 exports and the authoritative store retain their original content. The file is
 instance data, never part of the public package or PR.

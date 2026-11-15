@@ -1,4 +1,5 @@
-import { t } from "./i18n.mjs";
+import { t, runWithLanguage } from "./i18n.mjs";
+import { localeFromRequest, localeFromSnapshot, profileNameFromContext, readStoredLocale } from "./locale.mjs";
 import { createTextProjection } from "./text-projection.mjs";
 /**
  * Super Kanban — host service.
@@ -80,7 +81,12 @@ const FIELD_NAMES = ["title", "goal", "status", "progress", "priority", "tags", 
 const LOCKABLE_FIELDS = [...FIELD_NAMES, "keyFacts", "subtasks", "artifacts", "goalObject"];
 const STATUSES = ["backlog", "in_progress", "blocked", "done"];
 /** Chinese labels for generated prompt text (users read the prompt, not the raw key). */
-const STATUS_LABELS = { backlog: t("待办"), in_progress: t("进行中"), blocked: t("受阻"), done: t("已完成") };
+const STATUS_LABELS = {
+  get backlog() { return t("待办"); },
+  get in_progress() { return t("进行中"); },
+  get blocked() { return t("受阻"); },
+  get done() { return t("已完成"); },
+};
 const PRIORITIES = ["P0", "P1", "P2", "P3"];
 const SSE_HEARTBEAT_MS = 15_000;
 const SSE_MAX_CLIENTS = 32;
@@ -108,6 +114,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   const analyzer = createLlmAnalyzer({ ctx, logger, reserveUnit: reserveAiUnit });
   const quickChat = createQuickChat({ llmService, resolveAiRoute });
   const store = createStore({ dshHome, logger });
+  let reportedLanguage = null;
+  function resolveBoardLanguage() {
+    if (reportedLanguage) return reportedLanguage;
+    return localeFromSnapshot(ctx) || readStoredLocale(dshHome, profileNameFromContext(ctx)) || "zh";
+  }
   /**
    * Test seams only (production uses the module constants): the AI-phase wall
    * clock and the model-catalog timeout.
@@ -116,7 +127,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   const aiCatalogTimeoutMsValue =
     Number.isFinite(aiCatalogTimeoutMs) && aiCatalogTimeoutMs > 0 ? aiCatalogTimeoutMs : AI_CATALOG_TIMEOUT_MS;
 
-  const loaded = store.load();
+  const loaded = runWithLanguage(resolveBoardLanguage(), () => store.load());
   let state = loaded.state;
   let cache = loaded.cache;
   let stopped = false;
@@ -1565,6 +1576,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   }
 
   function startScan(mode = "incremental") {
+    return runWithLanguage(resolveBoardLanguage(), () => scanNow(mode));
+  }
+
+  function scanNow(mode = "incremental") {
     if (stopped) return { ok: false, error: "stopped", message: t("服务已停止") };
     // The analyzer instance (budget/transport) is shared with explicit AI
     // commands, so a scan must never overlap task.analyze/task.polishPrompt.
@@ -3560,7 +3575,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     };
   }
 
-  async function handle(req, res, { route = "/", url, method = "GET" } = {}) {
+  async function handle(req, res, options = {}) {
+    const reported = localeFromRequest(req, options.url);
+    if (reported) reportedLanguage = reported;
+    return runWithLanguage(resolveBoardLanguage(), () => handleLocalized(req, res, options));
+  }
+
+  async function handleLocalized(req, res, { route = "/", url, method = "GET" } = {}) {
     if (stopped) {
       json(res, 503, { ok: false, error: "stopped", message: "service stopped" });
       return;

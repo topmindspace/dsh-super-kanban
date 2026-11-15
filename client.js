@@ -1393,11 +1393,17 @@ window.__ModuleLoader__.load({
       return Boolean(event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229);
     }
 
-    async function apiRequest(path, options) {
+    function localeHeaders(extra) {
+      const language = activeLanguage();
+      return language ? { "x-super-kanban-locale": language, ...(extra || {}) } : { ...(extra || {}) };
+    }
+
+    async function apiRequest(path, options = {}) {
       const url = new URL(`${API}${path}`, document.baseURI);
       const response = await fetch(url, {
         credentials: "same-origin",
         ...options,
+        headers: localeHeaders(options.headers),
       });
       let payload = null;
       try {
@@ -3524,7 +3530,10 @@ button.sk-task-row-main{cursor:pointer}
           if (document.hidden || eventTimer) return;
           eventTimer = setTimeout(() => { eventTimer = null; refresh(); }, 180);
         };
-        const stream = typeof EventSource === "function" ? new EventSource(new URL(`${API}/events`, document.baseURI)) : null;
+        const eventsUrl = new URL(`${API}/events`, document.baseURI);
+        const eventsLanguage = activeLanguage();
+        if (eventsLanguage) eventsUrl.searchParams.set("locale", eventsLanguage);
+        const stream = typeof EventSource === "function" ? new EventSource(eventsUrl) : null;
         stream?.addEventListener("changed", invalidateBoardState);
         stream?.addEventListener("scan", notify);
         document.addEventListener("visibilitychange", visible);
@@ -6646,7 +6655,7 @@ button.sk-task-row-main{cursor:pointer}
 
     async function readChatReply({ mode, input, context, reference, signal, onEvent }) {
       const response = await fetch(new URL(`${API}/chat`, document.baseURI), {
-        method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        method: "POST", credentials: "same-origin", headers: localeHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ mode, input, context, reference }), signal,
       });
       if (!response.ok) {

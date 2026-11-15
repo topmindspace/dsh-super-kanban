@@ -406,8 +406,8 @@ test("auto budget analyzes every due session and reports no remainder", async (t
   assert.equal(scan.aiAttempts, 3);
   assert.equal(scan.aiPending, 0);
   assert.equal(scan.aiDeferredReason, null);
-  assert.match(scan.message, /AI 3 calls\/4500 tokens/);
-  assert.doesNotMatch(scan.message, /Remaining/);
+  assert.match(scan.message, /AI 3 次\/4500 tokens/);
+  assert.doesNotMatch(scan.message, /剩余/);
   assert.equal(host.streams.length, 3);
   // The deprecated settings.model must never be used as the request model.
   for (const options of host.streams) {
@@ -447,8 +447,8 @@ test("fixed budget truncates the scan and reports the remaining sessions", async
   assert.equal(scan.aiAttempts, 5);
   assert.equal(scan.aiPending, 3, "aiPending counts sessions that got no AI verdict");
   assert.equal(scan.aiDeferredReason, "budget");
-  assert.match(scan.message, /This scan's AI budget is exhausted \(5 calls\); rules only for the rest/);
-  assert.match(scan.message, /Remaining: 3 sessions continue in the next scan/);
+  assert.match(scan.message, /本次 AI 预算已用完（5 次）其余仅规则/);
+  assert.match(scan.message, /剩余 3 个会话下次扫描继续/);
   assert.equal(host.streams.length, 5);
 });
 
@@ -473,9 +473,9 @@ test("daily-capped budget reports post-scan usage and resumes after the limit is
   assert.equal(first.scan.aiPending, 2);
   assert.equal(first.scan.aiDeferredReason, "daily");
   // Post-scan accounting: 148 + 2 = 150, never the stale pre-scan 148/150.
-  assert.match(first.scan.message, /Today's AI budget is exhausted \(150\/150\)/);
+  assert.match(first.scan.message, /今日 AI 预算已用完（150\/150）/);
   assert.doesNotMatch(first.scan.message, /148\/150/);
-  assert.match(first.scan.message, /Remaining: 2 sessions continue tomorrow/);
+  assert.match(first.scan.message, /剩余 2 个会话明日继续/);
 
   // Raising the daily limit lets the deferred sessions resume on the next scan.
   const patched = await command(service, "settings.update", { patch: { dailyAiCallLimit: 500 } });
@@ -486,7 +486,7 @@ test("daily-capped budget reports post-scan usage and resumes after the limit is
   assert.equal(second.scan.aiCalls, 2);
   assert.equal(second.scan.aiPending, 0);
   assert.equal(second.scan.aiDeferredReason, null);
-  assert.match(second.scan.message, /AI 2 calls\/3000 tokens/);
+  assert.match(second.scan.message, /AI 2 次\/3000 tokens/);
 });
 
 test("daily budget already exhausted: no calls, rules cards, tomorrow message", async (t) => {
@@ -504,9 +504,9 @@ test("daily budget already exhausted: no calls, rules cards, tomorrow message", 
   assert.equal(state.scan.aiPending, 2);
   assert.equal(state.scan.aiDeferredReason, "daily");
   assert.equal(host.streams.length, 0, "no provider call may happen when the daily budget is gone");
-  assert.match(state.scan.message, /Today's AI budget is exhausted \(150\/150\)/);
-  assert.match(state.scan.message, /Remaining: 2 sessions continue tomorrow/);
-  assert.match(state.scan.message, /No AI calls in this scan/);
+  assert.match(state.scan.message, /今日 AI 预算已用完（150\/150）/);
+  assert.match(state.scan.message, /剩余 2 个会话明日继续/);
+  assert.match(state.scan.message, /本次无 AI 调用/);
   // Rules cards are still produced and existing cards are untouched.
   assert.equal(state.tasks.length, 2);
   for (const task of state.tasks) {
@@ -582,8 +582,8 @@ test("AI wall-clock guard defers the remaining sessions", async (t) => {
   assert.equal(state.scan.aiAttempts, 0);
   assert.equal(state.scan.aiPending, 2);
   assert.equal(state.scan.aiDeferredReason, "time");
-  assert.match(state.scan.message, /The AI phase reached its 10-minute limit/);
-  assert.match(state.scan.message, /Remaining: 2 sessions continue in the next scan/);
+  assert.match(state.scan.message, /本次 AI 阶段已达 10 分钟上限/);
+  assert.match(state.scan.message, /剩余 2 个会话下次扫描继续/);
   assert.equal(host.streams.length, 0);
 });
 
@@ -612,7 +612,7 @@ test("a failed analysis cools down and then retries after the cooldown", async (
   assert.equal(cooling.scan.aiDue, 0, "the failed session is cooling down");
   assert.equal(cooling.scan.aiCalls, 0);
   assert.equal(secondHost.streams.length, 0);
-  assert.match(cooling.scan.message, /No AI calls in this scan/);
+  assert.match(cooling.scan.message, /本次无 AI 调用/);
   second.stop();
 
   // Expire the cooldown on disk, then the session is retried and analyzed.
@@ -646,7 +646,7 @@ test("task.analyze counts an ignore verdict as a consumed AI call", async (t) =>
   assert.equal(data.engine, "rules", "an ignore verdict creates/updates no LLM card");
   assert.equal(data.aiCalls, 1, "the ignored analysis still consumed one budget unit");
   assert.equal(data.tokens, 920);
-  assert.match(data.message, /needs no card/);
+  assert.match(data.message, /无需建卡/);
   const state = await getState(service);
   assert.equal(state.usage.calls, 1);
 });
@@ -795,8 +795,8 @@ test("no native llm service: rules-only scan, explicit message, rules provenance
   assert.equal(state.scan.aiCalls, 0);
   assert.equal(state.scan.aiPending, 1);
   assert.equal(state.scan.aiDeferredReason, null);
-  assert.match(state.scan.message, /This DSH instance has no AI model service/);
-  assert.match(state.scan.message, /Remaining: 1 sessions continue in the next scan/, "CONTRACT §5.4: aiPending must be stated in the message");
+  assert.match(state.scan.message, /当前 DSH 未提供 AI 模型服务/);
+  assert.match(state.scan.message, /剩余 1 个会话下次扫描继续/, "CONTRACT §5.4: aiPending must be stated in the message");
   assert.equal(host.streams.length, 0);
   assert.equal(state.tasks.length, 1);
   assert.equal(state.tasks[0].ai.engine, "rules");
@@ -845,7 +845,7 @@ test("explicit route with an unregistered provider: rules-only, never switches m
   assert.equal(state.scan.aiCalls, 0);
   assert.equal(state.scan.aiPending, 1);
   assert.equal(host.streams.length, 0);
-  assert.match(state.scan.message, /Selected model provider ghost-provider is no longer available/);
+  assert.match(state.scan.message, /所选模型提供方 ghost-provider 已不可用/);
   assert.equal(state.tasks[0].ai.engine, "rules");
 });
 
@@ -878,7 +878,7 @@ test("unregistered DSH default provider: rules-only, never falls back to the cat
   const state = await runScan(service);
   assert.equal(state.scan.aiCalls, 0);
   assert.equal(host.streams.length, 0);
-  assert.match(state.scan.message, /DSH default model provider ghost-default is unavailable/);
+  assert.match(state.scan.message, /DSH 默认模型提供方 ghost-default 不可用/);
   assert.equal(state.tasks[0].ai.engine, "rules");
 });
 
@@ -893,7 +893,7 @@ test("no default model: scan stays local until the user selects a model", async 
 
   const initial = await runScan(service);
   assert.equal(initial.scan.aiCalls, 0);
-  assert.match(initial.scan.message, /DSH has no default model/);
+  assert.match(initial.scan.message, /DSH 尚未设置默认模型/);
   assert.equal(host.streams.length, 0);
   assert.equal((await command(service, "settings.model", { provider: "p1", model: "m1" })).status, 200);
   const state = await runScan(service);
@@ -918,7 +918,7 @@ test("no default model and an empty catalog: rules-only with a setup message", a
   const state = await runScan(service);
   assert.equal(state.scan.aiCalls, 0);
   assert.equal(host.streams.length, 0);
-  assert.match(state.scan.message, /DSH has no default model/);
+  assert.match(state.scan.message, /DSH 尚未设置默认模型/);
   assert.equal(state.tasks[0].ai.engine, "rules");
 });
 
@@ -934,8 +934,8 @@ test("registered provider with an empty catalog still gets one attempt, then deg
   assert.equal(host.streams.length, 1, "no pre-emptive block: one route attempt is made");
   assert.equal(state.scan.aiCalls, 0);
   assert.equal(state.scan.aiPending, 1);
-  assert.match(state.scan.message, /1 session analyses failed; retry in 5 minutes/);
-  assert.match(state.scan.message, /Remaining: 1 sessions continue in the next scan/);
+  assert.match(state.scan.message, /1 个会话研判失败，5 分钟后重试/);
+  assert.match(state.scan.message, /剩余 1 个会话下次扫描继续/);
   assert.equal(state.tasks[0].ai.engine, "rules");
 });
 
@@ -957,11 +957,11 @@ test("task.analyze holds the AI mutex: scans and a second analyze get 409", asyn
   const blockedScan = await command(service, "scan.start", { mode: "full" });
   assert.equal(blockedScan.status, 409, "a scan must not start while an explicit AI command runs");
   assert.equal(blockedScan.json.error, "busy");
-  assert.match(blockedScan.json.message, /An AI task is running/);
+  assert.match(blockedScan.json.message, /AI 任务进行中/);
 
   const blockedAnalyze = await command(service, "task.analyze", { id: created.json.data.id });
   assert.equal(blockedAnalyze.status, 409, "two concurrent analyzes must not share the analyzer budget");
-  assert.match(blockedAnalyze.json.message, /Another AI task is running/);
+  assert.match(blockedAnalyze.json.message, /其他 AI 任务进行中/);
 
   const blockedPolish = await command(service, "task.polishPrompt", { prompt: "继续修复登录" });
   assert.equal(blockedPolish.status, 409, "polish must be rejected while an analyze runs");
@@ -995,7 +995,7 @@ test("task.polishPrompt holds the same AI mutex as task.analyze", async (t) => {
   await waitFor(() => host.streams.length === 1);
   const blockedAnalyze = await command(service, "task.analyze", { id: created.json.data.id });
   assert.equal(blockedAnalyze.status, 409);
-  assert.match(blockedAnalyze.json.message, /Another AI task is running/);
+  assert.match(blockedAnalyze.json.message, /其他 AI 任务进行中/);
 
   gate.resolve();
   const polished = await pendingPolish;

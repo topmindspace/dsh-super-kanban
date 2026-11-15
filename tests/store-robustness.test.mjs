@@ -167,10 +167,10 @@ test("backup rejects broken project links before replacing the board", (t) => {
   const store = createStore({ dshHome: tempHome(t), logger: { warn() {} } });
   const project = { id: `p_${randomUUID()}`, name: "示例项目", workspaceId: "ws" };
   const snapshot = { ...createEmptyState(), tasks: [{ id: "task", title: "Task", projectId: project.id }] };
-  assert.throws(() => store.readBackup(snapshot), /missing project/);
-  assert.throws(() => store.readBackup({ ...snapshot, projects: [project, project] }), /duplicate projects/);
+  assert.throws(() => store.readBackup(snapshot), /缺失的项目/);
+  assert.throws(() => store.readBackup({ ...snapshot, projects: [project, project] }), /重复项目/);
   const other = { ...project, id: `p_${randomUUID()}` };
-  assert.throws(() => store.readBackup({ ...snapshot, projects: [project, other] }), /workspace assignments/);
+  assert.throws(() => store.readBackup({ ...snapshot, projects: [project, other] }), /工作区绑定/);
   assert.equal(store.readBackup({ ...snapshot, projects: [project] }).tasks[0].projectId, project.id);
 });
 

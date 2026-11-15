@@ -40,7 +40,8 @@ const RETRYABLE_CODES = new Set([
   "stream-closed",
 ]);
 
-const SYSTEM_PROMPT = [
+function SYSTEM_PROMPT() {
+  return [
   t("你是任务看板研判引擎。输入是一段 DSH（AI 编程助手）会话的紧凑摘要，输出任务卡 JSON。"),
   t("只输出一个 JSON 对象，不要 markdown 代码块，不要解释，不要任何 JSON 之外的文字。结构："),
   t("{ \"sessionSummary\":\"≤60字\", \"ignore\":false,"),
@@ -63,9 +64,11 @@ const SYSTEM_PROMPT = [
   t("7. 待办快照可能是很早以前的旧计划，只作参考，不要因旧快照未完成而把已完成任务判成进行中。"),
   t("8. 没有明确用户委托时 ignore=true、tasks=[]。输出必须紧凑完整，确保 JSON 闭合。"),
 ].join("\n");
+}
 
-const POLISH_SYSTEM_PROMPT =
-  t("你是提示词润色助手。把用户给出的「继续任务」提示词改写得更清晰、可执行：保留原意与所有事实，补充验收标准与汇报要求，不要添加新需求，不要解释，只输出润色后的提示词正文（≤600字）。");
+function POLISH_SYSTEM_PROMPT() {
+  return t("你是提示词润色助手。把用户给出的「继续任务」提示词改写得更清晰、可执行：保留原意与所有事实，补充验收标准与汇报要求，不要添加新需求，不要解释，只输出润色后的提示词正文（≤600字）。");
+}
 
 /**
  * Some model outputs contain a malformed evidence field like `"seq=917"`
@@ -191,7 +194,7 @@ export function createLlmAnalyzer({ ctx, logger, reserveUnit = () => true } = {}
     try {
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         const attemptMessages = lastExtractFailed ? [...messages, correctionMessage] : messages;
-        const outcome = await streamOnce({ llm, provider, model, system: SYSTEM_PROMPT, messages: attemptMessages, signal });
+        const outcome = await streamOnce({ llm, provider, model, system: SYSTEM_PROMPT(), messages: attemptMessages, signal });
         budget.attempts += 1;
         if (!outcome.ok) {
           lastError = { code: outcome.code, error: outcome.message || outcome.code };
@@ -247,7 +250,7 @@ export function createLlmAnalyzer({ ctx, logger, reserveUnit = () => true } = {}
       llm,
       provider,
       model,
-      system: POLISH_SYSTEM_PROMPT,
+      system: POLISH_SYSTEM_PROMPT(),
       messages: [{ role: "user", content: [{ type: "text", text: text.slice(0, 3000) }] }],
       signal,
       maxTokens: POLISH_OUTPUT_TOKENS,

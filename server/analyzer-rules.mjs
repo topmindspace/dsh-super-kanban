@@ -42,7 +42,8 @@ const NEGATIVE_PATTERNS = [
 ];
 const STRONG_NEGATIVE = [/还是不行/, /报错/, /失败/, /不对/, /坏了/, /崩了/, /无法/, /回滚/];
 
-const TAG_RULES = [
+function tagRules() {
+  return [
   { tag: t("开发"), keywords: [/代码/, /开发/, /插件/, /修复/, /bug/i, /重构/, /脚本/, /python/i, /node/i, /typescript/i, /api/i, /前端/, /后端/, /测试/, /部署/i, /database/i] },
   { tag: t("文档整理"), keywords: [/文档/, /readme/i, /索引/, /整理/, /链接/, /路径/, /目录/, /归档/, /规范/, /说明/, /markdown/i] },
   { tag: t("视觉设计"), keywords: [/svg/i, /动画/, /截图/, /视觉/, /设计/, /图片/, /海报/, /封面/, /配色/, /ui/i, /样式/, /长图/, /排版/] },
@@ -50,6 +51,7 @@ const TAG_RULES = [
   { tag: t("调研"), keywords: [/调研/, /研究/, /收集/, /搜索/, /论文/, /对比/, /分析/, /选型/] },
   { tag: t("数据处理"), keywords: [/数据/, /表格/, /csv/i, /excel/i, /统计/, /压缩/, /爬取/] },
 ];
+}
 
 function clamp(value, min, max) {
   const number = Number(value);
@@ -123,7 +125,7 @@ function deriveTags(parsed, workspaceTitle) {
   const corpus = [parsed.title, ...parsed.users.slice(0, 3).map((message) => message.text)].join("\n");
   const tags = [];
   if (workspaceTitle && workspaceTitle.length <= 12) tags.push(workspaceTitle);
-  for (const rule of TAG_RULES) {
+  for (const rule of tagRules()) {
     if (tags.length >= 4) break;
     if (rule.keywords.some((keyword) => keyword.test(corpus))) tags.push(rule.tag);
   }

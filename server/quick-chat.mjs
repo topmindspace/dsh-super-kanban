@@ -13,13 +13,13 @@ const CHAT_TIMEOUT_MS = 60_000;
 const CHAT_MAX_TOKENS = 2000;
 // 只有 ask 接受追问上下文与参考资料；其余模式每次只处理当前输入。
 const SYSTEM_PROMPTS = {
-  ask: t("直接简洁地回答用户的问题，使用用户的语言。只输出回答正文。"),
-  "translate-zh": t("把用户提供的文字译成简体中文。保留原意和段落。只输出译文。"),
-  "translate-en": "Translate the user's text into English. Preserve meaning and paragraphs. Output only the translation.",
-  polish: t("润色用户提供的文字：保持原意和原语言，修正语病，让表达清晰简洁。只输出润色后的文字。"),
-  summarize: t("用用户的语言总结所给内容：先用一句话给出结论，再列出 3–6 条要点。只输出总结。"),
-  explain: t("用用户的语言解释所给的报错、代码或术语：先说明含义，再给出最可能的原因和下一步建议。保持简洁。"),
-  prompt: t("把用户的想法改写成一条可以直接发给 AI 编程助手的任务提示词：写清目标、范围、约束和验收标准。不要臆造细节，缺少的信息列为「待确认」。只输出提示词正文。"),
+  get ask() { return t("直接简洁地回答用户的问题，使用用户的语言。只输出回答正文。"); },
+  get "translate-zh"() { return t("把用户提供的文字译成简体中文。保留原意和段落。只输出译文。"); },
+  get "translate-en"() { return "Translate the user's text into English. Preserve meaning and paragraphs. Output only the translation."; },
+  get polish() { return t("润色用户提供的文字：保持原意和原语言，修正语病，让表达清晰简洁。只输出润色后的文字。"); },
+  get summarize() { return t("用用户的语言总结所给内容：先用一句话给出结论，再列出 3–6 条要点。只输出总结。"); },
+  get explain() { return t("用用户的语言解释所给的报错、代码或术语：先说明含义，再给出最可能的原因和下一步建议。保持简洁。"); },
+  get prompt() { return t("把用户的想法改写成一条可以直接发给 AI 编程助手的任务提示词：写清目标、范围、约束和验收标准。不要臆造细节，缺少的信息列为「待确认」。只输出提示词正文。"); },
 };
 
 function readContext(context) {
