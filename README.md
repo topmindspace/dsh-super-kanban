@@ -102,5 +102,6 @@
 
 - [@mufanmu](https://github.com/mufanmu) 在 [PR #3](https://github.com/topmindspace/dsh-super-kanban/pull/3) 为悬浮入口增加了已结束轮次的审阅条。同一作者在 [issue #4](https://github.com/topmindspace/dsh-super-kanban/issues/4) 说明了自动任务标题停留在「会话 + id」占位符的原因；标题更新的代码在维护者的 [PR #6](https://github.com/topmindspace/dsh-super-kanban/pull/6)。
 - [@tangyixiao](https://github.com/tangyixiao) 在 [PR #7](https://github.com/topmindspace/dsh-super-kanban/pull/7) 为 CI 增加了 Windows 上 Node.js 22.19 与 24 的检查，并让源码安装保护测试能在 Git for Windows 的 Bash 下运行。
+- [@evgyur](https://github.com/evgyur) 在 [PR #8](https://github.com/topmindspace/dsh-super-kanban/pull/8) 增加了英文界面和共享文案目录。中文和未设置语言时，服务端生成的说明与标签仍用中文；明确选择英文或其他语言时用英文。可选的本机旧文案投影不改已保存的任务和证据。
 
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace
