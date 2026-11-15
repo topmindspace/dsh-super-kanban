@@ -7,11 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-15
+
+### 新增
+
+- 英文界面和共享文案目录。界面跟随 DSH 语言：中文，或尚未选择语言时，服务端生成的说明和标签仍为中文；明确选择英文或其他语言时使用英文。可选的本机旧文案投影只用于显示和续做草稿，不改已保存的任务、证据、路径和标识符。
+
+### 改进
+
+- CI 在 Windows 上用 Node.js 22.19 和 24 运行离线检查（测试、仓库校验、隐私、文档、版本和打包演练）。这不表示 Windows 桌面界面已经逐一验证。
+
 ### 修复
 
 - 自动任务标题跟随来源会话的最新标题：解析时优先采用日志里的 `session/title` 事件，投影缓存中的早期占位（「会话 + id 后六位」）只作兜底；扫描在会话改名后刷新尚未被用户改过的自动任务标题，导出和任务卡同步更新。用户编辑过的标题、手动任务的标题，以及多会话任务上非主会话的改名，都不会覆盖任务标题。升级后首次增量扫描会重新解析一次旧缓存，不必等会话文件再变化或做全量扫描。
 
-感谢 [@mufanmu](https://github.com/mufanmu) 定位了根因。
+感谢 [@mufanmu](https://github.com/mufanmu) 定位标题问题，[@tangyixiao](https://github.com/tangyixiao) 补上 Windows 离线 CI，[@evgyur](https://github.com/evgyur) 贡献英文界面。
 
 ## [0.10.1] - 2026-11-13
 
@@ -488,7 +498,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.8.0...v0.9.0

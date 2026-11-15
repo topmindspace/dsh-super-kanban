@@ -17,7 +17,7 @@
 ### Install
 
 - **Plugin market** · In DSH, open **Plugins → Discover** and add `https://topmindspace.github.io/dsh-super-kanban/index.json`. Open **Super Kanban**, choose a version, and install it. If Discover is missing, enable the experimental plugin market using the [installation guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐).
-- **npm** · Open **Plugins → Add plugin** and enter `dsh-super-kanban@0.10.1`. Replace `0.10.1` with the version you want.
+- **npm** · Open **Plugins → Add plugin** and enter `dsh-super-kanban@0.10.2`. Replace `0.10.2` with the version you want.
 - **Git or local folder** · Add the repository URL or select a local folder in the plugin page. To pin a version, check out its tag and follow the [source installation steps](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本).
 
 Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or uninstall](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)
@@ -100,8 +100,8 @@ Run `npm run check` for tests and validation. Please report security issues priv
 
 ## Contributors
 
-- [@mufanmu](https://github.com/mufanmu) added the finished-turn review strip above the floating launcher in [PR #3](https://github.com/topmindspace/dsh-super-kanban/pull/3). The same author explained why automatic task titles stayed on the “session + id” placeholder in [issue #4](https://github.com/topmindspace/dsh-super-kanban/issues/4). The title-update code is in the maintainer's [PR #6](https://github.com/topmindspace/dsh-super-kanban/pull/6).
-- [@tangyixiao](https://github.com/tangyixiao) added Windows CI for Node.js 22.19 and 24 in [PR #7](https://github.com/topmindspace/dsh-super-kanban/pull/7), and made the source-install protection test run under the Bash shipped with Git for Windows.
-- [@evgyur](https://github.com/evgyur) added the English interface and shared message catalog in [PR #8](https://github.com/topmindspace/dsh-super-kanban/pull/8). Server-generated descriptions and tags stay Chinese for Chinese and for an unset locale, and use English when English or another language is selected explicitly. The optional private legacy-text projection does not rewrite saved tasks or evidence.
+- [@mufanmu](https://github.com/mufanmu) · [#3](https://github.com/topmindspace/dsh-super-kanban/pull/3)
+- [@tangyixiao](https://github.com/tangyixiao) · [#7](https://github.com/topmindspace/dsh-super-kanban/pull/7)
+- [@evgyur](https://github.com/evgyur) · [#8](https://github.com/topmindspace/dsh-super-kanban/pull/8)
 
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace

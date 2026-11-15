@@ -17,7 +17,7 @@
 ### 安装
 
 - **插件市场** · 在 DSH 的 **插件 → 发现** 添加索引源 `https://topmindspace.github.io/dsh-super-kanban/index.json`，打开 **Super Kanban**，选择版本并安装。找不到「发现」时，按[安装指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-a插件市场索引推荐)开启实验性插件市场。
-- **npm** · 在 **插件 → 添加插件** 输入 `dsh-super-kanban@0.10.1`。这里以 `0.10.1` 为例，可换成目标版本。
+- **npm** · 在 **插件 → 添加插件** 输入 `dsh-super-kanban@0.10.2`。这里以 `0.10.2` 为例，可换成目标版本。
 - **Git 或本地目录** · 在插件页添加仓库地址或选择本地目录。需要固定版本时，先检出对应标签，再按[源码安装步骤](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md#方式-d本地目录源码脚本)安装。
 
 安装后启用插件并刷新 DSH。[验证版本、升级、回滚与卸载](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md)
@@ -100,8 +100,8 @@
 
 ## 贡献者
 
-- [@mufanmu](https://github.com/mufanmu) 在 [PR #3](https://github.com/topmindspace/dsh-super-kanban/pull/3) 为悬浮入口增加了已结束轮次的审阅条。同一作者在 [issue #4](https://github.com/topmindspace/dsh-super-kanban/issues/4) 说明了自动任务标题停留在「会话 + id」占位符的原因；标题更新的代码在维护者的 [PR #6](https://github.com/topmindspace/dsh-super-kanban/pull/6)。
-- [@tangyixiao](https://github.com/tangyixiao) 在 [PR #7](https://github.com/topmindspace/dsh-super-kanban/pull/7) 为 CI 增加了 Windows 上 Node.js 22.19 与 24 的检查，并让源码安装保护测试能在 Git for Windows 的 Bash 下运行。
-- [@evgyur](https://github.com/evgyur) 在 [PR #8](https://github.com/topmindspace/dsh-super-kanban/pull/8) 增加了英文界面和共享文案目录。中文和未设置语言时，服务端生成的说明与标签仍用中文；明确选择英文或其他语言时用英文。可选的本机旧文案投影不改已保存的任务和证据。
+- [@mufanmu](https://github.com/mufanmu) · [#3](https://github.com/topmindspace/dsh-super-kanban/pull/3)
+- [@tangyixiao](https://github.com/tangyixiao) · [#7](https://github.com/topmindspace/dsh-super-kanban/pull/7)
+- [@evgyur](https://github.com/evgyur) · [#8](https://github.com/topmindspace/dsh-super-kanban/pull/8)
 
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace
