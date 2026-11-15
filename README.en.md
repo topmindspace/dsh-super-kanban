@@ -101,5 +101,6 @@ Run `npm run check` for tests and validation. Please report security issues priv
 ## Contributors
 
 - [@mufanmu](https://github.com/mufanmu) added the finished-turn review strip above the floating launcher in [PR #3](https://github.com/topmindspace/dsh-super-kanban/pull/3). The same author explained why automatic task titles stayed on the “session + id” placeholder in [issue #4](https://github.com/topmindspace/dsh-super-kanban/issues/4). The title-update code is in the maintainer's [PR #6](https://github.com/topmindspace/dsh-super-kanban/pull/6).
+- [@tangyixiao](https://github.com/tangyixiao) added Windows CI for Node.js 22.19 and 24 in [PR #7](https://github.com/topmindspace/dsh-super-kanban/pull/7), and made the source-install protection test run under the Bash shipped with Git for Windows.
 
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace
