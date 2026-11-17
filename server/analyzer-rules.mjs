@@ -367,14 +367,21 @@ function buildKeyFacts(parsed, { goalText, subtasks, issues, artifacts, decision
 }
 
 const CASUAL_MESSAGES = /^(?:你好(?:呀|啊|吗)?|您好(?:呀|啊)?|嗨|哈[啰喽]|哈哈+|早安|早上好|晚上好|晚安|你是谁|在吗|谢谢(?:你|您)?(?:啦|了)?|多谢|感谢(?:你|您)?|再见|拜拜|hi|hey|hello|hello there|good (?:morning|evening|night)|how are you|who are you|are you there|thanks(?: a lot)?|thank you(?: very much)?|bye|goodbye)[\s\p{P}]*$/iu;
+const CASUAL_REPLIES = /^(?:在的|我在|不客气|不用谢|很高兴见到(?:你|您)|有什么(?:我)?可以帮(?:助)?(?:你|您)的(?:吗)?|(?:你|您)需要什么帮助|nice to meet you|you(?:'|’)re welcome|(?:how can i help you|what can i do for you)(?: today)?|i(?:'|’)m here)$/iu;
+
+function isCasualReply({ text, images }) {
+  const sentences = text.split(/[。！？!?，,]+|\.(?=\s|$)/u).map((part) => part.trim()).filter(Boolean);
+  return !images && sentences.length > 0 && sentences.every((part) => CASUAL_MESSAGES.test(part) || CASUAL_REPLIES.test(part));
+}
 
 /** Classify only whole conversations composed of recognizable social messages. */
 export function isCasualConversation(parsed) {
   return parsed.users.length > 0 &&
     !parsed.goal?.text &&
-    ![parsed.toolCalls, parsed.toolResults, parsed.todoSnapshots, parsed.deliverables, parsed.errors, parsed.workspaceChanges]
+    ![parsed.toolCalls, parsed.toolResults, parsed.todoSnapshots, parsed.deliverables, parsed.errors, parsed.workspaceChanges, parsed.signals]
       .some((items) => items?.length) &&
-    parsed.users.every(({ text, images }) => !images && CASUAL_MESSAGES.test(String(text || "").trim()));
+    parsed.users.every(({ text, images }) => !images && CASUAL_MESSAGES.test(text.trim())) &&
+    parsed.assistants.every(isCasualReply);
 }
 
 /**

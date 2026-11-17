@@ -934,11 +934,11 @@ export function createSessionSource({ dshHome } = {}) {
           break;
         case "user/message": {
           const text = textOfContent(data.content).trim();
-          if (!text) break;
+          const images = countImages(data.content);
           const sourceKind = data.source?.kind;
-          if (sourceKind === undefined || sourceKind === "user") {
-            users.push({ seq: event.seq, time: event.time, text, images: countImages(data.content) });
-          } else if (ASYNC_SIGNAL_KINDS.has(sourceKind)) {
+          if ((text || images) && (sourceKind === undefined || sourceKind === "user")) {
+            users.push({ seq: event.seq, time: event.time, text, images });
+          } else if (text && ASYNC_SIGNAL_KINDS.has(sourceKind)) {
             // Injected context (team mail, background-job notices, model switch…)
             // is not a user request but can explain state changes in the digest.
             signals.push({ seq: event.seq, time: event.time, kind: sourceKind, text });
@@ -948,8 +948,9 @@ export function createSessionSource({ dshHome } = {}) {
         case "assistant/message": {
           assistantTexts += 1;
           const text = textOfContent(data.message?.content).trim();
+          const images = countImages(data.message?.content);
+          if (text || images) assistants.push({ seq: event.seq, time: event.time, turn: Number(data.turn) || 0, text, images });
           if (text) {
-            assistants.push({ seq: event.seq, time: event.time, turn: Number(data.turn) || 0, text });
             lastAssistantText = { seq: event.seq, time: event.time, text };
           }
           for (const content of data.message?.content || []) {

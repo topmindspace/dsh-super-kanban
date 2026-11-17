@@ -724,6 +724,31 @@ test("the scan deadline releases a hung model request and applies the local verd
   assert.equal(host.streams[0].signal.aborted, true);
 });
 
+test("a session merged while its AI call is pending still contributes local evidence", async (t) => {
+  const gate = deferredScript(ignoreScript());
+  const host = makeHost({ scripts: [gate.script] });
+  const { service } = await setup(t, {
+    sessionIds: ["sess-01"],
+    host,
+    state: { tasks: [
+      { id: "target", title: "Keep this task", origin: "manual", primarySessionId: "primary", sessions: [{ id: "primary" }] },
+      { id: "source", title: "Source task", origin: "auto", primarySessionId: "sess-01", sessions: [{ id: "sess-01" }] },
+    ] },
+  });
+  t.after(() => gate.resolve());
+  assert.equal((await command(service, "scan.start", { mode: "full" })).status, 200);
+  await waitFor(() => host.streams.length === 1);
+  assert.equal((await command(service, "task.merge", { id: "target", sourceId: "source" })).status, 200);
+  gate.resolve();
+
+  const after = await waitForScan(service);
+  assert.equal(after.scan.aiCalls, 1);
+  assert.equal(after.scan.updatedTasks, 1);
+  assert.equal(after.scan.newTasks, 0);
+  assert.deepEqual(after.tasks.map((task) => task.id), ["target"]);
+  assert.ok(after.tasks[0].evidence.some((item) => item.sessionId === "sess-01"));
+});
+
 /* ------------------------------------------------------------------ */
 /* Settings                                                           */
 /* ------------------------------------------------------------------ */

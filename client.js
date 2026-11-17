@@ -1072,6 +1072,7 @@ window.__ModuleLoader__.load({
   "该关系会形成循环": "This relation would create a cycle",
   "所属任务：{0}": "Linked task: {0}",
   "选为合并来源": "Select for merge",
+  "合并到当前任务": "Merge into this task",
   "搜索合并来源": "Search merge sources",
   "搜索任务、会话或工作区": "Search tasks, sessions, or workspaces",
   "合并来源": "Task to merge",
@@ -4216,6 +4217,7 @@ button.sk-task-row-main{cursor:pointer}
       const [mergeId, setMergeId] = React.useState("");
       const [mergeQuery, setMergeQuery] = React.useState("");
       const [busy, setBusy] = React.useState(false);
+      const mergeSelect = React.useRef(null);
       const index = React.useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks]);
       const sessionOwners = React.useMemo(() => {
         const owners = new Map();
@@ -4238,10 +4240,14 @@ button.sk-task-row-main{cursor:pointer}
       const incoming = tasks.flatMap((item) => (item.relations || [])
         .filter((link) => link.taskId === task.id)
         .map((link) => ({ taskId: item.id, type: link.type })));
+      const chooseMergeSource = (id) => {
+        setMergeId(id);
+        mergeSelect.current?.focus();
+      };
       const call = async (op, payload, message) => {
         if (busy) return;
         setBusy(true);
-        try { await run(t("更新关系"), () => command(op, { id: task.id, ...payload }), message); }
+        try { await run(op === "task.merge" ? t("合并到当前任务") : t("更新关系"), () => command(op, { id: task.id, ...payload }), message); }
         finally { setBusy(false); }
       };
       const lookup = async (filter) => {
@@ -4283,7 +4289,7 @@ button.sk-task-row-main{cursor:pointer}
               h("span", null, entry.title || entry.id, entry.parentId ? t(" · 子代理") : "", entry.isLive ? t(" · 运行中") : entry.lastTurnEnd === "error" ? t(" · 出错") : "",
                 owner ? h("small", null, " · ", t("所属任务：{0}", [owner.title])) : null),
               owner ? h("button", { className: "sk-btn", type: "button", disabled: busy,
-                onClick: () => setMergeId(owner.id) }, t("选为合并来源"))
+                onClick: () => chooseMergeSource(owner.id) }, t("选为合并来源"))
                 : h("button", { className: "sk-btn", type: "button", disabled: busy || linked,
                   onClick: () => call("task.linkSession", { sessionId: entry.id }, t("已关联会话")) }, t("关联")),
               h("button", { className: "sk-btn", type: "button", disabled: busy || entry.ignored, onClick: async () => {
@@ -4308,30 +4314,31 @@ button.sk-task-row-main{cursor:pointer}
             tasks.filter((item) => item.id !== task.id).map((item) => h("option", { key: item.id, value: item.id }, item.title))),
           h("button", { className: "sk-btn", type: "button", disabled: busy || !other,
             onClick: () => call("task.relate", { taskId: other, type }, t("已更新任务关系")) }, t("添加关系"))),
-        h("section", { className: "sk-management-card", "aria-label": t("合并任务") },
+        h("section", { className: "sk-management-card", "aria-label": t("合并到当前任务") },
+          h("h3", null, t("合并到当前任务")),
           h("div", { className: "sk-batchbar" },
             h("input", { className: "sk-input", value: mergeQuery, maxLength: 100,
               "aria-label": t("搜索合并来源"), placeholder: t("搜索任务、会话或工作区"),
               onChange: (event) => setMergeQuery(event.target.value) }),
             h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: suggest }, t("查找相似任务"))),
           h("label", { className: "sk-field" }, t("合并来源"),
-            h("select", { className: "sk-select", value: mergeSource?.id || "", disabled: busy,
+            h("select", { className: "sk-select", ref: mergeSelect, value: mergeSource?.id || "", disabled: busy,
               onChange: (event) => setMergeId(event.target.value) },
               h("option", { value: "" }, t("选择任务")),
               mergeOptions.map((item) => h("option", { key: item.id, value: item.id },
                 [item.title, taskScopeLabel(item), item.archived ? t("已归档") : ""].filter(Boolean).join(" · "))))),
           mergeMatches.length > 50 ? h("p", { className: "sk-note-tiny" }, t("显示前 50 项，输入关键词可缩小范围")) : null,
           terms.length && !mergeMatches.length ? h("p", { className: "sk-note-tiny" }, t("没有匹配的任务")) : null,
-          candidates ? candidates.length ? candidates.map((candidate) => h("div", { className: "sk-management-row", key: candidate.id },
-            h("span", null, candidate.title),
-            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => setMergeId(candidate.id) }, t("选为合并来源"))))
-            : h("p", { className: "sk-note-tiny" }, t("没有发现相似任务")) : null,
           mergeSource ? h("div", { className: "sk-batchbar" },
             h("span", null, t("将「{0}」及其来源会话归入当前任务", [mergeSource.title])),
             h("button", { className: "sk-btn", type: "button", disabled: busy,
               onClick: () => call("task.merge", { sourceId: mergeSource.id, expectedUpdatedAt: task.updatedAt,
                 expectedSourceUpdatedAt: mergeSource.updatedAt }, t("已合并，可在维护中撤销")) }, t("确认合并到此任务")),
-            h("button", { className: "sk-text", type: "button", disabled: busy, onClick: () => setMergeId("") }, t("取消"))) : null));
+            h("button", { className: "sk-text", type: "button", disabled: busy, onClick: () => setMergeId("") }, t("取消"))) : null,
+          candidates ? candidates.length ? candidates.map((candidate) => h("div", { className: "sk-management-row", key: candidate.id },
+            h("span", null, candidate.title),
+            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => chooseMergeSource(candidate.id) }, t("选为合并来源"))))
+            : h("p", { className: "sk-note-tiny" }, t("没有发现相似任务")) : null));
     }
 
     function renderSessionActions(sessions, openSession, label = t("待处理会话")) {
@@ -5866,7 +5873,9 @@ button.sk-task-row-main{cursor:pointer}
           setCasualOnly(event.target.checked);
           setChecked([]);
         } }), t("仅显示闲聊任务（{0}）", [casualCount])) : null;
-      const active = sorted.filter((task) => checked.includes(task.id)).map((task) => task.id);
+      const checkedIds = new Set(checked);
+      const selected = sorted.filter((task) => checkedIds.has(task.id));
+      const active = selected.map((task) => task.id);
       const batch = async (patch) => {
         setBusy(true);
         try {
@@ -5893,9 +5902,9 @@ button.sk-task-row-main{cursor:pointer}
         return h("li", { key: task.id, className: cx("sk-task-row", pending.length > 0 && "has-session-actions"),
           style: { "--sk-depth": Math.min(depth, 5) }, ...taskActions.handlers(task) },
           mode === "list" ? h("input", {
-            type: "checkbox", "aria-label": t("选择 {0}", [task.title]), checked: checked.includes(task.id),
-            disabled: busy || (active.length >= 200 && !checked.includes(task.id)),
-            onChange: (event) => setChecked(event.target.checked ? [...checked, task.id] : checked.filter((id) => id !== task.id)),
+            type: "checkbox", "aria-label": t("选择 {0}", [task.title]), checked: checkedIds.has(task.id),
+            disabled: busy || (active.length >= 200 && !checkedIds.has(task.id)),
+            onChange: (event) => setChecked(event.target.checked ? [...active, task.id] : active.filter((id) => id !== task.id)),
           }) : null,
           h("button", { className: "sk-task-row-main", type: "button", "aria-haspopup": "dialog", onClick: () => onOpen(task.id) },
             h("span", { className: "sk-task-row-title" }, h("span", { className: cx("sk-dot", "is-" + statusOf(task)) }), task.title),
@@ -5937,14 +5946,16 @@ button.sk-task-row-main{cursor:pointer}
       return h("div", { className: "sk-collection" },
         mode === "list" ? h("div", { className: "sk-batchbar" },
           casualFilter,
-          h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => setChecked(active.length ? [] : sorted.slice(0, 200).map((task) => task.id)) },
-            active.length ? t("取消选择 {0} 项", [active.length]) : sorted.length > 200 ? t("选择前 200 项") : t("全选")),
+          h("button", { className: "sk-btn", type: "button", disabled: busy || active.length >= Math.min(sorted.length, 200),
+            onClick: () => setChecked(sorted.slice(0, 200).map((task) => task.id)) },
+            sorted.length > 200 ? t("选择前 200 项") : t("全选")),
           active.length ? h(React.Fragment, null,
+            h("button", { className: "sk-text", type: "button", disabled: busy, onClick: () => setChecked([]) }, t("取消选择 {0} 项", [active.length])),
             h("select", { className: "sk-select", "aria-label": t("批量状态"), value: status, disabled: busy, onChange: (event) => setStatus(event.target.value) },
               h("option", { value: "" }, t("状态")), STATUS_ORDER.map((value) => h("option", { key: value, value }, STATUS_META[value].label))),
             h("button", { className: "sk-btn", type: "button", disabled: busy || !status, onClick: () => batch({ status }) }, t("应用状态")),
-            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => batch({ archived: true }) }, t("归档")),
-            h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => batch({ archived: false }) }, t("恢复")),
+            selected.some((task) => !task.archived) ? h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => batch({ archived: true }) }, t("归档")) : null,
+            selected.some((task) => task.archived) ? h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => batch({ archived: false }) }, t("恢复")) : null,
             h("select", { className: "sk-select", "aria-label": t("批量优先级"), value: priority, onChange: (event) => setPriority(event.target.value) },
               h("option", { value: "" }, t("优先级")), PRIORITY_ORDER.map((value) => h("option", { key: value }, value))),
             h("button", { className: "sk-btn", type: "button", disabled: busy || !priority, onClick: () => batch({ priority }) }, t("应用优先级")),
@@ -7778,11 +7789,14 @@ button.sk-task-row-main{cursor:pointer}
       };
 
       const cancelScan = async () => {
+        setScanBusy(true);
         try {
           await command("scan.cancel", {});
           await reload(true);
         } catch (cause) {
           pushToast(t("取消失败：{0}", [cause.message]), "error");
+        } finally {
+          setScanBusy(false);
         }
       };
 
@@ -8026,7 +8040,7 @@ button.sk-task-row-main{cursor:pointer}
           h("span", null, scanProgress.label),
           h("progress", { className: "sk-scan-progress", "aria-label": scanProgress.label,
             max: scanProgress.total || 1, value: scanProgress.total ? scanProgress.value : undefined }),
-          h("button", { className: "sk-btn", type: "button", onClick: cancelScan }, t("取消扫描")))
+          h("button", { className: "sk-btn", type: "button", disabled: scanBusy, onClick: cancelScan }, t("取消扫描")))
           : scan.state === "done" && (scan.first || scan.mode === "full") && scan.newTasks > 0 && mode !== "list"
             ? h("div", { className: "sk-board-notice" },
               h("span", null, scan.cancelled ? t("取消前已新增 {0} 项任务", [scan.newTasks]) : t("{0}完成，新增 {1} 项任务", [scanHeading, scan.newTasks])),
@@ -8210,14 +8224,14 @@ button.sk-task-row-main{cursor:pointer}
               ),
             )
           : tasks.length === 0
-            ? h(
+            ? scanRunning ? null : h(
                 "div",
                 { className: "sk-board-v3" },
                 h(
                   "div",
                   { className: "sk-empty-v3" },
                   t("看板还是空的，扫描会话后会自动建卡。"),
-                  h("button", { type: "button", className: "sk-text", onClick: () => startScan("incremental") }, t("扫描近期会话")),
+                  h("button", { type: "button", className: "sk-text", disabled: scanBusy, onClick: () => startScan("incremental") }, t("扫描近期会话")),
                 ),
               )
             : isNarrow

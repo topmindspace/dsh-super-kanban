@@ -106,6 +106,15 @@ const TURN_SCAN_MIN_INTERVAL_MS = 15_000;
 const REVIEW_FRESH_MS = 10 * 60_000;
 const SCAN_SLICE_MS = 25;
 
+function indexSessionChildren(pairs) {
+  const children = new Map();
+  for (const [childId, parentId] of pairs) {
+    if (!children.has(parentId)) children.set(parentId, []);
+    children.get(parentId).push(childId);
+  }
+  return children;
+}
+
 /* ------------------------------------------------------------------ */
 /* Service                                                             */
 /* ------------------------------------------------------------------ */
@@ -145,7 +154,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   /** id -> SessionMeta (compact, includes workspace + last todo counts). */
   let sessionsById = new Map();
   /** parent session id -> child (subagent) session ids. */
-  let parentToChildren = new Map();
+  let parentToChildren = indexSessionChildren(Object.entries(cache.sessions).flatMap(([id, entry]) => {
+    const meta = entry?.meta;
+    return meta?.parentSession && !meta.parseError ? [[id, meta.parentSession]] : [];
+  }));
 
   let scanPromise = null;
   let scanMessages = null;
@@ -789,13 +801,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     return {
       ok: true,
       generatedAt: new Date().toISOString(),
-      tasks: textProjection.tasks(state.tasks).map((task) => {
-        if (task.origin !== "auto" || !task.sessions?.length || !task.sessions.every(({ id }) => {
-          const meta = cache.sessions[id]?.meta;
-          return meta?.casualConversation && !meta.parseError && !meta.goalText && !parentToChildren.get(id)?.length;
-        })) return task;
-        return { ...task, casualConversation: true };
-      }),
+      tasks: textProjection.tasks(state.tasks).map((task) => task.origin === "auto" && task.sessions?.length &&
+        task.sessions.every(({ id }) => isCasualSession(cache.sessions[id]?.meta)) ? { ...task, casualConversation: true } : task),
       projects: state.projects,
       writeOverlaps: fileWriteOverlaps(),
       storage: { writable: !storageFailed, savedAt: state.savedAt },
@@ -1175,6 +1182,14 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       archived ||= task;
     }
     return archived;
+  }
+
+  function isSupportingSession(task, sessionId) {
+    return Boolean(task?.primarySessionId && task.primarySessionId !== sessionId);
+  }
+
+  function isCasualSession(meta) {
+    return meta?.casualConversation === true && !meta.goalText && !meta.parseError && !parentToChildren.get(meta.id)?.length;
   }
 
   /* ------------------------- review strip --------------------------- */
@@ -1706,11 +1721,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   async function runScanBody(mode) {
     const discovery = source.discover();
-    parentToChildren = new Map();
-    for (const [childId, parentId] of discovery.childToParent || []) {
-      if (!parentToChildren.has(parentId)) parentToChildren.set(parentId, []);
-      parentToChildren.get(parentId).push(childId);
-    }
+    parentToChildren = indexSessionChildren(discovery.childToParent || []);
     const discoverySessions = discovery.sessions;
     state.scan.phase = "read";
     state.scan.total = discoverySessions.length;
@@ -1759,12 +1770,14 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         // "aiMissing" re-parses a session that never got an AI verdict. Only
         // worth the parse when an AI service exists; otherwise every incremental
         // scan would re-parse every unchanged session forever.
-        const supporting = bound?.primarySessionId && bound.primarySessionId !== discovered.id;
+        const supporting = isSupportingSession(bound, discovered.id);
         const aiMissing = !supporting && state.settings.aiEnabled && analyzerHasService() && !cached?.meta?.aiAt;
-        const cachedCasual = meta?.casualConversation && !meta.goalText && !(parentToChildren.get(discovered.id)?.length);
+        const cachedCasual = isCasualSession(meta);
         const forceMainParse =
-          preEligible && (mode === "full" || changed || (!bound && !cachedCasual) || (aiMissing && !cachedCasual) ||
-            typeof meta.hasOpenTurn !== "boolean" || source.sessionLiveness(meta) !== meta.isLive);
+          preEligible && (mode === "full" || (!meta.parseError && (
+            (!cachedCasual && (!bound || aiMissing)) ||
+            typeof meta.hasOpenTurn !== "boolean" || source.sessionLiveness(meta) !== meta.isLive
+          )));
         // Earlier caches lack the preferred title or the conversation verdict.
         // Re-parse once so existing cards get both on upgrade.
         // An unchanged file that already failed to parse must not be retried
@@ -1796,13 +1809,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         } else if (meta) {
           cache.sessions[discovered.id] = { ...cached, sigKey: discovered.sigKey, meta };
         }
-        if (!meta) continue;
+        if (!meta || meta.parseError) continue;
         const cachedMeta = cached?.meta || null;
         // Re-evaluate eligibility with fresh parse data (first scan has no cache).
         const eligible = isEligibleForAutoTask(meta, cutoff);
         if (parsed && meta.origin === "subagent") childSummaries.set(meta.id, collectSubagentSummary(parsed, meta));
         sessionsById.set(discovered.id, meta);
-        if (eligible && !bound && meta.casualConversation && !meta.goalText && !parentToChildren.get(meta.id)?.length) {
+        if (eligible && !bound && isCasualSession(meta)) {
           state.scan.conversationSkipped += 1;
           continue;
         }
@@ -1861,7 +1874,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     let aiDeferredReason = null;
     let unavailableRoute = null;
     let aiFailureCount = 0;
-    const aiJobs = analysisJobs.filter((job) => job.needsAi && isEligibleForAutoTask(job.meta, cutoff)).sort(compareAiJobs);
+    const isAiCandidate = ({ meta }) => isEligibleForAutoTask(meta, cutoff) && !isSupportingSession(findTaskBySession(meta.id), meta.id);
+    const aiJobs = analysisJobs.filter((job) => job.needsAi && isAiCandidate(job)).sort(compareAiJobs);
     state.scan.aiDue = aiJobs.length;
     if (aiJobs.length > 0) {
       const dailyRemaining = dailyAiRemaining();
@@ -1917,8 +1931,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
                 logWarn("[super-kanban] per-scan AI budget exhausted; remaining sessions deferred");
                 break;
               }
-              const batch = aiJobs.slice(index, index + MAX_AI_CONCURRENCY)
-                .filter((job) => isEligibleForAutoTask(job.meta, cutoff));
+              const batch = aiJobs.slice(index, index + MAX_AI_CONCURRENCY).filter(isAiCandidate);
               await Promise.all(
                 batch.map(async (job) => {
                   const result = await analyzer.analyze({
@@ -1958,7 +1971,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           const budgetAfter = readAnalyzerBudget();
           state.scan.aiBudgetUsed = budgetAfter.calls;
           state.scan.aiAttempts = budgetAfter.attempts;
-          state.scan.aiPending = state.settings.aiEnabled ? aiJobs.filter((job) => !job.llm && isEligibleForAutoTask(job.meta, cutoff)).length : 0;
+          state.scan.aiPending = state.settings.aiEnabled ? aiJobs.filter((job) => !job.llm && isAiCandidate(job)).length : 0;
           if (state.scan.aiPending && dailyAiRemaining() <= 0) aiDeferredReason = "daily";
           else if (!aiDeferredReason && aiBudgetExhausted) aiDeferredReason = dailyCapped ? "daily" : "budget";
           state.scan.aiDeferredReason = aiDeferredReason;
@@ -1974,6 +1987,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       broadcastScan(true);
     }
     let addedReviews = 0;
+    const updatedTasks = new Set();
     yieldAt = performance.now() + SCAN_SLICE_MS;
     for (const job of analysisJobs) {
       if (performance.now() >= yieldAt) {
@@ -1987,9 +2001,13 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       const { meta, rules, context } = job;
       // The user may delete, ignore or move a session out of scope while AI runs.
       if (!isEligibleForAutoTask(meta, cutoff)) continue;
-      let applied = 0;
+      let changes;
       try {
-        if (job.llm) {
+        const bound = findTaskBySession(meta.id);
+        if (isSupportingSession(bound, meta.id)) {
+          const analysis = foldChildEvidence(rules.tasks[0], meta, childSummaries);
+          if (updateSupportingSession(bound, meta, context, analysis.evidence)) changes = { updated: [bound.id] };
+        } else if (job.llm) {
           if (job.llm.ignore) {
             applyAiMeta(meta.id, meta, { digestBytes: job.digestBytes });
             // The analyzer may skip task fields, but the turn still ended:
@@ -2012,7 +2030,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
               keyFacts: mergeKeyFacts(analysis.keyFacts, rules.tasks?.[0]?.keyFacts || []),
             }));
           if (normalized.length > 0) {
-            const result = applyAnalysisList(normalized, meta, context, {
+            changes = applyAnalysisList(normalized, meta, context, {
               engine: "llm",
               model: llmModel,
               provider: llmProvider,
@@ -2020,42 +2038,40 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
               childSummaries,
               context,
             });
-            applied = result.applied;
           } else {
-            applied = applyAnalysisList(rules.tasks, meta, context, {
+            changes = applyAnalysisList(rules.tasks, meta, context, {
               engine: "rules",
               model: "",
               provider: null,
               rules,
               childSummaries,
               context,
-            }).applied;
+            });
           }
           applyAiMeta(meta.id, meta, { digestBytes: job.digestBytes });
         } else {
           // No AI this round (gated / low-value / budget / failure): never
           // downgrade an existing LLM verdict — only refresh deterministic v2
           // fields (sessionContext/artifacts/subtasks/progress).
-          const bound = findTaskBySession(meta.id);
-          const hasAiVerdict = Boolean(bound && bound.ai && bound.ai.engine === "llm");
-          if (hasAiVerdict) {
-            if (bound.primarySessionId && bound.primarySessionId !== meta.id) {
-              updateSupportingSession(bound, meta, context, rules.tasks[0]?.evidence || []);
-            } else {
-              refreshTaskDeterministic(bound, meta, context);
-            }
+          if (bound?.ai?.engine === "llm") {
+            if (refreshTaskDeterministic(bound, meta, context)) changes = { updated: [bound.id] };
           } else {
-            applied = applyAnalysisList(rules.tasks, meta, context, {
+            changes = applyAnalysisList(rules.tasks, meta, context, {
               engine: "rules",
               model: "",
               provider: null,
               rules,
               childSummaries,
               context,
-            }).applied;
+            });
           }
         }
-        if (applied > 0) schedulePersist();
+        if (changes) {
+          for (const id of changes.updated) updatedTasks.add(id);
+          state.scan.updatedTasks = updatedTasks.size;
+          state.scan.newTasks += changes.created || 0;
+          if (changes.updated.length || changes.created) schedulePersist();
+        }
       } catch (error) {
         logWarn(`[super-kanban] merge failed for ${meta.id}: ${String(error?.message || error)}`);
       }
@@ -2144,30 +2160,34 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     attachSession(task, meta, evidence?.length || 0);
     refreshSessionEvidenceCounts(task);
     task.lastActivityAt = Math.max(task.lastActivityAt || 0, meta.lastActivityAt || 0);
-    if (snapshot() !== before) touchTask(task);
+    if (snapshot() === before) return false;
+    touchTask(task);
+    return true;
   }
 
   function applyAnalysisList(analyses, meta, context, options) {
-    const targets = [];
+    const updated = [];
+    let created = 0;
     const bound = findTaskBySession(meta.id);
-    const explicit = (bound?.primarySessionId && bound.primarySessionId !== meta.id) ||
+    const explicit = isSupportingSession(bound, meta.id) ||
       bound?.origin === "manual" || bound?.sessions?.some((session) => session.id === meta.id && session.linkedByUser);
     (explicit ? analyses.slice(0, 1) : analyses).forEach((analysis, index) => {
       const withChildren = index === 0 ? foldChildEvidence(analysis, meta, options.childSummaries) : analysis;
       const { id, task: target } = index === 0 && bound ? { id: bound.id, task: bound } : resolveGeneratedTask(meta.id, index);
       if (target) {
-        if (target.primarySessionId && target.primarySessionId !== meta.id) {
+        const before = target.updatedAt;
+        if (isSupportingSession(target, meta.id)) {
           updateSupportingSession(target, meta, context, withChildren.evidence);
         } else {
           updateTaskFromAnalysis(target, withChildren, meta, options);
         }
-        targets.push(target);
+        if (target.updatedAt !== before) updated.push(target.id);
       } else {
-        targets.push(createTaskFromAnalysis(withChildren, meta, id, options));
-        state.scan.newTasks += 1;
+        createTaskFromAnalysis(withChildren, meta, id, options);
+        created += 1;
       }
     });
-    return { applied: targets.length, targets };
+    return { created, updated };
   }
 
   /**
@@ -2298,6 +2318,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   }
 
   function updateTaskFromAnalysis(task, analysis, meta, options) {
+    const before = options.engine === "rules" && !options.explicit ? JSON.stringify(task) : null;
     analysis = trustedAnalysis(analysis, options);
     if (task.acceptanceCriteria && task.status !== "done" && analysis.status === "done") {
       analysis = { ...analysis, status: "in_progress", attention: "acceptance", completionBasis: null };
@@ -2433,14 +2454,16 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       task.workspacePath = meta.workspacePath;
     }
     refreshSessionEvidenceCounts(task);
-    task.ai = analysisAiInfo(analysis, options);
+    const ai = analysisAiInfo(analysis, options);
+    task.ai = before === null ? ai : { ...ai, analyzedAt: task.ai?.analyzedAt ?? null };
     const waitingOnUserWork = analysis.attention === "acceptance" && trustedUnfinishedSubtasks(task).length > 0;
     task.attention = task.status === "done" || waitingOnUserWork ? null : analysis.attention || null;
     task.completionBasis = task.status === "done" ? (locked.has("status") ? task.completionBasis || null : analysis.completionBasis || null) : null;
-    touchTask(task);
     task.lastActivityAt = Math.max(task.lastActivityAt || 0, meta.lastActivityAt || 0);
     truncateTask(task);
-    state.scan.updatedTasks += 1;
+    if (before !== null && JSON.stringify(task) === before) return task;
+    task.ai.analyzedAt = ai.analyzedAt;
+    touchTask(task);
     return task;
   }
 

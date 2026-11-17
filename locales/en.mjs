@@ -1060,6 +1060,7 @@ export default Object.freeze({
   "该关系会形成循环": "This relation would create a cycle",
   "所属任务：{0}": "Linked task: {0}",
   "选为合并来源": "Select for merge",
+  "合并到当前任务": "Merge into this task",
   "搜索合并来源": "Search merge sources",
   "搜索任务、会话或工作区": "Search tasks, sessions, or workspaces",
   "合并来源": "Task to merge",

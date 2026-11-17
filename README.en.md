@@ -49,8 +49,8 @@ Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or u
 ### Plan and deliver
 
 - **Workspace projects, timelines, and schedules** · Included workspaces appear automatically in Projects. Custom projects can organize tasks across workspaces. Review task changes, session progress, and deliveries on the timeline, and track due dates in the schedule. Switch between recent and historical activity at any time.
-- **Manual organization and recovery** · Create, drag, pin, and bulk archive tasks. Lock fields to keep manual edits. Manage dependencies, explicitly merge tasks, recover deleted tasks, and restore backups.
-- **Evidence and human review** · See the goal, acceptance criteria, main deliverable, and source sessions. Preview artifacts, copy paths, or reveal files in the file manager. The task keeps a record of acceptance.
+- **Manual organization and recovery** · Follow scan progress, then update statuses, archive, or restore tasks in bulk from the list. Lock fields to keep manual edits and find merge sources by task or session. Manage dependencies, recover deleted tasks, and restore backups.
+- **Evidence and human review** · See acceptance criteria, the main deliverable, and source sessions in task details. Filter deliverables by file type, preview them, copy paths, or reveal files in the file manager. The task keeps a record of acceptance.
 - **Continue with context** · Draft a handoff from the acceptance criteria, key decisions, unfinished work, and artifacts. Place it in a linked session or start a new session in the same workspace.
 
 ### Models and quick chat

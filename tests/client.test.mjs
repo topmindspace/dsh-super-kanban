@@ -18,7 +18,8 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
     useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot(); },
     useState(initial) {
       // Seed the initial /state result without mounting polling or DOM effects.
-      if (nextState && initial === nextState.initial) {
+      if (nextState && (initial === nextState.initial ||
+        (Array.isArray(initial) && !initial.length && Array.isArray(nextState.initial) && !nextState.initial.length))) {
         const { value } = nextState;
         nextState = null;
         return [value, (next) => onState?.(next)];
@@ -50,7 +51,7 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
   const script = inspect ? source.replace("return { apply, inject:",
     "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, floatingReview, canAcceptTask, canAcceptReview, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
     "folderGlyph, folderColor, t, STATUS_META, FLOAT_TABS, displayLocale, " +
-    "markdownBlocks, renderInline, taskChatReference, ArtifactsView, inject:") : source;
+    "markdownBlocks, renderInline, taskChatReference, ArtifactsView, TaskCollection, TaskLinks, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
     get: (name) => name === "locale" ? services.locale || { getSnapshot: () => ({ active: "zh" }) } : services[name],
@@ -118,6 +119,7 @@ test("board shows first scan phase progress and a direct route to organize new t
   assert.equal(progress.props.value, 3);
   assert.equal(progress.props.max, 12);
   assert.match(renderedText(view), /首次扫描.*AI 研判 3\/12.*取消扫描/);
+  assert.doesNotMatch(renderedText(view), /扫描近期会话/);
 
   const changes = [];
   const done = loadClient({}, { snapshot: { tasks: [], scan: {
@@ -128,6 +130,40 @@ test("board shows first scan phase progress and a direct route to organize new t
   organize.props.onClick();
   assert.ok(changes.includes("list"));
   assert.ok(changes.some((value) => value?.activity === "all"));
+});
+
+test("list selection discards hidden IDs and select-all works from a partial selection", () => {
+  const changes = [];
+  const { plugin, seedNextState } = loadClient({}, { inspect: true, onState: (value) => changes.push(value) });
+  const tasks = [{ id: "a", title: "A" }, { id: "b", title: "B" }, { id: "c", title: "C" }];
+  seedNextState(["hidden", "a"], []);
+  const nodes = [...elements(plugin.TaskCollection({
+    mode: "list", tasks, signals: new Map(), taskActions: { handlers: () => ({}), button: () => null },
+  }))];
+  const selectAll = nodes.find((node) => node.type === "button" && renderedText(node) === "全选");
+  assert.equal(selectAll.props.disabled, false);
+  selectAll.props.onClick();
+  assert.deepEqual(Array.from(changes.pop()).sort(), ["a", "b", "c"]);
+  const selectB = nodes.find((node) => node.type === "input" && node.props["aria-label"] === "选择 B");
+  selectB.props.onChange({ target: { checked: true } });
+  assert.deepEqual(Array.from(changes.pop()).sort(), ["a", "b"]);
+});
+
+test("selecting a linked session as the merge source focuses the merge picker", () => {
+  const changes = [];
+  const { plugin, seedNextState } = loadClient({}, { inspect: true, onState: (value) => changes.push(value) });
+  const task = { id: "target", title: "Target", sessions: [] };
+  const source = { id: "source", title: "Source", sessions: [{ id: "linked" }] };
+  seedNextState({ total: 1, sessions: [{ id: "linked", title: "A source session" }] });
+  const view = plugin.TaskLinks({ task, tasks: [task, source] });
+  const merge = [...elements(view)].find((node) => node.props?.["aria-label"] === "合并到当前任务");
+  const picker = [...elements(merge)].find((node) => node.type === "select");
+  let focused = false;
+  picker.props.ref.current = { focus() { focused = true; } };
+  const linkAction = [...elements(view)].find((node) => node.type === "button" && renderedText(node) === "选为合并来源");
+  linkAction.props.onClick();
+  assert.equal(changes.pop(), "source");
+  assert.equal(focused, true);
 });
 
 function renderAttention(tasks, statuses, opens = [], writeOverlaps = []) {

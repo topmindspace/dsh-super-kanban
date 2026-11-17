@@ -61,7 +61,7 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `dev/` | 维护者本地开发/截图/验收工具（**已在 `.gitignore` 中忽略，不随仓库分发**；见 `dev/README.md`） |
 | `internal/docs-internal/` | 历史设计/QA 归档（**同样被 git 忽略**；见该目录 README） |
 
-> npm 发布包 = `package.json` 的 `files` 列表（`index.mjs`、`client.js`、`cordis.patch.yml`、`server/`、`icon.svg`、`CHANGELOG.md`）+ npm 自动包含的 `README.md`、`README.en.md`、`LICENSE`、`package.json`。`docs/`、`dev/`、`internal/`、`.github/` 不进入 tarball。
+> npm 发布包由 `package.json` 的 `files` 声明，包含 Host 与客户端、语言包、插件详情页 `docs/plugin/`、图标和更新日志。CI 校验打包结果，并在 `docs/` 下只允许插件详情页和同名市场图标。
 
 ## Host 半边
 

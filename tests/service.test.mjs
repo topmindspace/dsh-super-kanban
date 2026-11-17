@@ -1469,15 +1469,20 @@ test("scan.cancel acknowledges a scan that owns the mutex", async (t) => {
   assert.match(state.message, /取消/);
 });
 
-test("first scan exposes named stages and skips only unbound small talk", async (t) => {
+test("first scan exposes named stages and keeps work signaled by replies and images", async (t) => {
   const { home, service } = await setup(t, { withSessions: true });
-  const casualLog = (id, messages) => writeFileDeep(path.join(home, "sessions", "escaped-demo", id, SESSION_FILE_NAME), framesOf([
+  const content = (value) => typeof value === "string" ? [{ type: "text", text: value }] : value;
+  const conversationLog = (id, messages, reply) => writeFileDeep(path.join(home, "sessions", "escaped-demo", id, SESSION_FILE_NAME), framesOf([
     event("session", 1, T0, { id, createdAt: T0, cwd: path.join(home, "workspace-demo") }),
-    ...messages.map((text, index) => event("user/message", index + 2, T0 + index + 1, { content: [{ type: "text", text }] })),
+    ...messages.map((value, index) => event("user/message", index + 2, T0 + index + 1, { content: content(value) })),
+    ...(reply ? [event("assistant/message", messages.length + 2, T0 + 20, { message: { content: content(reply) } })] : []),
   ]));
-  casualLog("casual", ["你好！", "Thanks."]);
-  casualLog("old-casual", ["你好"]);
-  casualLog("short-task", ["你好，修复崩溃"]);
+  conversationLog("casual", ["你好！", "Thanks."], "Hello! How can I help you today?");
+  conversationLog("old-casual", ["你好"], "您好，有什么可以帮助您的吗？");
+  conversationLog("short-task", ["你好，修复崩溃"]);
+  conversationLog("assistant-work", ["你好！"], "你好！以下是登录问题的诊断结果。");
+  conversationLog("user-image", ["你好！", [{ type: "image", mimeType: "image/png" }]]);
+  conversationLog("assistant-image", ["你好！"], [{ type: "image", mimeType: "image/png" }]);
   const backup = (await request(service, { route: "/export" })).json.state;
   backup.tasks.push({ id: "old-casual-card", title: "你好", origin: "auto", sessions: [{ id: "old-casual" }], primarySessionId: "old-casual" });
   const { json: { data: preview } } = await command(service, "backup.preview", { backup: { state: backup } });
@@ -1492,21 +1497,38 @@ test("first scan exposes named stages and skips only unbound small talk", async 
   const phases = [...stream.res.body.matchAll(/event: scan\ndata: (\{[^\n]+\})/g)].map(([, data]) => JSON.parse(data).phase);
   assert.deepEqual([...new Set(phases.filter(Boolean))], ["discover", "read", "apply"]);
   assert.equal(first.first, true);
-  assert.equal(first.processed, 4);
-  assert.equal(first.applyTotal, 3);
+  assert.equal(first.processed, 7);
+  assert.equal(first.applyTotal, 6);
   assert.equal(first.applyProcessed, first.applyTotal);
   assert.equal(first.conversationSkipped, 1);
   const { json: { tasks } } = await request(service, {});
   assert.equal(tasks.find((task) => task.primarySessionId === "old-casual").casualConversation, true);
   assert.ok(tasks.some((task) => task.primarySessionId === "short-task"));
+  for (const id of ["assistant-work", "user-image", "assistant-image"]) {
+    assert.ok(tasks.some((task) => task.primarySessionId === id), id);
+  }
   assert.ok(!tasks.some((task) => task.primarySessionId === "casual"));
 
-  casualLog("casual", ["你好！", "Thanks.", "继续"]);
+  conversationLog("casual", ["你好！", "Thanks.", "继续"]);
   await command(service, "scan.start");
   const next = await waitForScan(service);
   assert.equal(next.first, false);
   assert.equal(next.conversationSkipped, 0);
   assert.ok((await request(service, {})).json.tasks.some((task) => task.primarySessionId === "casual"));
+});
+
+test("unchanged rules rescans keep task revisions and update counts stable", async (t) => {
+  const { service } = await setup(t, { withSessions: true });
+  await command(service, "settings.update", { patch: { aiEnabled: false } });
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const [task] = (await request(service, {})).json.tasks;
+  await command(service, "scan.start", { mode: "full" });
+  const scan = await waitForScan(service);
+  const [again] = (await request(service, {})).json.tasks;
+  assert.equal(scan.updatedTasks, 0);
+  assert.equal(again.updatedAt, task.updatedAt);
+  assert.equal(again.ai.analyzedAt, task.ai.analyzedAt);
 });
 
 test("bulk status is atomic and persists the same user lock as a single status edit", async (t) => {
