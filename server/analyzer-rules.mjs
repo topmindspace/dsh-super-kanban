@@ -366,6 +366,17 @@ function buildKeyFacts(parsed, { goalText, subtasks, issues, artifacts, decision
   return facts.slice(0, 5);
 }
 
+const CASUAL_MESSAGES = /^(?:你好(?:呀|啊|吗)?|您好(?:呀|啊)?|嗨|哈[啰喽]|哈哈+|早安|早上好|晚上好|晚安|你是谁|在吗|谢谢(?:你|您)?(?:啦|了)?|多谢|感谢(?:你|您)?|再见|拜拜|hi|hey|hello|hello there|good (?:morning|evening|night)|how are you|who are you|are you there|thanks(?: a lot)?|thank you(?: very much)?|bye|goodbye)[\s\p{P}]*$/iu;
+
+/** Classify only whole conversations composed of recognizable social messages. */
+export function isCasualConversation(parsed) {
+  return parsed.users.length > 0 &&
+    !parsed.goal?.text &&
+    ![parsed.toolCalls, parsed.toolResults, parsed.todoSnapshots, parsed.deliverables, parsed.errors, parsed.workspaceChanges]
+      .some((items) => items?.length) &&
+    parsed.users.every(({ text, images }) => !images && CASUAL_MESSAGES.test(String(text || "").trim()));
+}
+
 /**
  * Rules analysis for one parsed session.
  *

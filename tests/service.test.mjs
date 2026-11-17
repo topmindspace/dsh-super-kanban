@@ -1464,7 +1464,75 @@ test("scan.cancel acknowledges a scan that owns the mutex", async (t) => {
   assert.deepEqual(JSON.parse(cancel.res.body).data, { cancelling: true });
   const state = await waitForScan(service);
   assert.equal(state.state, "done");
+  assert.equal(state.cancelled, true);
+  assert.equal(state.phase, null);
   assert.match(state.message, /取消/);
+});
+
+test("first scan exposes named stages and skips only unbound small talk", async (t) => {
+  const { home, service } = await setup(t, { withSessions: true });
+  const casualLog = (id, messages) => writeFileDeep(path.join(home, "sessions", "escaped-demo", id, SESSION_FILE_NAME), framesOf([
+    event("session", 1, T0, { id, createdAt: T0, cwd: path.join(home, "workspace-demo") }),
+    ...messages.map((text, index) => event("user/message", index + 2, T0 + index + 1, { content: [{ type: "text", text }] })),
+  ]));
+  casualLog("casual", ["你好！", "Thanks."]);
+  casualLog("old-casual", ["你好"]);
+  casualLog("short-task", ["你好，修复崩溃"]);
+  const backup = (await request(service, { route: "/export" })).json.state;
+  backup.tasks.push({ id: "old-casual-card", title: "你好", origin: "auto", sessions: [{ id: "old-casual" }], primarySessionId: "old-casual" });
+  const { json: { data: preview } } = await command(service, "backup.preview", { backup: { state: backup } });
+  assert.equal((await command(service, "backup.restore", { ...preview, backup: { state: backup } })).status, 200);
+  await command(service, "settings.update", { patch: { aiEnabled: false } });
+  const stream = beginRequest(service, { route: "/events" });
+  await stream.pending;
+  t.after(() => stream.req.emit("close"));
+
+  await command(service, "scan.start");
+  const first = await waitForScan(service);
+  const phases = [...stream.res.body.matchAll(/event: scan\ndata: (\{[^\n]+\})/g)].map(([, data]) => JSON.parse(data).phase);
+  assert.deepEqual([...new Set(phases.filter(Boolean))], ["discover", "read", "apply"]);
+  assert.equal(first.first, true);
+  assert.equal(first.processed, 4);
+  assert.equal(first.applyTotal, 3);
+  assert.equal(first.applyProcessed, first.applyTotal);
+  assert.equal(first.conversationSkipped, 1);
+  const { json: { tasks } } = await request(service, {});
+  assert.equal(tasks.find((task) => task.primarySessionId === "old-casual").casualConversation, true);
+  assert.ok(tasks.some((task) => task.primarySessionId === "short-task"));
+  assert.ok(!tasks.some((task) => task.primarySessionId === "casual"));
+
+  casualLog("casual", ["你好！", "Thanks.", "继续"]);
+  await command(service, "scan.start");
+  const next = await waitForScan(service);
+  assert.equal(next.first, false);
+  assert.equal(next.conversationSkipped, 0);
+  assert.ok((await request(service, {})).json.tasks.some((task) => task.primarySessionId === "casual"));
+});
+
+test("bulk status is atomic and persists the same user lock as a single status edit", async (t) => {
+  const { service, messages } = await setup(t, { withSessions: true });
+  await command(service, "scan.start");
+  const scan = await waitForScan(service);
+  assert.equal(scan.newTasks, 1, messages.warns.join("\n"));
+  const [automatic] = (await request(service, {})).json.tasks;
+  const manual = (await command(service, "task.create", { title: "Follow up" })).json.data;
+  const ids = [automatic.id, manual.id];
+  assert.equal((await command(service, "task.batch", { ids, status: "invalid", archived: true })).status, 400);
+  assert.equal((await command(service, "task.batch", { ids: [...ids, "missing"], status: "done" })).status, 404);
+  const unchanged = (await request(service, {})).json.tasks;
+  assert.ok(unchanged.every((task) => !task.archived && task.status !== "done"));
+
+  const edited = await command(service, "task.batch", { ids, status: "done" });
+  assert.equal(edited.json.data.count, 2);
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const updated = (await request(service, {})).json.tasks;
+  for (const task of updated) {
+    assert.equal(task.status, "done");
+    assert.equal(task.completionBasis, "user");
+    assert.ok(task.lockedFields.includes("status"));
+    assert.ok(task.history.some((entry) => entry.kind === "status" && entry.to === "done" && entry.by === "user"));
+  }
 });
 
 /* ------------------------------------------------------------------ */
@@ -1718,6 +1786,31 @@ test("similar tasks remain separate until an explicit merge and can be restored"
   assert.equal(readStateFile(home).tasks.length, 1);
   assert.equal((await command(service, "task.restore", { id: "export-task" })).status, 200);
   assert.equal(readStateFile(home).tasks.length, 2);
+});
+
+test("cross-session merge preserves both sources and keeps them grouped after a full rescan", async (t) => {
+  const { home, service, messages } = await setup(t, { withSessions: true });
+  seedSessionHome(home, { sessionId: "sess-beta", title: "Package the rollout", artifactPath: "release.md", time: T0 - 10_000 });
+  await command(service, "scan.start", { mode: "full" });
+  const first = await waitForScan(service);
+  assert.equal(first.newTasks, 2, messages.warns.join("\n"));
+  const { json: { tasks } } = await request(service, {});
+  const target = tasks.find((task) => task.primarySessionId === "sess-alpha");
+  const source = tasks.find((task) => task.primarySessionId === "sess-beta");
+  const payload = { id: target.id, sourceId: source.id, expectedUpdatedAt: target.updatedAt };
+  assert.equal((await command(service, "task.merge", { ...payload, expectedSourceUpdatedAt: "stale" })).status, 409);
+  assert.equal((await command(service, "task.merge", { ...payload, expectedSourceUpdatedAt: source.updatedAt })).status, 200);
+
+  await command(service, "scan.start", { mode: "full" });
+  const scan = await waitForScan(service);
+  assert.equal(scan.newTasks, 0);
+  const { json: { tasks: after } } = await request(service, {});
+  assert.equal(after.length, 1);
+  assert.equal(after[0].primarySessionId, "sess-alpha");
+  assert.deepEqual(after[0].sessions.map(({ id, linkedByUser }) => [id, linkedByUser]), [["sess-alpha", true], ["sess-beta", true]]);
+  assert.ok(after[0].artifacts.some((artifact) => artifact.sessionId === "sess-beta" && artifact.path === "release.md"));
+  assert.ok(after[0].evidence.some((item) => item.sessionId === "sess-alpha"));
+  assert.ok(after[0].evidence.some((item) => item.sessionId === "sess-beta"));
 });
 
 test("task relations reject dependency cycles and survive trash restore", async (t) => {

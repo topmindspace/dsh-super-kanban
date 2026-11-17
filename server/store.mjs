@@ -201,11 +201,18 @@ export function rolloverUsage(usage, now = Date.now()) {
 export function emptyScanState() {
   return {
     state: "idle",
+    phase: null,
+    mode: null,
+    first: false,
     startedAt: null,
     finishedAt: null,
     processed: 0,
     total: 0,
     historicalSkipped: 0,
+    conversationSkipped: 0,
+    applyTotal: 0,
+    applyProcessed: 0,
+    cancelled: false,
     newTasks: 0,
     updatedTasks: 0,
     aiCalls: 0,
@@ -702,6 +709,7 @@ export function createStore({ dshHome, logger } = {}) {
       // A scan that was "running" when the process died can never finish.
       if (state.scan && state.scan.state === "running") {
         state.scan.state = "idle";
+        state.scan.phase = null;
         state.scan.finishedAt = new Date().toISOString();
         state.scan.message = t("上次扫描未完成（进程重启）");
       }
