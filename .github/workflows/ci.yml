@@ -83,6 +83,7 @@ jobs:
           import fs from "node:fs";
           const report = JSON.parse(fs.readFileSync("pack-dry-run.json", "utf8"))[0];
           const files = report.files.map((file) => file.path);
+          const pluginDetails = ["docs/plugin/en.md", "docs/plugin/zh.md"];
           const required = [
             "index.mjs",
             "client.js",
@@ -102,16 +103,20 @@ jobs:
             "server/http.mjs",
             "server/task-relations.mjs",
             "server/titles.mjs",
+            "locale/en.json",
+            "locale/zh.json",
+            ...pluginDetails,
           ];
           const missing = required.filter((entry) => !files.includes(entry));
           if (missing.length > 0) {
             console.error(`npm pack is missing required files: ${missing.join(", ")}`);
             process.exit(1);
           }
-          // The published tarball must stay a plugin package, not a repo dump:
-          // docs/, tests/, dev/, internal/, .github/ and scripts/ are not shipped.
+          // Locale detail pages are referenced by the installed plugin. npm may
+          // also include the matching market icon through the icon.svg pattern.
+          const allowedDocs = new Set([...pluginDetails, "docs/icon.svg"]);
           const forbidden = ["dev/", "internal/", "tests/", "scripts/", "docs/", ".github/", "node_modules/"];
-          const leaked = files.filter((entry) => forbidden.some((prefix) => entry.startsWith(prefix)));
+          const leaked = files.filter((entry) => !allowedDocs.has(entry) && forbidden.some((prefix) => entry.startsWith(prefix)));
           if (leaked.length > 0) {
             console.error(`npm pack must not contain repository-only files: ${leaked.join(", ")}`);
             process.exit(1);
