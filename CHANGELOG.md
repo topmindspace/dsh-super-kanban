@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复
+
+- 插件自己的后台维护会话不再变成任务卡。dsh-mnemon 的空闲审查从 v0.5.48 起改为独立顶层会话（`origin` 为 `main`、`delegationDepth` 为 0），看板原先只按「不是子代理」过滤，于是每次维护都会长出一张 `Mnemon · Idle review` 卡，AI 还会把审查里读到的检查点当成真实任务、在旁边建出重复卡。现在会话解析识别插件写在委托提示开头的标记（`[dsh-mnemon:delegated review]`），这类会话既不建卡也不参与证据归集；标记只认首个助手回复之前出现的，因此你在对话里引用同样的文字不会被误判。
+- 已经建出来的维护卡在下次扫描时自动收尾：没有动过的删除（写入 `recovery`，可用「恢复」撤销），你改过状态或锁定过字段的只归档、不删。
+- A plugin's own background maintenance session no longer becomes a task card. Since dsh-mnemon v0.5.48 its idle review runs as an ordinary top-level session, so the board's "not a subagent" filter no longer recognised it and added a card per pass. Cards built that way are retired on the next scan.
+
 ## [0.10.5] - 2026-11-17
 
 - 看板显示分阶段扫描进度，首次或全量扫描后可直接进入列表整理。

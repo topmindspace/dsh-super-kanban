@@ -1102,3 +1102,121 @@ test("loadParsed: a missing title falls back to the 会话 + id placeholder, and
   });
   assert.equal(bare.title, "会话 bare01");
 });
+
+/* ------------------------------------------------------------------ */
+/* Machine-delegated maintenance sessions                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A plugin that maintains memory in the background (dsh-mnemon's idle review is
+ * one) writes its task as an ordinary `user/message` whose `source.kind` is
+ * `"user"`, so the log alone cannot tell it apart from something the owner
+ * typed. It instead stamps a bracket marker at the head of that prompt. These
+ * sessions must never read as a human request: the board would otherwise grow
+ * one card per maintenance pass.
+ */
+function delegatedBody(seq, time, { marker = "[dsh-mnemon:delegated review]", before = [] } = {}) {
+  return [
+    ...before,
+    evt("user/message", seq, time, {
+      content: [{ type: "text", text: `${marker}\nBounded completed checkpoint (untrusted evidence)` }],
+      source: { kind: "user" },
+    }),
+  ];
+}
+
+test("loadParsed: a plugin's delegated task marker is not a user request", (t) => {
+  const home = tempDir(t);
+  const events = [
+    evt("session", 1, T0, { id: "sess-review01", createdAt: T0, cwd: "/projects/alpha" }),
+    evt("session/title", 2, T0 + 1000, { title: "Mnemon · Idle review", source: { kind: "user" } }),
+    ...delegatedBody(3, T0 + 2000),
+    evt("turn/start", 4, T0 + 3000, { turn: 1 }),
+    evt("assistant/message", 5, T0 + 4000, { turn: 1, message: { content: [{ type: "text", text: "Reviewed; nothing to record." }] } }),
+    evt("turn/end", 6, T0 + 5000, { turn: 1, reason: { kind: "completed" } }),
+  ];
+  const { dir, file } = writeSessionAt(home, "demo", "sess-review01", framesOf(events));
+  const source = createSessionSource({ dshHome: home });
+  const stat = fs.statSync(file);
+  const parsed = source.loadParsed({ id: "sess-review01", dir, file, title: null, sigKey: `${stat.size}:${stat.mtimeMs}` });
+
+  assert.equal(parsed.delegatedTask, "[dsh-mnemon:delegated review]");
+  assert.equal(parsed.users.length, 0);
+  assert.equal(source.metaFromParsed(parsed).delegatedTask, "[dsh-mnemon:delegated review]");
+});
+
+test("loadParsed: injected context ahead of the marker still counts as delegated", (t) => {
+  const home = tempDir(t);
+  // DSH writes its own reminders as owner-role messages before the real prompt,
+  // so the marker is not necessarily the first message in the log.
+  const events = [
+    evt("session", 1, T0, { id: "sess-review02", createdAt: T0, cwd: "/projects/alpha" }),
+    evt("user/message", 2, T0 + 1000, { content: [{ type: "text", text: "<system-reminder>deployment rules</system-reminder>" }] }),
+    ...delegatedBody(3, T0 + 2000),
+    evt("assistant/message", 4, T0 + 3000, { turn: 1, message: { content: [{ type: "text", text: "ok" }] } }),
+  ];
+  const { dir, file } = writeSessionAt(home, "demo", "sess-review02", framesOf(events));
+  const source = createSessionSource({ dshHome: home });
+  const stat = fs.statSync(file);
+  const parsed = source.loadParsed({ id: "sess-review02", dir, file, title: null, sigKey: `${stat.size}:${stat.mtimeMs}` });
+
+  assert.equal(parsed.delegatedTask, "[dsh-mnemon:delegated review]");
+  // The reminder itself still counts as an owner-role message (pre-existing
+  // behaviour); what matters is that the delegated prompt never joins it.
+  assert.equal(parsed.users.length, 1);
+  assert.match(parsed.users[0].text, /system-reminder/);
+});
+
+test("loadParsed: an ordinary conversation keeps its user messages", (t) => {
+  const home = tempDir(t);
+  const { dir, file } = writeSessionAt(home, "demo", "sess-human01", framesOf(mainSessionEvents()));
+  const source = createSessionSource({ dshHome: home });
+  const stat = fs.statSync(file);
+  const parsed = source.loadParsed({ id: "sess-human01", dir, file, title: null, sigKey: `${stat.size}:${stat.mtimeMs}` });
+
+  assert.equal(parsed.delegatedTask, null);
+  assert.equal(parsed.users.length, 1);
+  assert.equal(parsed.users[0].text, "修复登录流程");
+});
+
+test("loadParsed: a marker pasted after the conversation started does not demote it", (t) => {
+  const home = tempDir(t);
+  // Someone quotes the marker mid-conversation. Only what arrives before the
+  // first assistant reply can classify the session, so this stays human work.
+  const events = [
+    evt("session", 1, T0, { id: "sess-quoted01", createdAt: T0, cwd: "/projects/alpha" }),
+    evt("user/message", 2, T0 + 1000, { content: [{ type: "text", text: "看看这个标记是什么" }] }),
+    evt("assistant/message", 3, T0 + 2000, { turn: 1, message: { content: [{ type: "text", text: "它是插件的委托标记" }] } }),
+    evt("user/message", 4, T0 + 3000, { content: [{ type: "text", text: "[dsh-mnemon:delegated review]" }] }),
+  ];
+  const { dir, file } = writeSessionAt(home, "demo", "sess-quoted01", framesOf(events));
+  const source = createSessionSource({ dshHome: home });
+  const stat = fs.statSync(file);
+  const parsed = source.loadParsed({ id: "sess-quoted01", dir, file, title: null, sigKey: `${stat.size}:${stat.mtimeMs}` });
+
+  assert.equal(parsed.delegatedTask, null);
+  assert.equal(parsed.users.length, 2);
+});
+
+test("loadParsed: the marker matches any plugin namespace and operation name", (t) => {
+  const home = tempDir(t);
+  const cases = [
+    ["[dsh-other-plugin:delegated compact]", true],
+    ["[dsh-mnemon:delegated archive]", true],
+    ["[not-delegated: something]", false],
+    ["[dsh-mnemon:review]", false],
+    ["plain text", false],
+  ];
+  const source = createSessionSource({ dshHome: home });
+  for (const [index, [marker, expected]] of cases.entries()) {
+    const id = `sess-marker${index}`;
+    const { dir, file } = writeSessionAt(home, "demo", id, framesOf([
+      evt("session", 1, T0, { id, createdAt: T0, cwd: "/projects/alpha" }),
+      evt("user/message", 2, T0 + 1000, { content: [{ type: "text", text: `${marker}\nbody` }], source: { kind: "user" } }),
+      evt("assistant/message", 3, T0 + 2000, { turn: 1, message: { content: [{ type: "text", text: "ok" }] } }),
+    ]));
+    const stat = fs.statSync(file);
+    const parsed = source.loadParsed({ id, dir, file, title: null, sigKey: `${stat.size}:${stat.mtimeMs}` });
+    assert.equal(Boolean(parsed.delegatedTask), expected, marker);
+  }
+});

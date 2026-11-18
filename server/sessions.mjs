@@ -37,6 +37,22 @@ const PARSED_CACHE_LIMIT = 6;
 /** Injected user-role events that are useful context but not human requests. */
 const ASYNC_SIGNAL_KINDS = new Set(["agent-message", "subagent-settled", "tool-jobs", "model-selection"]);
 
+/**
+ * A plugin-owned maintenance session writes its task as an ordinary `user/message`
+ * with `source.kind === "user"`, so it is indistinguishable from a human request
+ * by role alone. The plugin stamps a bracket marker at the head of that prompt
+ * instead, e.g. `[dsh-mnemon:delegated review]`. Such a conversation is machine
+ * work, never a card for the owner: it has no human requester, and surfacing it
+ * duplicates the real task it was spawned to maintain.
+ *
+ * Kept as a shape (namespace + verb) rather than one literal string so a plugin
+ * that renames its operation, or a second plugin adopting the same convention,
+ * is still recognised without touching this table.
+ */
+const DELEGATED_TASK_MARKER = /^\[dsh-[a-z0-9][a-z0-9-]*:delegated\s+[a-z][a-z0-9_-]*\]/i;
+/** Upper bound on the stored marker, so cache metadata never carries the prompt. */
+const DELEGATED_TASK_LIMIT = 60;
+
 /* ------------------------------------------------------------------ */
 /* Low level: zstd + JSONL                                             */
 /* ------------------------------------------------------------------ */
@@ -907,6 +923,10 @@ export function createSessionSource({ dshHome } = {}) {
     const signals = [];
     const systemNotices = [];
     const activity = Object.create(null);
+    /** Opening plugin marker when this session was started by machine work, else null. */
+    let delegatedTask = null;
+    /** Set on the first assistant reply: the delegation marker can only precede it. */
+    let conversationStarted = false;
     let title = null;
     let titleSource = null;
     let lastActivityAt = 0;
@@ -936,7 +956,24 @@ export function createSessionSource({ dshHome } = {}) {
           const text = textOfContent(data.content).trim();
           const images = countImages(data.content);
           const sourceKind = data.source?.kind;
+          // Machine-delegated maintenance work carries a plugin marker as its
+          // opening prompt. It is not a human request: keep it out of `users`
+          // so the session is neither auto-carded nor folded into the board's
+          // "what did the owner ask for" evidence.
+          //
+          // DSH writes its own injected context (system reminders, tool lists)
+          // as owner-role messages ahead of the real prompt, so the marker is
+          // not necessarily the first one. It must however arrive before the
+          // first assistant reply: a marker pasted into a live conversation
+          // never demotes that conversation.
           if ((text || images) && (sourceKind === undefined || sourceKind === "user")) {
+            if (!conversationStarted) {
+              const marker = DELEGATED_TASK_MARKER.exec(text);
+              if (marker !== null) {
+                delegatedTask = marker[0].slice(0, DELEGATED_TASK_LIMIT);
+                break;
+              }
+            }
             users.push({ seq: event.seq, time: event.time, text, images });
           } else if (text && ASYNC_SIGNAL_KINDS.has(sourceKind)) {
             // Injected context (team mail, background-job notices, model switch…)
@@ -947,6 +984,7 @@ export function createSessionSource({ dshHome } = {}) {
         }
         case "assistant/message": {
           assistantTexts += 1;
+          conversationStarted = true;
           const text = textOfContent(data.message?.content).trim();
           const images = countImages(data.message?.content);
           if (text || images) assistants.push({ seq: event.seq, time: event.time, turn: Number(data.turn) || 0, text, images });
@@ -1116,6 +1154,9 @@ export function createSessionSource({ dshHome } = {}) {
       origin: delegationDepth > 0 ? "subagent" : "main",
       parentSession,
       delegationDepth,
+      // Machine work with no human requester: the marker names the plugin
+      // operation. Downstream treats it exactly like a subagent conversation.
+      delegatedTask,
       session: {
         id: sessionInfo.id || meta.id,
         createdAt,
@@ -1187,6 +1228,7 @@ export function createSessionSource({ dshHome } = {}) {
       parentSession: parsed.parentSession,
       delegationDepth: parsed.delegationDepth,
       origin: parsed.origin,
+      delegatedTask: parsed.delegatedTask || null,
       lastActivityAt: parsed.lastActivityAt,
       eventCount: parsed.eventCount,
       turnCount: parsed.turnCount,

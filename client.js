@@ -1096,7 +1096,8 @@ window.__ModuleLoader__.load({
   "{0}完成，新增 {1} 项任务": "{0} complete · {1} tasks added",
   "在列表中整理": "Organize in list",
   "跳过 {0} 个闲聊会话": "Skipped {0} small-talk sessions",
-  "无效任务状态": "Invalid task status"
+  "无效任务状态": "Invalid task status",
+  "来源为插件自动维护会话，已归档": "Source is a plugin's automatic maintenance session; archived"
 });
     const createTranslator = function createTranslator(catalog, language = "en") {
   return function translate(source, values = []) {
