@@ -465,6 +465,8 @@ export function truncateTask(task, projectIds) {
   }
   if (!isRecord(task.sessionContext)) task.sessionContext = null;
   task.review = normalizeTaskReview(task.review);
+  if (task.maintenanceRetained === true) task.maintenanceRetained = true;
+  else delete task.maintenanceRetained;
   return task;
 }
 

@@ -2321,21 +2321,33 @@ test("ignoring a session records the dismissed turn so unignore plus a scan cann
 /* ------------------------------------------------------------------ */
 
 /** A synthetic top-level session whose opening prompt is a plugin's delegated task. */
-function seedMaintenanceSession(home, { sessionId, title = "Mnemon · Idle review", workspaceId = "ws-demo", time = T0 } = {}) {
+function seedMaintenanceSession(home, { sessionId, title = "Mnemon · Idle review", workspaceId = "ws-demo", time = T0, withReminder = false } = {}) {
   const workspaceDir = path.join(home, "workspace-demo");
   fs.mkdirSync(workspaceDir, { recursive: true });
   const events = [
     event("session", 1, time, { id: sessionId, createdAt: time, cwd: workspaceDir }),
     event("session/title", 2, time + 500, { title, source: { kind: "user" } }),
-    event("user/message", 3, time + 1000, {
+  ];
+  let seq = 3;
+  if (withReminder) {
+    events.push(event("user/message", seq++, time + 800, {
+      content: [{ type: "text", text: "<system-reminder>workspace context</system-reminder>" }],
+      source: { kind: "user" },
+    }));
+  }
+  events.push(
+    event("user/message", seq++, time + 1000, {
       content: [{ type: "text", text: "[dsh-mnemon:delegated review]\nBounded completed checkpoint" }],
       source: { kind: "user" },
     }),
-    event("turn/start", 4, time + 2000, { turn: 1 }),
-    event("assistant/message", 5, time + 3000, { message: { content: [{ type: "text", text: "Reviewed the checkpoint" }] } }),
-    event("turn/end", 6, time + 4000, { turn: 1, reason: { kind: "completed" } }),
-  ];
-  writeFileDeep(path.join(home, "sessions", "escaped-demo", sessionId, SESSION_FILE_NAME), framesOf(events));
+    event("turn/start", seq++, time + 2000, { turn: 1 }),
+    event("assistant/message", seq++, time + 3000, { message: { content: [{ type: "text", text: "Reviewed the checkpoint" }] } }),
+    event("turn/end", seq++, time + 4000, { turn: 1, reason: { kind: "completed" } }),
+  );
+  const file = path.join(home, "sessions", "escaped-demo", sessionId, SESSION_FILE_NAME);
+  writeFileDeep(file, framesOf(events));
+  const mtime = new Date(time + 4000);
+  fs.utimesSync(file, mtime, mtime);
   writeFileDeep(
     path.join(home, "storages", "session_projcache", "sessions", `${sessionId}.json`),
     JSON.stringify({
@@ -2363,22 +2375,30 @@ function seedMaintenanceSession(home, { sessionId, title = "Mnemon · Idle revie
   registry.tables.workspaces[workspaceId] = workspace;
   registry.global.workspaceIds = [...new Set([...registry.global.workspaceIds, workspaceId])];
   writeFileDeep(registryPath, JSON.stringify(registry));
-  return { sessionId, workspaceDir };
+  return { sessionId, workspaceDir, file };
 }
 
 test("a plugin maintenance session never becomes a task card", async (t) => {
   const { home, service } = await setup(t, {
-    prepare: (dir) => seedMaintenanceSession(dir, { sessionId: "sess-review-1" }),
+    // Include an injected reminder ahead of the marker so `hasUserMessages`
+    // remains true; this directly exercises the service's delegation guard and
+    // confirms no temporary card was created and retired.
+    prepare: (dir) => seedMaintenanceSession(dir, { sessionId: "sess-review-1", withReminder: true }),
   });
   await command(service, "scan.start", { mode: "full" });
-  await waitForScan(service);
+  const scan = await waitForScan(service);
+  assert.equal(scan.state, "done");
+  assert.equal(scan.newTasks, 0);
   const state = await request(service, {});
   assert.deepEqual(state.json.tasks, []);
-  assert.equal(readStateFile(home).tasks.length, 0);
+  const saved = readStateFile(home);
+  assert.equal(saved.tasks.length, 0);
+  assert.equal(saved.recovery.length, 0);
+  assert.equal(saved.deletedLog.length, 0);
 });
 
 /** A legacy card seeded on disk before the service starts, as a real profile would hold. */
-function seedLegacyCard(home, { sessionId, ownerTouched = false }) {
+function seedLegacyCard(home, { sessionId, ownerTouched = false, overrides = {}, extraTasks = [] }) {
   const file = path.join(home, "storages", "super-kanban", "state.json");
   let state = createEmptyState();
   if (fs.existsSync(file)) state = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -2402,7 +2422,8 @@ function seedLegacyCard(home, { sessionId, ownerTouched = false }) {
     createdAt: new Date(T0 + 5000).toISOString(),
     updatedAt: new Date(T0 + 6000).toISOString(),
     lastActivityAt: T0 + 4000,
-  }];
+    ...overrides,
+  }, ...extraTasks];
   writeFileDeep(file, JSON.stringify(state));
 }
 
@@ -2461,4 +2482,255 @@ test("a human session keeps its card even next to a maintenance session", async 
   const maintenance = state.tasks.filter((task) => (task.sessions || []).some((entry) => entry.id === "sess-review-4"));
   assert.equal(human.length, 1);
   assert.equal(maintenance.length, 0);
+});
+
+test("manual cards linked to a maintenance session are never automatically retired", async (t) => {
+  const { home, service } = await setup(t, {
+    prepare: (dir) => {
+      seedMaintenanceSession(dir, { sessionId: "sess-review-manual" });
+      seedLegacyCard(dir, {
+        sessionId: "sess-review-manual",
+        overrides: {
+          origin: "manual",
+          history: [{ at: new Date(T0 + 5000).toISOString(), by: "user", kind: "create", note: "手动创建任务" }],
+        },
+      });
+    },
+  });
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+
+  const after = readStateFile(home);
+  const card = after.tasks.find((task) => task.id === "t_legacy01");
+  assert.ok(card, "manual card stays active");
+  assert.equal(Boolean(card.archived), false);
+  assert.equal(after.recovery.length, 0);
+});
+
+test("auto+edited, renamed, pinned, or manual-subtask maintenance cards are archived with edits intact", async (t) => {
+  const { home, service } = await setup(t, {
+    prepare: (dir) => {
+      seedMaintenanceSession(dir, { sessionId: "sess-review-edited" });
+      seedLegacyCard(dir, {
+        sessionId: "sess-review-edited",
+        overrides: {
+          origin: "auto+edited",
+          title: "Custom owner title",
+          pinned: true,
+          lockedFields: ["title"],
+          subtasks: [{ id: "s_man1", text: "Owner note", done: false, source: "manual", seq: null }],
+          // Simulate user history having been evicted by later AI updates.
+          history: [{ at: new Date(T0 + 5000).toISOString(), by: "ai", kind: "create", note: "rules 自动建卡" }],
+        },
+      });
+    },
+  });
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+
+  const after = readStateFile(home);
+  const card = after.tasks.find((task) => task.id === "t_legacy01");
+  assert.ok(card, "owner-edited maintenance card is preserved");
+  assert.equal(card.archived, true);
+  assert.equal(card.pinned, true);
+  assert.deepEqual(card.lockedFields, ["title"]);
+  assert.equal(card.subtasks.length, 1);
+  assert.equal(after.recovery.length, 0);
+});
+
+test("explicitly restoring or unarchiving a retired maintenance card survives subsequent scans", async (t) => {
+  const { home, service } = await setup(t, {
+    prepare: (dir) => {
+      seedMaintenanceSession(dir, { sessionId: "sess-review-restore" });
+      seedLegacyCard(dir, { sessionId: "sess-review-restore" });
+    },
+  });
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  assert.equal(readStateFile(home).tasks.length, 0);
+
+  const restored = await command(service, "task.restore", { id: "t_legacy01" });
+  assert.equal(restored.status, 200);
+  assert.equal(restored.json.data.maintenanceRetained, true);
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+  const afterRestore = readStateFile(home).tasks.find((task) => task.id === "t_legacy01");
+  assert.ok(afterRestore, "restored card survives the next scan");
+  assert.equal(Boolean(afterRestore.archived), false);
+
+  // Also verify unarchiving an auto-archived card sticks across rescans.
+  const { home: home2, service: service2 } = await setup(t, {
+    prepare: (dir) => {
+      seedMaintenanceSession(dir, { sessionId: "sess-review-unarchive" });
+      seedLegacyCard(dir, { sessionId: "sess-review-unarchive", ownerTouched: true });
+    },
+  });
+  await command(service2, "scan.start", { mode: "full" });
+  await waitForScan(service2);
+  assert.equal(readStateFile(home2).tasks[0].archived, true);
+
+  const unarchived = await command(service2, "task.archive", { id: "t_legacy01", archived: false });
+  assert.equal(unarchived.status, 200);
+  assert.equal(unarchived.json.data.maintenanceRetained, true);
+
+  await command(service2, "scan.start", { mode: "full" });
+  await waitForScan(service2);
+  assert.equal(readStateFile(home2).tasks[0].archived, false);
+});
+
+test("maintenance cards referenced by human relations are archived and merge undo stays valid", async (t) => {
+  const { home, service } = await setup(t, {
+    prepare: (dir) => {
+      seedMaintenanceSession(dir, { sessionId: "sess-review-rel" });
+      seedMaintenanceSession(dir, { sessionId: "sess-review-rel2" });
+      seedLegacyCard(dir, {
+        sessionId: "sess-review-rel",
+        extraTasks: [
+          {
+            id: "t_human_ref",
+            title: "Human card with dependency",
+            status: "in_progress",
+            progress: 50,
+            origin: "manual",
+            sessions: [],
+            relations: [{ type: "depends_on", taskId: "t_legacy01" }],
+            history: [{ at: new Date(T0 + 5000).toISOString(), by: "user", kind: "create", note: "手动创建任务" }],
+            subtasks: [],
+            keyFacts: [],
+            evidence: [],
+            lockedFields: [],
+            createdAt: new Date(T0 + 5000).toISOString(),
+            updatedAt: new Date(T0 + 6000).toISOString(),
+            lastActivityAt: T0 + 4000,
+          },
+          {
+            id: "t_legacy02",
+            title: "Second legacy review",
+            status: "done",
+            progress: 100,
+            origin: "auto",
+            primarySessionId: "sess-review-rel2",
+            sessions: [{ id: "sess-review-rel2", title: "Mnemon · Idle review", seqEnd: 6, evidenceCount: 0 }],
+            history: [{ at: new Date(T0 + 5000).toISOString(), by: "ai", kind: "create", note: "rules 自动建卡" }],
+            subtasks: [],
+            keyFacts: [],
+            evidence: [],
+            lockedFields: [],
+            createdAt: new Date(T0 + 5000).toISOString(),
+            updatedAt: new Date(T0 + 6000).toISOString(),
+            lastActivityAt: T0 + 4000,
+          },
+        ],
+      });
+    },
+  });
+
+  // Merge t_legacy02 into t_legacy01 before scanning.
+  const before = (await request(service, {})).json.tasks;
+  const target = before.find((task) => task.id === "t_legacy01");
+  const src = before.find((task) => task.id === "t_legacy02");
+  const merged = await command(service, "task.merge", {
+    id: target.id,
+    sourceId: src.id,
+    expectedUpdatedAt: target.updatedAt,
+    expectedSourceUpdatedAt: src.updatedAt,
+  });
+  assert.equal(merged.status, 200);
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+
+  const after = readStateFile(home);
+  const retiredTarget = after.tasks.find((task) => task.id === "t_legacy01");
+  assert.ok(retiredTarget, "referenced & merged card is archived, not deleted");
+  assert.equal(retiredTarget.archived, true);
+
+  // Merge undo must still succeed after automatic archiving.
+  const undone = await command(service, "task.restore", { id: "t_legacy02" });
+  assert.equal(undone.status, 200);
+});
+
+test("incremental scan retires legacy maintenance cards older than initialDays", async (t) => {
+  const oldTime = Date.now() - 45 * 24 * 60 * 60 * 1000;
+  const { home, service } = await setup(t, {
+    prepare: (dir) => {
+      seedMaintenanceSession(dir, { sessionId: "sess-review-old", time: oldTime });
+      seedLegacyCard(dir, {
+        sessionId: "sess-review-old",
+        overrides: { lastActivityAt: oldTime + 4000 },
+      });
+    },
+  });
+
+  await command(service, "scan.start", { mode: "incremental" });
+  await waitForScan(service);
+
+  const after = readStateFile(home);
+  assert.equal(after.tasks.length, 0, "incremental scan re-classifies and retires old active maintenance cards");
+  assert.equal(after.recovery.length, 1);
+});
+
+test("scan clears stale maintenance review on mixed cards and live turn/end never pins unclassified maintenance sessions", async (t) => {
+  let observe = null;
+  const { home, service } = await setup(t, {
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") observe = listener;
+        return () => {
+          if (observe === listener) observe = null;
+        };
+      },
+    },
+    prepare: (dir) => {
+      seedSessionHome(dir, { sessionId: "sess-human-mix" });
+      seedMaintenanceSession(dir, { sessionId: "sess-review-mix" });
+      seedLegacyCard(dir, {
+        sessionId: "sess-review-mix",
+        overrides: {
+          sessions: [
+            { id: "sess-review-mix", title: "Mnemon · Idle review", seqEnd: 6, evidenceCount: 0 },
+            { id: "sess-human-mix", title: "Human work", seqEnd: 10, evidenceCount: 1 },
+          ],
+          review: { at: T0 + 5000, sessionId: "sess-review-mix", seq: 6, kind: "completed" },
+        },
+      });
+    },
+  });
+
+  // Live turn/end before the first scan must classify the maintenance session
+  // instead of pinning a new review notice on it.
+  service.start();
+  assert.equal(typeof observe, "function");
+  observe({ id: "sess-review-mix" }, { type: "turn/end", seq: 12, data: { reason: { kind: "completed" } } });
+  const liveCard = (await request(service, {})).json.tasks.find((task) => task.id === "t_legacy01");
+  assert.equal(liveCard.review.seq, 6, "live turn/end must not pin a maintenance session before first scan");
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+
+  const after = readStateFile(home).tasks.find((task) => task.id === "t_legacy01");
+  assert.ok(after, "mixed card with human supporting session stays active");
+  assert.equal(after.review, null, "stale review owned by the maintenance session is cleared");
+});
+
+test("retirement defers when a maintenance session fails to parse", async (t) => {
+  const { home, service } = await setup(t, {
+    prepare: (dir) => {
+      const { file } = seedMaintenanceSession(dir, { sessionId: "sess-review-corrupt" });
+      seedLegacyCard(dir, { sessionId: "sess-review-corrupt" });
+      // Corrupt the log so parsing fails on scan.
+      fs.writeFileSync(file, Buffer.from("not-valid-zstd"));
+    },
+  });
+
+  await command(service, "scan.start", { mode: "full" });
+  await waitForScan(service);
+
+  const after = readStateFile(home);
+  assert.equal(after.tasks.length, 1, "card is not retired when its source log fails to parse");
+  assert.equal(after.recovery.length, 0);
 });

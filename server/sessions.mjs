@@ -49,7 +49,7 @@ const ASYNC_SIGNAL_KINDS = new Set(["agent-message", "subagent-settled", "tool-j
  * that renames its operation, or a second plugin adopting the same convention,
  * is still recognised without touching this table.
  */
-const DELEGATED_TASK_MARKER = /^\[dsh-[a-z0-9][a-z0-9-]*:delegated\s+[a-z][a-z0-9_-]*\]/i;
+const DELEGATED_TASK_MARKER = /^(\[dsh-[a-z0-9][a-z0-9-]*:delegated\s+[a-z][a-z0-9_-]*\])(?:\r?\n|$)/i;
 /** Upper bound on the stored marker, so cache metadata never carries the prompt. */
 const DELEGATED_TASK_LIMIT = 60;
 
@@ -970,7 +970,7 @@ export function createSessionSource({ dshHome } = {}) {
             if (!conversationStarted) {
               const marker = DELEGATED_TASK_MARKER.exec(text);
               if (marker !== null) {
-                delegatedTask = marker[0].slice(0, DELEGATED_TASK_LIMIT);
+                delegatedTask = marker[1].slice(0, DELEGATED_TASK_LIMIT);
                 break;
               }
             }

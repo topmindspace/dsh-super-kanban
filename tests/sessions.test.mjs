@@ -1220,3 +1220,22 @@ test("loadParsed: the marker matches any plugin namespace and operation name", (
     assert.equal(Boolean(parsed.delegatedTask), expected, marker);
   }
 });
+
+test("loadParsed: an owner quoting the marker inline on the opening line stays a user request", (t) => {
+  const home = tempDir(t);
+  const events = [
+    evt("session", 1, T0, { id: "sess-inline-quote", createdAt: T0, cwd: "/projects/alpha" }),
+    evt("user/message", 2, T0 + 1000, {
+      content: [{ type: "text", text: "[dsh-mnemon:delegated review] What does this marker mean?" }],
+      source: { kind: "user" },
+    }),
+    evt("assistant/message", 3, T0 + 2000, { turn: 1, message: { content: [{ type: "text", text: "It marks a plugin maintenance run." }] } }),
+  ];
+  const { dir, file } = writeSessionAt(home, "demo", "sess-inline-quote", framesOf(events));
+  const source = createSessionSource({ dshHome: home });
+  const stat = fs.statSync(file);
+  const parsed = source.loadParsed({ id: "sess-inline-quote", dir, file, title: null, sigKey: `${stat.size}:${stat.mtimeMs}` });
+
+  assert.equal(parsed.delegatedTask, null);
+  assert.equal(parsed.users.length, 1);
+});
