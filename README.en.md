@@ -94,7 +94,7 @@ Requires DSH `>= 0.2.1-rc.5 < 0.3.0` and Node.js `>= 22.19.0` (bundled with DSH)
 
 - **Usage** · [Install, upgrade, and uninstall](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md) · [Daily workflows (Chinese)](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/WORKFLOWS.md) · [Troubleshooting](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
 - **Versions** · [Changelog](https://github.com/topmindspace/dsh-super-kanban/blob/main/CHANGELOG.md) · [Roadmap](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ROADMAP.md)
-- **Development** · [Contributing](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) · [Developer guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md) · [Architecture](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md) · [API contract](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md)
+- **Development** · [Contributing](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) · [Developer guide](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md) · [Architecture](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md) · [API contract](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md) · [Localization](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/LOCALIZATION.md)
 
 Run `npm run check` for tests and validation. Please report security issues privately as described in the security policy.
 
@@ -103,5 +103,6 @@ Run `npm run check` for tests and validation. Please report security issues priv
 - [@mufanmu](https://github.com/mufanmu) · [#3](https://github.com/topmindspace/dsh-super-kanban/pull/3)
 - [@tangyixiao](https://github.com/tangyixiao) · [#7](https://github.com/topmindspace/dsh-super-kanban/pull/7)
 - [@evgyur](https://github.com/evgyur) · [#8](https://github.com/topmindspace/dsh-super-kanban/pull/8)
+- [@Doraemon-AGI](https://github.com/Doraemon-AGI) · [#16](https://github.com/topmindspace/dsh-super-kanban/pull/16)
 
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace

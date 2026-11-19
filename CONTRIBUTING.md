@@ -26,11 +26,12 @@ and the pull-request flow.
 | `index.mjs` | Host entry: mounts the API on the DSH web server and starts the service. |
 | `client.js` | Browser half: hand-written, build-free DSH client plugin bundle. |
 | `cordis.patch.yml` | Cordis bundle patch that inserts the plugin into a DSH profile. |
-| `server/` | Host implementation: session scanning, rules/LLM analysis, store, HTTP service. |
+| `server/` | Host implementation: session scanning, rules/LLM analysis, localization, store, HTTP service. |
+| `locale/` / `locales/` | Plugin listing metadata (`locale/zh.json`, `locale/en.json`) and the shared English UI/server message catalog (`locales/en.mjs`). |
 | `package.json` | npm package metadata, DSH plugin manifest (`dsh` field) and scripts. |
 | `icon.svg` | DSH plugin icon (36×36 SVG, transparent canvas). |
-| `docs/` | Public docs, screenshots, the GitHub Pages landing page (`index.html`) and the plugin-market index (`index.json`). |
-| `scripts/` | Zero-dependency validators, docs/version checkers, market-index generator and release helper. |
+| `docs/` | Public docs (including `LOCALIZATION.md` and `plugin/` detail pages), screenshots, the GitHub Pages landing page (`index.html`) and the plugin-market index (`index.json`). |
+| `scripts/` | Zero-dependency i18n catalog sync, validators, docs/version checkers, market-index generator and release helper. |
 | `tests/` | `node --test` suites; no third-party runner. |
 | `install.sh` / `uninstall.sh` | Link a local checkout into a DSH profile / remove this plugin's dependency and bundle entries from it (the uninstaller edits the profile in place instead of restoring the pre-install file). |
 | `.github/` | CI, release workflow, Dependabot config and issue/PR templates. |
@@ -67,6 +68,8 @@ so plugins you installed after Super Kanban keep their own configuration.
 Useful commands:
 
 ```bash
+npm run build:i18n            # embed locales/en.mjs and shared translator into client.js
+npm run check:i18n            # verify client.js matches locales/en.mjs
 npm test                      # node --test "tests/**/*.test.mjs"
 npm run validate              # metadata, syntax, files, cordis patch, market index
 npm run check:privacy         # scan repository text for personal data / credentials
@@ -93,7 +96,7 @@ is required for the test suite.
 - Keep host and client boundaries as documented in `docs/ARCHITECTURE.md`; new
   API routes and task fields belong in the contract docs first.
 - Style: 2-space indentation, LF line endings, UTF-8 (see `.editorconfig`).
-- Comments and identifiers in English; user-facing UI copy is Chinese for now.
+- Comments and identifiers in English; user-facing source strings are Chinese keys with English translations in `locales/en.mjs` (run `npm run build:i18n` after editing translations; see [docs/LOCALIZATION.md](docs/LOCALIZATION.md)).
 - Never log tokens or credentials, and never write outside
   `$DSH_HOME/storages/super-kanban/`.
 - Keep public docs and tests free of real workspace names, session ids, user

@@ -13,13 +13,14 @@
 | 路径 | 说明 |
 | --- | --- |
 | `index.mjs` | Host 入口（路由、鉴权、服务生命周期） |
-| `server/` | Host 实现：扫描 / 规则 / LLM / 存储 / HTTP 服务 |
+| `server/` | Host 实现：扫描 / 规则 / LLM / 本地化 / 存储 / HTTP 服务 |
+| `locale/` / `locales/` | 插件元数据中英文（`locale/*.json`）与共享英文文案目录（`locales/en.mjs`） |
 | `client.js` | 浏览器半边（单文件，无 JSX、无构建） |
 | `cordis.patch.yml` | 把 host 插件插入 DSH profile（无 `config:` 块，设置存看板 `state.json`） |
 | `install.sh` / `uninstall.sh` | 本地链接安装 / 定向卸载（移除依赖与 bundle 条目，不用安装前备份整体覆盖 profile） |
-| `scripts/` | validate、文档检查、版本一致性、隐私扫描、市场索引、发布辅助 |
+| `scripts/` | i18n 同步检查、validate、文档检查、版本一致性、隐私扫描、市场索引、发布辅助 |
 | `tests/` | `node --test` 套件 |
-| `docs/` | 公开文档、截图、GitHub Pages 落地页（`index.html`）与市场索引（`index.json`） |
+| `docs/` | 公开文档（含 `LOCALIZATION.md`、`plugin/` 详情页）、截图、GitHub Pages 落地页（`index.html`）与市场索引（`index.json`） |
 | `.github/` | CI / Release 工作流、Dependabot 配置、Issue/PR 模板 |
 | `CHANGELOG.md` | Keep a Changelog 格式的版本记录 |
 | `dev/` | 维护者本地工具：隔离实例、API/截图、design audit、demo、verify（**git 忽略，不随仓库分发**） |
@@ -107,6 +108,8 @@ curl -s -b "<cookie>" http://127.0.0.1:56790/super-kanban/api/state | head -c 40
 ## 6. 测试与检查
 
 ```bash
+npm run build:i18n    # 将 locales/en.mjs 与共享翻译器同步嵌入 client.js
+npm run check:i18n    # 校验 client.js 内嵌文案与 locales/en.mjs 一致
 npm test              # node --test "tests/**/*.test.mjs"
 npm run validate      # 包清单 / Cordis patch / 文件清单 / 市场索引
 npm run check:privacy # 个人路径、凭证、真实会话 id 等敏感内容扫描
@@ -116,10 +119,10 @@ npm run check         # 以上全部检查（CI 的等价入口，提交 PR 前�
 npm pack --dry-run    # 查看将发布的 tarball 内容
 ```
 
-CI（`.github/workflows/ci.yml`）在两个 Node 版本（22.19 / 24）上执行同样的检查：
-`node --check` 语法检查 → `npm test` → `npm run validate` → `npm run check:privacy`
+CI（`.github/workflows/ci.yml`）在 Linux 和 Windows 上分别用两个 Node 版本（22.19 / 24）执行同样的检查：
+`node --check` 语法检查 → `npm run check:i18n` → `npm test` → `npm run validate` → `npm run check:privacy`
 → `npm run check:docs` → `npm run check:version` → `npm pack --dry-run` 内容断言。
-其中 Node 22.19 那条还会输出 **非阻塞** 的覆盖率报告
+其中 Linux Node 22.19 那条还会输出 **非阻塞** 的覆盖率报告
 （`node --test --experimental-test-coverage`），仅作参考，不设阈值、不因覆盖率下降失败。
 
 CI 之外，`.github/dependabot.yml` 每周检查 GitHub Actions 的版本更新；仓库没有 npm 依赖，
@@ -189,7 +192,7 @@ await page.screenshot({ path: "board-light.png" });
 提交 PR 前至少运行：
 
 ```bash
-npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version
+npm run check:i18n && npm test && npm run validate && npm run check:privacy && npm run check:docs && npm run check:version
 # 或一次跑完：npm run check
 ```
 

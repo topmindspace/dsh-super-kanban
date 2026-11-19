@@ -50,12 +50,17 @@ Super Kanban 是一个 **DSH 插件包**，由两个半边组成：
 | `server/auth.mjs` | owner 鉴权决策表：归一化 `connection.admit()` 结果，异常/畸形输入一律 fail-closed 403 |
 | `server/task-relations.mjs` | 任务关系校验与环检测、问题文本标识 |
 | `server/http.mjs` | HTTP 公共设施：JSON 响应、受控请求体读取、错误分类、id / 载荷校验 |
+| `server/i18n.mjs` | 无依赖翻译器与请求级语言上下文，供服务端和 `scripts/build-i18n.mjs` 共用 |
+| `server/locale.mjs` | 从 DSH profile / home 的 `cordis.patch.yml` 读取持久语言偏好与请求头语言解析 |
+| `server/text-projection.mjs` | 可选本机私有展示翻译投影（只读投影，不改写权威存储与证据） |
 | `server/titles.mjs` | 标题相似度：为用户发起的相似任务查询提供确定性的纯字符串打分 |
+| `locale/` | 插件市场与 DSH 插件页的中英元数据（`zh.json` / `en.json`） |
+| `locales/en.mjs` | 单一来源的英文文案目录（经 `scripts/build-i18n.mjs` 嵌入 `client.js`） |
 | `cordis.patch.yml` | Cordis bundle patch：只把 host 插件 insert 进 profile，**不含 `config:` 块**；看板设置来自 `state.json`（设置页） |
 | `install.sh` / `uninstall.sh` | 把仓库链接进 DSH profile / 定向移除本插件的依赖与 bundle 条目 |
-| `scripts/` | 校验、文档检查、版本一致性、隐私扫描、市场索引生成、发布辅助 |
-| `tests/` | `node --test` 套件（store / analyzer / sessions / service / http / auth / titles / host-entry / package / market-index / privacy） |
-| `docs/` | 公开文档、截图、GitHub Pages 落地页（`index.html`）与插件市场索引（`index.json`） |
+| `scripts/` | i18n 嵌入检查、校验、文档检查、版本一致性、隐私扫描、市场索引生成、发布辅助 |
+| `tests/` | `node --test` 套件（store / analyzer / sessions / service / client / i18n / locale / text-projection / http / auth / titles / host-entry / package / market-index / privacy） |
+| `docs/` | 公开文档（含 `LOCALIZATION.md`、`plugin/` 详情页）、截图、GitHub Pages 落地页（`index.html`）与插件市场索引（`index.json`） |
 | `.github/` | CI、发布工作流、Dependabot、Issue/PR 模板 |
 | `CHANGELOG.md` | Keep a Changelog 格式的版本变更记录 |
 | `dev/` | 维护者本地开发/截图/验收工具（**已在 `.gitignore` 中忽略，不随仓库分发**；见 `dev/README.md`） |
@@ -111,6 +116,7 @@ store.saveState()              原子写（tmp + rename）；经 SSE 通知刷�
 
 - **会话锚点**：自动任务以来源会话为种子生成稳定 ID，显式关联优先。相似标题仅用于用户查询，扫描不自动合并任务。
 - **自动任务标题**：跟随主来源会话的最新标题。用户编辑过的标题（`lockedFields` 含 `title`，或旧数据中已不同于占位 / 上次会话标题的）和手动任务的标题不会被覆盖；多会话任务只跟主会话，辅助会话改名只更新 `sessions[].title`。旧版缓存若把占位标题写进了解析结果，升级后第一次增量扫描会重新解析一次（`meta.titleRev`），不触发额外的 AI 研判。
+- **插件后台维护会话过滤**：顶层会话若在首次助手回复前出现独占首行的委托标记（如 `[dsh-mnemon:delegated review]`），解析器记录 `delegatedTask` 并将其排除出 `users`，从而阻断自动建卡、证据归集与审阅条钉卡。旧缓存通过 `meta.delegatedRev` 触发一次重分类（含活跃旧卡超出 `initialDays` 的来源会话），扫描结束时对历史遗留的纯维护卡自动收尾（未编辑自动卡移入 `recovery` 并抑制会话，用户编辑过或被引用的自动卡归档保留，手动卡与用户显式恢复/取消归档的卡保持活跃），同时清除混合卡上指向维护会话的残留 `review`。
 - **增量门控**：仅在「用户消息数增加、上一轮 turn 已结束、首次分析、手动重新研判」时调用模型；活跃 turn 内不重复分析；同一会话有最小间隔。
 - **待审批卡片条**：`turn/end` 事件先把 `task.review` 写到该会话的主任务上（不依赖扫描是否开启或正忙），卡片立刻钉在悬浮入口上方；随后扫描用准确的 `seq` / `kind` 补齐。
   `state.reviewSeen` 记录每个会话已处理到的轮次序号：安装时只播种账本，历史会话不会一次性堆满待审批条；此后每个新轮次只弹一次。验收、手动改状态和忽略会话都会清空 `review` 并记入账本。实时事件可能以 `seq` 为 0 先落，此时若用户已清除，`reviewDeferred` 记下清除时刻，结算扫描只对不晚于该时刻、且本会钉卡的观察补真实序号、不再钉卡（提前扫描到更早序号时保留标记）；其后的新轮次仍会钉一张新卡。
@@ -163,13 +169,13 @@ LLM 请求经 **DSH 原生 LLM 服务**（`ctx.llm`）发出：插件不再直�
 
 ### 持久化（`store.mjs`）
 
-- `state.json`：`version`、`projects`、`tasks`、`settings`、`usage`、`ignoredSessions`、`suppressedSessions`、`deletedLog`、`workspaces`、`activity`、`scan`。旧 v2 数据加载时补齐项目和规划字段。
+- `state.json`：`version`、`projects`、`tasks`、`settings`、`usage`、`ignoredSessions`、`suppressedSessions`、`reviewSeen`、`reviewDeferred`、`deletedLog`、`recovery`、`workspaces`、`activity`、`scan`。旧 v2 数据加载时补齐项目和规划字段。
 - `sessions-cache.json`：`sessions[sessionId] = { sigKey, meta }`，用于跳过未变化会话与 AI 门控。
 - 写入是原子的（临时文件 + rename）；解析失败的文件会移动到 `backups/` 后以默认值重建。
 - `version` 变化时执行迁移（v1 → v2），迁移失败同样走备份 + 重建路径。
-- 文本与载荷上限统一由 `TEXT_LIMITS` 常量定义（title 80 / goal 280 / acceptanceCriteria 600 / tags 4×12 / subtasks 12×60 /
+- 文本与载荷上限统一由 `TEXT_LIMITS` 常量定义（title 80 / goal 280 / acceptanceCriteria 600 / notes 4000 / tags 4×12 / subtasks 生成 12·手动 100×60 /
   issues·nextSteps 5×160 / milestones 20×120 / keyFacts 6×60 / evidence 8（text 200、quote 160）/
-  artifact name 80 / history 20）；加载与保存走同一个 `truncateTask`，客户端表单镜像同一组上限。
+  artifacts 24（name 80）/ history 20）；加载与保存走同一个 `truncateTask`，客户端表单镜像同一组上限。
 - `seq` 由 `positiveSeqOrNull` 归一化：正整数或 `null`（永不为 0），无法定位时间线时 UI 不显示 `#N`。
 
 ### HTTP API

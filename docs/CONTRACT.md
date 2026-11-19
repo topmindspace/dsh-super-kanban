@@ -81,10 +81,10 @@ type Priority = "P0" | "P1" | "P2" | "P3";
     { "id": "k_x", "text": "关键事实", "kind": "status|progress|issue|decision|artifact|goal",
       "sessionId": "session-...", "seq": 0|null }
   ],
-  "subtasks": [                          // ≤12 条，≤60 字
+  "subtasks": [                          // 生成类 ≤12 条、手动 ≤100 条，每条 ≤60 字
     { "id": "s_x", "text": "子任务", "done": false, "source": "ai|todo|manual", "seq": 0|null }
   ],
-  "artifacts": [                         // ≤6 条；name ≤80 字
+  "artifacts": [                         // ≤24 条；name ≤80 字
     { "id": "a_x", "name": "README.md", "path": "workspace 相对路径",
       "absPath": "/abs/path/README.md", "sessionId": "session-...", "seq": 0|null, "time": 0,
       "description": "交付说明，可为空字符串" }
@@ -126,6 +126,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   它不改变任务列状态；用户点对号才走 `task.accept`（`status: "done"` + `completionBasis: "user"`）并清空该字段。
   手动改状态、拖到「已完成」或忽略来源会话也会清空。已是 `done + user` 的任务不会被迟到的扫描把同一轮重新排队；其后的新轮次仍会钉一张新卡。实时事件以 `seq` 为 0 先落、用户已清除后，结算扫描只补账本，不再把同一轮钉回。
 - 自动任务的 `title` 跟随主来源会话的最新标题（解析优先用 `session/title` 事件，投影缓存标题只作兜底）。扫描会刷新仍等于占位「会话 + id 后六位」、或仍等于该会话上次写入 `sessions[].title` 的标题。`lockedFields` 含 `title` 的用户编辑、已改成其他文案的旧卡、以及 `origin: "manual"` 的标题都不会被覆盖；多会话任务只跟 `primarySessionId`。显式 `task.analyze` 仍可按原规则更新未锁定的标题（含手动卡）。
+- 插件后台维护会话过滤：在首次助手回复之前、头部独占一行携带委托标记（形如 `[dsh-<plugin>:delegated <op>]`）的顶层会话会被解析为 `delegatedTask`，既不自动建卡、不触发 `review`，也不参与证据归集。历史版本已建出的纯维护会话卡在扫描后自动收尾：未编辑的自动卡移入 `recovery`（可通过 `task.restore` 恢复）并抑制来源会话；用户编辑过、置顶、锁定非状态字段、新增手动子任务或被其他任务引用的自动卡改为归档；手动卡（`origin: "manual"`）以及用户显式恢复或取消归档的卡（`maintenanceRetained: true`）永不自动清理。
 - v1 → v2 迁移：`keyFacts ← evidence 前 3`、`subtasks ← milestones`、`artifacts = []`、`sessionContext ← 首个 session`、`evidence` 截断 8 条。
 
 ### 2.1 文本与裁剪上限（Host 单一来源）
@@ -136,10 +137,11 @@ type Priority = "P0" | "P1" | "P2" | "P3";
 | 字段 | 上限 | 字段 | 上限 |
 | --- | --- | --- | --- |
 | `title` | 80 字 | `goal` | 280 字 |
+| `acceptanceCriteria` | 600 字 | `notes` | 4000 字 |
 | `tags` | ≤4 个，每个 ≤12 字 | `keyFacts` | ≤6 条，每条 ≤60 字 |
-| `subtasks` | ≤12 条，每条 ≤60 字 | `issues` | ≤5 条，每条 ≤160 字 |
+| `subtasks` | 生成 ≤12 条 / 手动 ≤100 条，每条 ≤60 字 | `issues` | ≤5 条，每条 ≤160 字 |
 | `nextSteps` | ≤5 条，每条 ≤160 字 | `milestones` | ≤20 条，每条 ≤120 字 |
-| `evidence` | ≤8 条，`text` ≤200 字、`quote` ≤160 字 | `artifacts` | ≤6 条，`name` ≤80 字 |
+| `evidence` | ≤8 条，`text` ≤200 字、`quote` ≤160 字 | `artifacts` | ≤24 条，`name` ≤80 字 |
 | `history` | ≤20 条 | `sessions` | 任务的来源会话列表（自动任务通常 1 个） |
 
 > 设置项 `maxTasksPerSession`（默认 3）限制单个会话在一次分析中最多产出多少张自动任务卡，不是 Task 字段上限。

@@ -48,6 +48,9 @@ jobs:
           done
           echo "node --check passed for: $files"
 
+      - name: Check browser i18n catalog sync
+        run: npm run check:i18n
+
       - name: Unit tests
         run: npm test
 
@@ -61,8 +64,8 @@ jobs:
           echo "## Unit test coverage (non-blocking)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           node --test --experimental-test-coverage "tests/**/*.test.mjs" 2>&1 | tee coverage.log
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
           tail -40 coverage.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Repository validation (manifest, files, syntax, market index format 1)
         run: npm run validate
@@ -101,10 +104,16 @@ jobs:
             "server/store.mjs",
             "server/auth.mjs",
             "server/http.mjs",
+            "server/i18n.mjs",
+            "server/locale.mjs",
+            "server/projects.mjs",
+            "server/quick-chat.mjs",
             "server/task-relations.mjs",
+            "server/text-projection.mjs",
             "server/titles.mjs",
             "locale/en.json",
             "locale/zh.json",
+            "locales/en.mjs",
             ...pluginDetails,
           ];
           const missing = required.filter((entry) => !files.includes(entry));

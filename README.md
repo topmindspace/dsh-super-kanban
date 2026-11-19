@@ -94,7 +94,7 @@
 
 - **使用** · [安装、升级与卸载](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/INSTALL.md) · [日常使用](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/WORKFLOWS.md) · [常见问题与排障](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/TROUBLESHOOTING.md)
 - **版本** · [更新日志](https://github.com/topmindspace/dsh-super-kanban/blob/main/CHANGELOG.md) · [产品路线图](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ROADMAP.md)
-- **开发** · [贡献指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) · [开发指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md) · [架构](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md) · [接口契约](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md)
+- **开发** · [贡献指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/CONTRIBUTING.md) · [开发指南](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/DEVELOPMENT.md) · [架构](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/ARCHITECTURE.md) · [接口契约](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/CONTRACT.md) · [本地化](https://github.com/topmindspace/dsh-super-kanban/blob/main/docs/LOCALIZATION.md)
 
 运行 `npm run check` 执行测试和校验。安全问题请按安全说明私下报告。
 
@@ -103,5 +103,6 @@
 - [@mufanmu](https://github.com/mufanmu) · [#3](https://github.com/topmindspace/dsh-super-kanban/pull/3)
 - [@tangyixiao](https://github.com/tangyixiao) · [#7](https://github.com/topmindspace/dsh-super-kanban/pull/7)
 - [@evgyur](https://github.com/evgyur) · [#8](https://github.com/topmindspace/dsh-super-kanban/pull/8)
+- [@Doraemon-AGI](https://github.com/Doraemon-AGI) · [#16](https://github.com/topmindspace/dsh-super-kanban/pull/16)
 
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace
