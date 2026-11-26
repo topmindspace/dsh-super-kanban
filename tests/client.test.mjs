@@ -51,7 +51,8 @@ function loadClient(services, { snapshot, view = "attention", filters, prefs, cl
   const script = inspect ? source.replace("return { apply, inject:",
     "return { apply, useBoardData, command, draftChanges, chatContext, floatingSummary, floatingReview, canAcceptTask, canAcceptReview, subscribeBoardRefresh, normalizePrefs, quickCapturePayload, " +
     "folderGlyph, folderColor, t, STATUS_META, FLOAT_TABS, displayLocale, analyzeErrorToast, " +
-    "markdownBlocks, renderInline, taskChatReference, ArtifactsView, TaskCollection, TaskLinks, MaintenanceView, SettingsModal, scanProgressInfo, inject:") : source;
+    "markdownBlocks, renderInline, taskChatReference, ArtifactsView, TaskCollection, TaskLinks, MaintenanceView, SettingsModal, scanProgressInfo, " +
+    "describePendingInteraction, collectLiveApprovals, settleInteraction, fetchToolCallDetail, PendingInteractionCard, ApprovalModal, ApprovalStrip, TaskCard, inject:") : source;
   vm.runInNewContext(script, context, { filename: "client.js" });
   plugin.apply({
     get: (name) => name === "locale" ? services.locale || { getSnapshot: () => ({ active: "zh" }) } : services[name],
@@ -1360,4 +1361,295 @@ test("analyzeErrorToast respects structured busy codes in both English and Chine
     "扫描进行中，请稍后再试",
   );
   assert.equal(zh.analyzeErrorToast(new Error("扫描正在进行")), "扫描进行中，暂时无法重新研判");
+});
+
+test("dark-theme native select rules stay opaque on open and hover (PR #21 + legacy fallback)", () => {
+  assert.match(source, /\.sk-select option,\.sk-select optgroup\{background-color:var\(--sk-surface\);color:var\(--sk-ink\)\}/);
+  assert.match(source, /\.sk-select:open\{background-color:var\(--sk-surface\)\}/);
+  assert.match(source, /\.sk-ws-picker \.sk-ws-select:open\{background-color:var\(--sk-surface\)\}/);
+  // Hover states blend against opaque --sk-surface instead of transparent/--sk-hover so older engines without :open stay dark too.
+  assert.match(source, /\.sk-select:hover\{background-color:color-mix\(in srgb,var\(--sk-ink\) 6%,var\(--sk-surface\)\)/);
+  assert.match(source, /\.sk-ws-picker:hover \.sk-ws-select\{background-color:color-mix\(in srgb,var\(--sk-ink\) 5%,var\(--sk-surface\)\)/);
+  assert.match(source, /\.sk-ws-picker \.sk-ws-select:hover\{background-color:color-mix\(in srgb,var\(--sk-ink\) 5%,var\(--sk-surface\)\)/);
+});
+
+test("describePendingInteraction and settleInteraction support tool approval, plan review, CUA approval, and legacy fallback", async () => {
+  const { plugin } = loadClient({
+    locale: {
+      getSnapshot: () => ({ active: "zh" }),
+      resolveText: (obj) => obj.zh || obj.en,
+    },
+  }, { inspect: true });
+
+  // 1. Tool approval (PendingApproval carrier)
+  const decisions = [];
+  let settled = false;
+  const toolCarrier = {
+    key: "approval:1",
+    kind: "approval",
+    toolName: "bash",
+    callId: "call-bash-1",
+    reason: "Run privileged command",
+    displayReason: { en: "Run privileged command", zh: "需要批准执行沙箱外命令" },
+    get answerable() { return !settled; },
+    async answer(outcome) {
+      decisions.push(outcome);
+      settled = true;
+    },
+  };
+  const approval = plugin.describePendingInteraction(toolCarrier, "sess-1", "部署会话");
+  assert.equal(approval.kind, "approval");
+  assert.equal(approval.canAct, true);
+  assert.equal(approval.toolName, "bash");
+  assert.equal(approval.callId, "call-bash-1");
+  assert.equal(approval.headline, "需要批准执行沙箱外命令");
+  const ok = await plugin.settleInteraction(approval, "allow");
+  assert.equal(ok.ok, true);
+  assert.deepEqual(decisions, ["allowed-once"]);
+  // Already settled requests fail closed with a friendly stale message.
+  const stale = await plugin.settleInteraction(approval, "reject");
+  assert.equal(stale.ok, false);
+  assert.equal(stale.stale, true);
+
+  // 2. Plan review (PendingQuestion with review + RPC channel auto-dismiss)
+  const planAnswers = [];
+  let dismissed = false;
+  const planCarrier = {
+    key: "question:plan-1",
+    kind: "plan-review",
+    review: {
+      id: "plan-q",
+      question: "Approve plan?",
+      plan: "# 重构计划\n\n先补接口测试，再改前端组件。",
+      approve: { label: "Approve and start" },
+    },
+    snapshot: () => ({ channel: "rpc", closed: false }),
+    async answer(payload) { planAnswers.push(payload); },
+    async dismiss() { dismissed = true; },
+  };
+  const plan = plugin.describePendingInteraction(planCarrier, "sess-2", "方案会话");
+  assert.equal(plan.kind, "plan-review");
+  assert.equal(plan.canAct, true);
+  assert.equal(plan.headline, "重构计划");
+  assert.match(plan.description, /先补接口测试/);
+  const planRes = await plugin.settleInteraction(plan, "allow");
+  assert.equal(planRes.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(planAnswers)), [{ answers: [{ id: "plan-q", selected: ["Approve and start"] }] }]);
+  assert.equal(dismissed, true);
+
+  // 3. CUA application approval with explicit always option and warning
+  const cuaAnswers = [];
+  const cuaCarrier = {
+    key: "question:cua-1",
+    kind: "question",
+    questions: [{
+      id: "cua-app-access",
+      question: "Allow Safari?",
+      detail: "Control Safari windows",
+      intent: {
+        kind: "approval",
+        approve: "allow-session",
+        reject: "deny",
+        always: "allow-always",
+        subject: { name: "Safari" },
+        display: { question: { zh: "允许控制 Safari", en: "Allow Safari" } },
+      },
+    }],
+    snapshot: () => ({ channel: "waterfall", closed: false }),
+    async answer(payload) { cuaAnswers.push(payload); },
+  };
+  const cua = plugin.describePendingInteraction(cuaCarrier, "sess-3", "桌面操作");
+  assert.equal(cua.kind, "cua-approval");
+  assert.equal(cua.canAct, true);
+  assert.equal(cua.subject.name, "Safari");
+  assert.ok(cua.warning.length > 0);
+  assert.equal(cua.alwaysLabel, "始终允许");
+  assert.equal((await plugin.settleInteraction(cua, "always")).ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(cuaAnswers)), [{ answers: [{ id: "cua-app-access", selected: ["allow-always"] }] }]);
+
+  // 4. Plain question and legacy string/marker fall back to read-only open-session behavior
+  const plainQ = plugin.describePendingInteraction({
+    kind: "question",
+    questions: [{ id: "q1", question: "选择哪个数据库？" }, { id: "q2", question: "需要迁移吗？" }],
+  }, "sess-4", "需求沟通");
+  assert.equal(plainQ.canAct, false);
+  assert.equal(plainQ.headline, "选择哪个数据库？");
+  assert.match(plainQ.description, /共 2 个问题/);
+
+  const legacy = plugin.describePendingInteraction({ kind: "approval" }, "sess-5", "旧版宿主");
+  assert.equal(legacy.canAct, false);
+  assert.equal(legacy.label, "待审批");
+});
+
+test("settleInteraction guards against concurrent duplicate clicks and unlocks after failure", async () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  let release;
+  let calls = 0;
+  const pending = {
+    key: "approval:concurrent",
+    kind: "approval",
+    toolName: "bash",
+    answerable: true,
+    answer() {
+      calls += 1;
+      return new Promise((_resolve, reject) => {
+        release = () => reject(new Error("transport reset"));
+      });
+    },
+  };
+  const item = plugin.describePendingInteraction(pending, "s-lock", "并发测试");
+  const first = plugin.settleInteraction(item, "allow");
+  const duplicate = await plugin.settleInteraction(item, "allow");
+  assert.equal(duplicate.ok, false);
+  assert.equal(duplicate.busy, true);
+  assert.equal(calls, 1);
+  release();
+  const failed = await first;
+  assert.equal(failed.ok, false);
+  assert.match(failed.message, /transport reset/);
+
+  // After failure, a retry is permitted when the carrier is still answerable.
+  pending.answer = async () => {};
+  const retry = await plugin.settleInteraction(item, "reject");
+  assert.equal(retry.ok, true);
+});
+
+test("collectLiveApprovals surfaces both linked tasks and unlinked active sessions ordered by urgency", () => {
+  const { plugin } = loadClient({}, { inspect: true });
+  const statuses = new Map([
+    ["sess-plan", { pendingInteraction: { key: "q:1", kind: "plan-review", review: { id: "r1", plan: "# Plan", approve: { label: "OK" } }, answer: async () => {} } }],
+    ["sess-unlinked", { pendingInteraction: { key: "a:1", kind: "approval", toolName: "bash", answerable: true, answer: async () => {} } }],
+    ["sess-question", { pendingInteraction: { key: "q:2", kind: "question", questions: [{ id: "q", question: "哪个分支？" }] } }],
+  ]);
+  const tasks = [{ id: "t1", title: "方案任务", workspaceTitle: "工作区", primarySessionId: "sess-plan", sessions: [{ id: "sess-plan", title: "方案会话" }] }];
+  const host = { sessionTitle: (id) => (id === "sess-unlinked" ? "未建卡新会话" : "") };
+  const result = plugin.collectLiveApprovals(tasks, statuses, host);
+  assert.equal(result.all.length, 3);
+  assert.equal(result.actionable.length, 2);
+  assert.equal(result.actionable[0].id, "sess-unlinked");
+  assert.equal(result.actionable[0].title, "未建卡新会话");
+  assert.equal(result.actionable[0].taskId, null);
+  assert.equal(result.actionable[1].id, "sess-plan");
+  assert.equal(result.actionable[1].taskId, "t1");
+});
+
+test("board banner, task card action bar, attention card, and floating strip wire in-board approval cleanly", async () => {
+  const decisions = [];
+  const opened = [];
+  const approvalCarrier = {
+    key: "approval:live-1",
+    kind: "approval",
+    toolName: "bash",
+    callId: "call-live-1",
+    reason: "Run deploy script",
+    answerable: true,
+    async answer(outcome) { decisions.push(outcome); },
+  };
+  const task = {
+    id: "t-live",
+    title: "发布上线",
+    status: "in_progress",
+    primarySessionId: "sess-live",
+    sessions: [{ id: "sess-live", title: "部署会话" }],
+    lastActivityAt: Date.now(),
+  };
+  const statuses = new Map([["sess-live", { running: true, pendingInteraction: approvalCarrier }]]);
+
+  // 1. Main board renders the live approval banner and card-level Approve trigger.
+  const openedApprovals = [];
+  const { registrations, plugin } = loadClient({
+    uiWorkspace: { openSession: (id) => opened.push(id) },
+    sidebarRight: { screen: () => ({ sessionId: "other-session" }) },
+  }, { snapshot: { tasks: [task] }, view: "board", inspect: true });
+  const root = registrations.get("main").render({ useSessionStatus: (select) => select(statuses) }).children[0];
+  const board = root.type(root.props);
+  const view = board.type(board.props);
+  const banner = [...elements(view)].find((node) => node.props?.className === "sk-approval-banner");
+  assert.ok(banner, "board renders the live approval banner");
+  assert.match(renderedText(banner), /1 项待审批.*发布上线.*bash/);
+
+  // 2. TaskCard shows compact Approve button that stops propagation to avoid opening the drawer.
+  const enrichedTask = { ...task, pendingSessions: [plugin.describePendingInteraction(approvalCarrier, "sess-live", "部署会话")] };
+  let drawerOpened = false;
+  const card = plugin.TaskCard({
+    task: enrichedTask,
+    signal: { label: "待审批", text: "部署会话" },
+    onOpen: () => { drawerOpened = true; },
+    onApprove: (key) => openedApprovals.push(key),
+    taskActions: { handlers: () => ({}), button: () => null },
+    onDragStart: () => {},
+    onDragEnd: () => {},
+  });
+  const cardApproveBtn = [...elements(card)].find((node) => node.type === "button" && node.props["aria-label"] === "审批：发布上线");
+  assert.ok(cardApproveBtn);
+  let stopped = false;
+  cardApproveBtn.props.onClick({ stopPropagation() { stopped = true; } });
+  assert.equal(stopped, true);
+  assert.equal(drawerOpened, false);
+  assert.deepEqual(openedApprovals, ["approval:live-1"]);
+
+  // 3. Inline PendingInteractionCard settles via Allow once and keeps Open session available.
+  const toasts = [];
+  const inlineCard = plugin.PendingInteractionCard({
+    item: enrichedTask.pendingSessions[0],
+    openSession: (id) => opened.push(id),
+    pushToast: (text, tone) => toasts.push([text, tone]),
+  });
+  const openBtn = [...elements(inlineCard)].find((node) => node.type === "button" && node.props["aria-label"] === "打开会话：部署会话（待审批）");
+  const allowBtn = [...elements(inlineCard)].find((node) => node.type === "button" && renderedText(node) === "允许一次");
+  const rejectBtn = [...elements(inlineCard)].find((node) => node.type === "button" && renderedText(node) === "拒绝");
+  assert.ok(openBtn && allowBtn && rejectBtn);
+  openBtn.props.onClick();
+  assert.deepEqual(opened, ["sess-live"]);
+  await allowBtn.props.onClick();
+  assert.deepEqual(decisions, ["allowed-once"]);
+  assert.equal(toasts[0][1], "info");
+
+  // 4. Floating ApprovalStrip renders background approvals and fires onApprove.
+  const stripPicked = [];
+  const strip = plugin.ApprovalStrip({ items: enrichedTask.pendingSessions, onApprove: (key) => stripPicked.push(key) });
+  const stripBtn = [...elements(strip)].find((node) => node.type === "button" && renderedText(node) === "审批");
+  assert.ok(stripBtn);
+  stripBtn.props.onClick({ stopPropagation() {} });
+  assert.deepEqual(stripPicked, ["approval:live-1"]);
+
+  // 5. ApprovalModal supports multi-item paging and safe close without rejecting.
+  const secondCarrier = { key: "approval:live-2", kind: "approval", toolName: "terminal_send", reason: "Send command", answerable: true, async answer() {} };
+  const secondItem = plugin.describePendingInteraction(secondCarrier, "sess-2", "第二个会话");
+  const modalChanges = [];
+  const { plugin: modalPlugin } = loadClient({}, { inspect: true, onState: (value) => modalChanges.push(value) });
+  let closed = false;
+  const modal = modalPlugin.ApprovalModal({
+    items: [enrichedTask.pendingSessions[0], secondItem],
+    initialKey: "approval:live-1",
+    openSession: () => {},
+    pushToast: () => {},
+    onClose: () => { closed = true; },
+  });
+  assert.match(renderedText(modal), /1 \/ 2/);
+  const nextBtn = [...elements(modal)].find((node) => node.type === "button" && renderedText(node) === "下一项");
+  const closeBtn = [...elements(modal)].find((node) => node.type === "button" && renderedText(node) === "关闭");
+  assert.ok(nextBtn && closeBtn);
+  nextBtn.props.onClick();
+  assert.equal(modalChanges.pop(), "approval:live-2");
+  closeBtn.props.onClick();
+  assert.equal(closed, true);
+
+  // 6. fetchToolCallDetail fetches from the owner-authenticated endpoint and caches hits.
+  let fetchCount = 0;
+  const { plugin: fetchPlugin } = loadClient({}, {
+    inspect: true,
+    fetch: async (url) => {
+      fetchCount += 1;
+      assert.equal(url.pathname, "/super-kanban/api/session/sess-1/tool-call");
+      assert.equal(url.searchParams.get("callId"), "call-99");
+      return { ok: true, json: async () => ({ ok: true, found: true, toolCall: { callId: "call-99", name: "bash", command: "ls -la" } }) };
+    },
+  });
+  const firstFetch = await fetchPlugin.fetchToolCallDetail("sess-1", "call-99");
+  const secondFetch = await fetchPlugin.fetchToolCallDetail("sess-1", "call-99");
+  assert.equal(firstFetch.found, true);
+  assert.equal(firstFetch.toolCall.command, "ls -la");
+  assert.equal(secondFetch.toolCall.command, "ls -la");
+  assert.equal(fetchCount, 1, "cached tool-call hits do not re-fetch");
 });

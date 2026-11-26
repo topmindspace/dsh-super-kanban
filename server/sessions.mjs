@@ -242,14 +242,86 @@ function basenameOf(p) {
 export const LOCAL_SUBTASK_LIMIT = 12;
 export const LOCAL_ARTIFACT_LIMIT = 6;
 const DIGEST_MAX_BYTES = 1500;
+const TOOL_CALL_COMMAND_LIMIT = 4000;
+const TOOL_CALL_SUMMARY_LIMIT = 2000;
+const TOOL_CALL_TEXT_LIMIT = 600;
 
 function parseToolArgs(call) {
+  if (call?.args && typeof call.args === "object" && !Array.isArray(call.args)) return call.args;
   try {
-    const args = JSON.parse(call.args || "{}");
-    return args && typeof args === "object" ? args : {};
+    const args = JSON.parse(call?.args || "{}");
+    return args && typeof args === "object" && !Array.isArray(args) ? args : {};
   } catch {
     return {};
   }
+}
+
+function sanitizeArgsPreview(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const entries = Object.entries(args).slice(0, 12);
+  if (!entries.length) return null;
+  const compact = {};
+  for (const [key, value] of entries) {
+    if (typeof value === "string") compact[key] = clip(value, 240);
+    else if (value === null || typeof value === "number" || typeof value === "boolean") compact[key] = value;
+    else {
+      try {
+        compact[key] = clip(JSON.stringify(value), 240);
+      } catch {
+        compact[key] = String(value);
+      }
+    }
+  }
+  try {
+    return clip(JSON.stringify(compact, null, 2), TOOL_CALL_SUMMARY_LIMIT);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract safe, bounded display details for one tool call (used by in-board
+ * approval cards so the user always sees the exact command/target before deciding).
+ */
+export function extractToolCallDetail(call) {
+  if (!call || typeof call !== "object") return null;
+  const name = typeof call.name === "string" ? call.name.trim() : "";
+  if (!name) return null;
+  const rawArgs = typeof call.args === "string" ? call.args.trim() : "";
+  const args = parseToolArgs(call);
+  const nonEmpty = (value, max) => (typeof value === "string" && value.trim() ? clip(value.trim(), max) : null);
+  const preserveText = (value, max) => (typeof value === "string" && value.trim() ? clip(value, max) : null);
+  const command =
+    name === "terminal_send"
+      ? preserveText(args.text, TOOL_CALL_COMMAND_LIMIT)
+      : preserveText(args.command, TOOL_CALL_COMMAND_LIMIT) ||
+        preserveText(args.script, TOOL_CALL_COMMAND_LIMIT) ||
+        preserveText(args.code, TOOL_CALL_COMMAND_LIMIT);
+  const targetPath = nonEmpty(args.path || args.file_path || args.filePath || args.file, 400);
+  const cwd = nonEmpty(call.cwd, 400) || nonEmpty(args.cwd, 400);
+  const description = nonEmpty(args.description, TOOL_CALL_TEXT_LIMIT);
+  const justification = nonEmpty(args.justification, TOOL_CALL_TEXT_LIMIT);
+  const sandboxPermissions = nonEmpty(args.sandbox_permissions, 80);
+  let argsPreview = null;
+  if (!command) {
+    argsPreview = sanitizeArgsPreview(args);
+    if (!argsPreview && rawArgs && rawArgs !== "{}" && rawArgs !== '""') {
+      argsPreview = clip(rawArgs, TOOL_CALL_SUMMARY_LIMIT);
+    }
+  }
+  return {
+    callId: typeof call.callId === "string" && call.callId ? call.callId : null,
+    name,
+    command,
+    path: targetPath,
+    cwd,
+    description,
+    justification,
+    sandboxPermissions,
+    argsPreview,
+    seq: Number.isInteger(call.seq) && call.seq > 0 ? call.seq : null,
+    time: Number.isFinite(Number(call.time)) && Number(call.time) > 0 ? Number(call.time) : 0,
+  };
 }
 
 /** Workspace-relative paths use "/" on every platform so cards, digests and matching read the same on Windows. */
@@ -1458,6 +1530,18 @@ export function createSessionSource({ dshHome } = {}) {
     return events.slice(-capped);
   }
 
+  /** Locate one correlated tool call by callId in a parsed session log. */
+  function findToolCall(parsed, callId) {
+    if (!parsed || typeof callId !== "string" || !callId) return null;
+    for (let index = (parsed.toolCalls || []).length - 1; index >= 0; index -= 1) {
+      const call = parsed.toolCalls[index];
+      if (call?.callId === callId) {
+        return extractToolCallDetail({ ...call, cwd: call.cwd || parsed.session?.cwd || null });
+      }
+    }
+    return null;
+  }
+
   return {
     discover,
     readWorkspaceRegistry,
@@ -1467,6 +1551,7 @@ export function createSessionSource({ dshHome } = {}) {
     buildDigest,
     collectEvidence,
     readApiEvents,
+    findToolCall,
     extractArtifacts,
     extractSubtasks,
     latestTodos,

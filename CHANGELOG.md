@@ -7,10 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 新增
+
+- **看板内知情审批**：支持在全局看板、右侧看板、任务详情抽屉、悬浮看板与悬浮入口直接处理 DSH 会话的待审批请求，不再必须「点卡片 → 打开会话 → 在会话中审批」：
+  - **工具权限审批**：通过 DSH 原生 `useSessionStatus` 交互载体直接「允许一次」或「拒绝」，并新增 Host 侧只读接口 `GET /super-kanban/api/session/:id/tool-call`（内存实时 `tool/call` LRU 缓存优先、日志回退）展示待执行的完整命令、工作目录与越权理由，杜绝盲批；
+  - **方案审阅与应用授权**：支持在看板内展开完整 Markdown 方案正文后一键「批准方案」，并支持 CUA 应用/系统授权（允许、拒绝、显式「始终允许」及风险提示）；普通提问展示问题摘要并保留一键「打开会话」；
+  - **全形态触达与连续审核**：全局/右侧看板顶部实时提醒条（覆盖尚未扫描建卡的新活跃会话）、任务卡底部「审批」按钮与右键菜单「处理待审批请求」、悬浮入口上方后台待审批提醒卡，支持轻量审批队列弹窗按 `1 / N` 连续审核（`Esc` 仅关闭弹窗不误拒），并在旧版 DSH 上自动平滑降级为「打开会话」。
+- **In-board informed approvals**: handle DSH pending approvals, plan reviews, and application authorization prompts directly across the full-page board, sidebar, task drawer, floating board, and floating launcher without switching away to the session. A new read-only host endpoint `GET /super-kanban/api/session/:id/tool-call` (backed by a bounded live `tool/call` cache with session-log fallback) surfaces the exact command, working directory, and justification before deciding, while preserving one-click session navigation and graceful fallback on older DSH versions.
+
 ### 修复与改进
 
-- 修复深色主题下看板内原生下拉展开后选项列表被画成白底、选项文字难以辨认的问题：选项浮层由 UA 以白色底座绘制，再叠加 select 自身的 `background-color`，此前 `transparent` 与半透明的悬停底色会把整个列表冲成白色。现在下拉展开时改用不透明的 `--sk-surface` 底色，筛选栏的工作区下拉与「任务时间范围」等普通下拉一并覆盖（0.10.8 的 `option` 规则只覆盖选项本身，滚动条与分组区域仍是白色）。
-- Fixed white option lists when a native `<select>` opens in dark themes: the UA paints the list on a white surface and composites the select's own translucent background over it, so the list now uses an opaque `--sk-surface` while `:open`.
+- 修复深色主题下看板内原生下拉展开后选项列表被画成白底、选项文字难以辨认的问题：选项浮层由 UA 以白色底座绘制，再叠加 select 自身的 `background-color`，此前 `transparent` 与半透明的悬停底色会把整个列表冲成白色。现在下拉展开时改用不透明的 `--sk-surface` 底色，并将 `.sk-select` 与筛选栏下拉的悬停背景改为基于 `--sk-surface` 混合的不透明等价色，兼顾不支持 `:open` 伪类的旧版浏览器内核，并补齐自动化 CSS 回归测试。
+- Fixed white option lists when a native `<select>` opens in dark themes: the UA paints the list on a white surface and composites the select's own translucent background over it, so the list now uses an opaque `--sk-surface` while `:open` and opaque hover surface blends for older engines without `:open`, with CSS regression coverage added.
+
+感谢 [@cinvymoe](https://github.com/cinvymoe) 深入定位并修复深色主题原生下拉白底问题（[#20](https://github.com/topmindspace/dsh-super-kanban/issues/20)、[#21](https://github.com/topmindspace/dsh-super-kanban/pull/21)），以及 [@FantDing](https://github.com/FantDing) 提出看板审批功能建议（[#22](https://github.com/topmindspace/dsh-super-kanban/issues/22)）。
 
 ## [0.10.8] - 2026-11-24
 

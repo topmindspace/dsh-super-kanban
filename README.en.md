@@ -36,12 +36,12 @@ Enable the plugin and reload DSH. [Verify your version, upgrade, roll back, or u
 - **Workspace** · A DSH working directory. It appears on the board automatically.
 - **Project** · A group you create. It can collect tasks from several workspaces and carries notes, a due date, and an archive state.
 - **Task** · One piece of work you can accept. It belongs to one workspace, can join one project, and can link several sessions, one of which is primary.
-- **Session** · The DSH conversation where the work runs. The board extracts progress, blockers, and deliverables from sessions. Approvals and sending stay in the session.
+- **Session** · The DSH conversation where the work runs. The board extracts progress, blockers, and deliverables from sessions. Tool approvals and plan reviews can be reviewed and decided right from the board with full command or plan details (or opened in the session at any time), while sending messages stays in the session.
 
 ### Follow multiple sessions
 
 - **AI task organization** · Incremental scans extract goals, progress, blockers, and deliverables to create or update task cards. Link multiple sessions to one task. When auto-scan is enabled, a completed turn can bring the next scan forward.
-- **Live status and inbox** · Filter running tasks. See pending approvals, questions, plan reviews, blockers, and work awaiting acceptance in one place, then jump straight to the session.
+- **Live status, in-board approvals, and inbox** · Filter running tasks and track pending approvals, questions, plan reviews, blockers, and work awaiting acceptance in one place. Inspect the exact command, working directory, or plan Markdown and allow once, reject, or approve plans directly across the full board, sidebar, task drawer, floating board, and floating launcher (including active sessions without cards yet), while keeping a one-click link back to the session.
 - **Full board, sidebar, and floating board** · The same board can fill the main area, dock beside the conversation, or float above it. Only one form shows at a time. The floating entry is on by default in conversations. Drag it where you like, or hide it from its context menu or in settings. Expand it to handle tasks awaiting acceptance, inbox items, running tasks, and recent tasks, jot down a quick to-do, or open quick chat.
 - **Review strip** · When a turn ends, its card is pinned above the floating entry right away, even while a scan is busy. Click the card to return to that conversation; the green check that appears on hover is what marks it done. The card shows the session title with the workspace folder and relative time; opening its conversation tucks it away until you switch elsewhere (a lone green check stays above the launcher so you can still approve it), and only that conversation being running or waiting keeps it hidden — activity on a supporting session of the same task does not hide it or disable its check. A folder-initial chip in the workspace colour marks the source, and an overflowing title scrolls on hover. Three cards show at a time; the rest collapse into “N more”.
 - **Long columns and quick actions** · Each column scrolls independently and shows up to 30 cards per page. The Done column can collapse and still accepts drops. Right-click a card or use its menu to move, pin, or archive it.
@@ -104,5 +104,6 @@ Run `npm run check` for tests and validation. Please report security issues priv
 - [@tangyixiao](https://github.com/tangyixiao) · [#7](https://github.com/topmindspace/dsh-super-kanban/pull/7)
 - [@evgyur](https://github.com/evgyur) · [#8](https://github.com/topmindspace/dsh-super-kanban/pull/8)
 - [@Doraemon-AGI](https://github.com/Doraemon-AGI) · [#16](https://github.com/topmindspace/dsh-super-kanban/pull/16)
+- [@cinvymoe](https://github.com/cinvymoe) · [#21](https://github.com/topmindspace/dsh-super-kanban/pull/21)
 
 [MIT License](https://github.com/topmindspace/dsh-super-kanban/blob/main/LICENSE) © topmindspace

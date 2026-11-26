@@ -29,7 +29,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { homedir } from "node:os";
 
-import { createSessionSource, RECENT_WRITE_MS } from "./sessions.mjs";
+import { createSessionSource, extractToolCallDetail, RECENT_WRITE_MS } from "./sessions.mjs";
 import { analyzeSessionRules, isCasualConversation, normalizeAnalysis, STALE_SESSION_DAYS } from "./analyzer-rules.mjs";
 import { createLlmAnalyzer } from "./analyzer-llm.mjs";
 import { llmOf } from "./native-llm.mjs";
@@ -106,6 +106,8 @@ const TURN_SCAN_MIN_INTERVAL_MS = 15_000;
 // fresh install surfaces today's work without pinning every historical turn.
 const REVIEW_FRESH_MS = 10 * 60_000;
 const SCAN_SLICE_MS = 25;
+/** Bounded in-memory LRU for live tool/call events powering in-board approval details. */
+const RECENT_TOOL_CALLS_LIMIT = 200;
 
 function indexSessionChildren(pairs) {
   const children = new Map();
@@ -159,6 +161,30 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const meta = entry?.meta;
     return meta?.parentSession && !meta.parseError ? [[id, meta.parentSession]] : [];
   }));
+  /** `${sessionId}\0${callId}` -> live tool/call payload for instant approval previews. */
+  const recentToolCalls = new Map();
+  /** sessionId -> latest live working directory observed on session/event. */
+  const liveSessionCwd = new Map();
+
+  function rememberBounded(map, key, value, limit) {
+    map.delete(key);
+    map.set(key, value);
+    while (map.size > limit) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
+  }
+
+  function rememberLiveCwd(sessionId, cwd) {
+    if (!sessionId || typeof cwd !== "string" || !path.isAbsolute(cwd)) return;
+    rememberBounded(liveSessionCwd, sessionId, cwd, RECENT_TOOL_CALLS_LIMIT);
+  }
+
+  function rememberLiveToolCall(sessionId, call) {
+    if (!sessionId || !call?.callId || !call?.name) return;
+    rememberBounded(recentToolCalls, `${sessionId}\0${call.callId}`, call, RECENT_TOOL_CALLS_LIMIT);
+  }
 
   let scanPromise = null;
   let scanMessages = null;
@@ -3979,6 +4005,31 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     };
   }
 
+  function buildToolCallResponse(sessionId, callId) {
+    const liveKey = `${sessionId}\0${callId}`;
+    const live = recentToolCalls.get(liveKey);
+    if (live) {
+      rememberBounded(recentToolCalls, liveKey, live, RECENT_TOOL_CALLS_LIMIT);
+      const detail = extractToolCallDetail({
+        ...live,
+        cwd: live.cwd || liveSessionCwd.get(sessionId) || metaForSessionId(sessionId)?.cwd || null,
+      });
+      if (detail) return { ok: true, found: true, toolCall: detail };
+    }
+    const meta = findSessionMeta(sessionId);
+    if (!meta || typeof meta.file !== "string" || !meta.file) {
+      return { ok: true, found: false, toolCall: null };
+    }
+    try {
+      const parsed = source.loadParsed(meta);
+      const detail = source.findToolCall(parsed, callId);
+      if (detail) return { ok: true, found: true, toolCall: detail };
+    } catch (error) {
+      logWarn(`[super-kanban] tool-call lookup failed: ${String(error?.message || error)}`);
+    }
+    return { ok: true, found: false, toolCall: null };
+  }
+
   function buildExport() {
     const sessions = Object.entries(cache.sessions).map(([id, entry]) => ({
       id,
@@ -4128,6 +4179,17 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         handleSse(req, res);
         return;
       }
+      if (route.startsWith("/session/") && route.endsWith("/tool-call") && method === "GET") {
+        const encodedSessionId = route.slice("/session/".length, -"/tool-call".length);
+        const sessionId = decodeId(encodedSessionId);
+        const callId = String(url?.searchParams?.get("callId") || "").trim();
+        if (!sessionId || !callId || callId.length > 200 || /[\u0000-\u001f\u007f]/.test(callId)) {
+          json(res, 400, { ok: false, error: "invalid-input", message: "invalid session id or callId" });
+          return;
+        }
+        json(res, 200, buildToolCallResponse(sessionId, callId));
+        return;
+      }
       if (route.startsWith("/session/") && method === "GET") {
         // decodeId rejects malformed escapes and path separators: a session id is
         // an opaque lookup key, never a filesystem path.
@@ -4204,8 +4266,34 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     subscribeAiCatalogEvents();
     try {
       offSessionEvents = ctx?.on?.("session/event", (session, event) => {
-        if (stopped || event?.type !== "turn/end") return;
+        if (stopped || !event) return;
         const id = session?.id || session?.header?.id;
+        if (event.type === "working-directory/change") {
+          rememberLiveCwd(id, event.data?.cwd);
+          return;
+        }
+        if (event.type === "tool/call") {
+          const data = event.data && typeof event.data === "object" ? event.data : {};
+          const callId = typeof data.callId === "string" ? data.callId.trim() : "";
+          const name = typeof data.name === "string" ? data.name.trim() : "";
+          if (id && callId && name) {
+            const rawArgs = typeof data.arguments === "string"
+              ? data.arguments
+              : data.arguments === undefined
+                ? ""
+                : JSON.stringify(data.arguments);
+            rememberLiveToolCall(id, {
+              callId,
+              name,
+              args: rawArgs,
+              cwd: liveSessionCwd.get(id) || session?.header?.cwd || metaForSessionId(id)?.cwd || null,
+              seq: Number(event.seq) > 0 ? Number(event.seq) : null,
+              time: Number(event.time) > 0 ? Number(event.time) : Date.now(),
+            });
+          }
+          return;
+        }
+        if (event.type !== "turn/end") return;
         if (id && (state.ignoredSessions.includes(id) || state.suppressedSessions.includes(id))) return;
         const meta = id ? metaForSessionId(id) : null;
         const workspaceId = meta?.workspaceId;
@@ -4283,6 +4371,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       }
     }
     for (const client of [...sseClients]) removeSseClient(client);
+    recentToolCalls.clear();
+    liveSessionCwd.clear();
     // Flush any state the running scan already produced; the scan itself stops at
     // its next checkpoint and its finalizer is exception-isolated.
     persistState();

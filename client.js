@@ -1119,7 +1119,50 @@ window.__ModuleLoader__.load({
   "已重置自动任务并开始按最近 {0} 天重扫": "Reset automatic tasks and started rescanning the last {0} days",
   "确认重置并重扫": "Confirm reset & rescan",
   "仅当前 DSH 实例的持有者可访问任务看板": "Only the owner of this DSH instance can access Super Kanban",
-  "登录态已失效或未通过本机认证，请刷新页面或重启 DSH 后重试": "Session expired or not authenticated; reload the page or restart DSH and try again"
+  "登录态已失效或未通过本机认证，请刷新页面或重启 DSH 后重试": "Session expired or not authenticated; reload the page or restart DSH and try again",
+  "工具 {0} 请求越权执行": "Tool {0} requests privileged execution",
+  "等待权限审批": "Waiting for permission approval",
+  "允许一次": "Allow once",
+  "拒绝": "Reject",
+  "批准方案": "Approve plan",
+  "允许": "Allow",
+  "始终允许": "Always allow",
+  "授权后应用可被自动操作，请确认目标应用无误。": "Once granted, this application can be controlled automatically. Verify the target app before approving.",
+  "共 {0} 个问题，请打开会话回答": "{0} questions in total. Open the session to answer.",
+  "当前环境暂不支持在看板内审批，请打开会话处理": "In-board approval is unavailable in this environment. Open the session instead.",
+  "正在提交审批决定…": "Submitting approval decision…",
+  "该请求已失效或已在会话中处理": "This request has expired or was already handled in the session",
+  "该请求不支持此操作": "This request does not support that action",
+  "已拒绝该操作": "Action rejected",
+  "已设为始终允许，会话继续执行": "Set to always allow; session resumed",
+  "已批准方案，会话继续执行": "Plan approved; session resumed",
+  "已允许一次，会话继续执行": "Allowed once; session resumed",
+  "提交失败：{0}": "Submission failed: {0}",
+  "执行命令": "Command",
+  "去会话讨论": "Discuss in session",
+  "工作目录：{0}": "Working directory: {0}",
+  "目标文件：{0}": "Target file: {0}",
+  "正在读取命令详情…": "Loading command details…",
+  "待执行命令": "Command to execute",
+  "调用参数": "Tool arguments",
+  "未读取到命令详情，建议打开会话核对后再决定。": "Could not load command details. Open the session to review before deciding.",
+  "收起方案正文": "Hide full plan",
+  "展开完整方案": "Show full plan",
+  "处理中…": "Processing…",
+  "看板审批": "Board approval",
+  "上一项": "Previous",
+  "下一项": "Next",
+  "按 Esc 仅关闭窗口，不会拒绝待审批请求": "Pressing Esc only closes this dialog and will not reject pending requests",
+  "待审批权限请求": "Pending approval requests",
+  "处理待审批：{0}": "Review approval: {0}",
+  "审批": "Approve",
+  "还有 {0} 项待审批": "{0} more awaiting approval",
+  "{0} 项待审批": "{0} awaiting approval",
+  "审批：{0}": "Approve: {0}",
+  "待审批权限 {0}": "Pending approvals {0}",
+  "活跃会话待审批（{0}）": "Active sessions awaiting approval ({0})",
+  "处理待审批请求": "Review pending approval",
+  "立即审批": "Review now"
 });
     const createTranslator = function createTranslator(catalog, language = "en") {
   return function translate(source, values = []) {
@@ -1261,6 +1304,357 @@ window.__ModuleLoader__.load({
       return groups;
     }
 
+    const INTERACTION_PRIORITY = { approval: 0, "cua-approval": 1, "plan-review": 2, question: 3 };
+    const TOOL_CALL_CACHE_LIMIT = 64;
+    const toolCallCache = new Map();
+    const inflightInteractions = new Set();
+
+    function resolveLocalizedCopy(value) {
+      if (typeof value === "string") return value.trim();
+      if (!value || typeof value !== "object") return "";
+      try {
+        const resolved = localeService?.resolveText?.(value);
+        if (typeof resolved === "string" && resolved.trim()) return resolved.trim();
+      } catch {
+        /* fallback to active language lookup */
+      }
+      const lang = String(activeLanguage() || "").toLowerCase();
+      const base = lang.split("-")[0];
+      const candidates = [lang, base, /^zh(?:-|$)/.test(lang) ? "zh" : "en", "en", "zh"];
+      for (const key of candidates) {
+        if (key && typeof value[key] === "string" && value[key].trim()) return value[key].trim();
+      }
+      for (const entry of Object.values(value)) {
+        if (typeof entry === "string" && entry.trim()) return entry.trim();
+      }
+      return "";
+    }
+
+    function planSummaryOf(markdown) {
+      const clean = (line) => String(line || "")
+        .replace(/^\s{0,3}#{1,6}\s+/, "")
+        .replace(/^\s*[-*+]\s+/, "")
+        .replace(/^\s*\d+[.)]\s+/, "")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/__([^_]+)__/g, "$1")
+        .trim();
+      const lines = String(markdown || "").split(/\r?\n/).map((line) => line.trim());
+      let title = "";
+      const rest = [];
+      for (const line of lines) {
+        if (!line || line.startsWith("```")) continue;
+        const text = clean(line);
+        if (!text) continue;
+        if (!title) title = text;
+        else {
+          rest.push(text);
+          if (rest.join(" ").length >= 160) break;
+        }
+      }
+      return { title: clip(title, 120), description: clip(rest.join(" "), 180) };
+    }
+
+    function questionCanAnswer(pending) {
+      if (!pending || typeof pending.answer !== "function") return false;
+      if (typeof pending.snapshot === "function") {
+        try {
+          const snap = pending.snapshot();
+          return Boolean(snap && snap.channel !== "none" && !snap.closed);
+        } catch {
+          return false;
+        }
+      }
+      return pending.answerable !== false;
+    }
+
+    async function submitQuestionAnswer(pending, payload) {
+      let isRpc = false;
+      if (typeof pending.snapshot === "function") {
+        try {
+          isRpc = pending.snapshot()?.channel === "rpc";
+        } catch {
+          isRpc = false;
+        }
+      }
+      await pending.answer(payload);
+      if (isRpc && typeof pending.dismiss === "function") {
+        try {
+          await pending.dismiss();
+        } catch {
+          /* already closed or dismissed */
+        }
+      }
+    }
+
+    /**
+     * Normalize any DSH `pendingInteraction` carrier (PendingApproval, PendingQuestion
+     * plan-review / CUA app approval / plain question, or legacy string marker)
+     * into one UI-ready descriptor with safe answer guards.
+     */
+    function describePendingInteraction(pending, sessionId, title, extra = {}) {
+      const id = String(sessionId || "");
+      const sessionTitle = title || t("来源会话");
+      const rawKind = typeof pending === "string" ? pending : String(pending?.kind || "");
+      const base = {
+        id,
+        key: typeof pending?.key === "string" && pending.key ? pending.key : `${rawKind || "pending"}:${id}`,
+        kind: rawKind || "unknown",
+        label: Object.hasOwn(INTERACTION_LABELS, rawKind) ? INTERACTION_LABELS[rawKind] : t("待处理请求"),
+        title: sessionTitle,
+        taskId: extra.taskId || null,
+        taskTitle: extra.taskTitle || "",
+        scope: extra.scope || "",
+        toolName: "",
+        callId: "",
+        headline: "",
+        description: "",
+        planMarkdown: "",
+        subject: null,
+        warning: "",
+        allowLabel: "",
+        rejectLabel: "",
+        alwaysLabel: "",
+        canAct: false,
+        canAnswer: () => false,
+        allow: null,
+        reject: null,
+        always: null,
+      };
+      if (!pending || typeof pending !== "object") return base;
+
+      if (rawKind === "approval") {
+        const toolName = typeof pending.toolName === "string" ? pending.toolName.trim() : "";
+        const callId = typeof pending.callId === "string" ? pending.callId.trim() : "";
+        const reason = resolveLocalizedCopy(pending.displayReason) || (typeof pending.reason === "string" ? pending.reason.trim() : "");
+        const hasAnswer = typeof pending.answer === "function";
+        const headline = reason || (toolName ? t("工具 {0} 请求越权执行", [toolName]) : hasAnswer ? t("等待权限审批") : "");
+        return {
+          ...base,
+          kind: "approval",
+          label: INTERACTION_LABELS.approval,
+          toolName,
+          callId,
+          headline,
+          allowLabel: t("允许一次"),
+          rejectLabel: t("拒绝"),
+          canAct: hasAnswer,
+          canAnswer: () => hasAnswer && pending.answerable !== false,
+          allow: hasAnswer ? () => Promise.resolve(pending.answer("allowed-once")) : null,
+          reject: hasAnswer ? () => Promise.resolve(pending.answer("rejected")) : null,
+        };
+      }
+
+      if (rawKind === "plan-review" || (pending.review && typeof pending.review === "object")) {
+        const review = pending.review && typeof pending.review === "object" ? pending.review : null;
+        const planMarkdown = typeof review?.plan === "string" ? review.plan : "";
+        const summary = planSummaryOf(planMarkdown);
+        const hasAnswer = Boolean(review?.id && review?.approve?.label && typeof pending.answer === "function");
+        const headline = summary.title || (typeof review?.question === "string" ? review.question.trim() : "");
+        return {
+          ...base,
+          kind: "plan-review",
+          label: INTERACTION_LABELS["plan-review"],
+          callId: typeof review?.callId === "string" ? review.callId : "",
+          headline,
+          description: summary.description,
+          planMarkdown,
+          allowLabel: t("批准方案"),
+          canAct: hasAnswer,
+          canAnswer: () => hasAnswer && questionCanAnswer(pending),
+          allow: hasAnswer
+            ? () => submitQuestionAnswer(pending, { answers: [{ id: review.id, selected: [review.approve.label] }] })
+            : null,
+        };
+      }
+
+      if (rawKind === "question" && Array.isArray(pending.questions) && pending.questions.length > 0) {
+        const first = pending.questions[0];
+        const intent = first && typeof first.intent === "object" ? first.intent : null;
+        if (pending.questions.length === 1 && intent?.kind === "approval") {
+          const headline = resolveLocalizedCopy(intent.display?.question) || String(first.question || "").trim() || t("等待权限审批");
+          const description = resolveLocalizedCopy(intent.display?.detail) || (typeof first.detail === "string" ? first.detail.trim() : "");
+          const allowLabel = resolveLocalizedCopy(intent.display?.approve) || String(intent.approve || "").trim() || t("允许");
+          const alwaysRaw = typeof intent.always === "string" && intent.always ? intent.always : "";
+          const hasAnswer = Boolean(first.id && intent.approve && intent.reject && typeof pending.answer === "function");
+          const subject = intent.subject && typeof intent.subject.name === "string" && intent.subject.name.trim()
+            ? { name: intent.subject.name.trim() }
+            : null;
+          return {
+            ...base,
+            kind: "cua-approval",
+            label: INTERACTION_LABELS.approval,
+            headline,
+            description,
+            subject,
+            warning: first.id === "cua-app-access" ? t("授权后应用可被自动操作，请确认目标应用无误。") : "",
+            allowLabel,
+            rejectLabel: t("拒绝"),
+            alwaysLabel: alwaysRaw ? t("始终允许") : "",
+            canAct: hasAnswer,
+            canAnswer: () => hasAnswer && questionCanAnswer(pending),
+            allow: hasAnswer ? () => submitQuestionAnswer(pending, { answers: [{ id: first.id, selected: [intent.approve] }] }) : null,
+            reject: hasAnswer ? () => submitQuestionAnswer(pending, { answers: [{ id: first.id, selected: [intent.reject] }] }) : null,
+            always: hasAnswer && alwaysRaw ? () => submitQuestionAnswer(pending, { answers: [{ id: first.id, selected: [alwaysRaw] }] }) : null,
+          };
+        }
+        const questionText = typeof first?.question === "string" ? first.question.trim() : "";
+        return {
+          ...base,
+          kind: "question",
+          label: INTERACTION_LABELS.question,
+          headline: clip(questionText, 180),
+          description: pending.questions.length > 1 ? t("共 {0} 个问题，请打开会话回答", [pending.questions.length]) : "",
+        };
+      }
+
+      return base;
+    }
+
+    function collectLiveApprovals(tasks, statuses, host) {
+      if (typeof statuses?.entries !== "function") return { all: [], actionable: [] };
+      const bySession = new Map();
+      for (const task of tasks || []) {
+        if (!task || task.archived) continue;
+        const scope = taskScopeLabel(task);
+        const candidates = [
+          ...(task.sessions || []).filter((session) => session?.id).map((session) => [session.id, session.title]),
+          ...(task.primarySessionId ? [[task.primarySessionId, task.sessionContext?.title]] : []),
+        ];
+        for (const [sid, sessionTitle] of candidates) {
+          if (!bySession.has(sid)) {
+            bySession.set(sid, { taskId: task.id, taskTitle: task.title, scope, title: sessionTitle || "" });
+          }
+        }
+      }
+      const all = [];
+      for (const [sessionId, native] of statuses.entries()) {
+        const pending = native?.pendingInteraction;
+        if (!pending) continue;
+        const owner = bySession.get(sessionId);
+        const liveTitle = host?.sessionTitle?.(sessionId) || owner?.title || owner?.taskTitle || t("来源会话");
+        all.push(describePendingInteraction(pending, sessionId, liveTitle, {
+          taskId: owner?.taskId || null,
+          taskTitle: owner?.taskTitle || "",
+          scope: owner?.scope || "",
+        }));
+      }
+      all.sort((left, right) => {
+        const rankLeft = Object.hasOwn(INTERACTION_PRIORITY, left.kind) ? INTERACTION_PRIORITY[left.kind] : 9;
+        const rankRight = Object.hasOwn(INTERACTION_PRIORITY, right.kind) ? INTERACTION_PRIORITY[right.kind] : 9;
+        return rankLeft - rankRight || left.id.localeCompare(right.id);
+      });
+      return { all, actionable: all.filter((item) => item.canAct && item.canAnswer()) };
+    }
+
+    async function settleInteraction(item, action) {
+      if (!item || !item.canAct) {
+        return { ok: false, stale: true, message: t("当前环境暂不支持在看板内审批，请打开会话处理") };
+      }
+      if (inflightInteractions.has(item.key)) {
+        return { ok: false, busy: true, message: t("正在提交审批决定…") };
+      }
+      if (!item.canAnswer()) {
+        return { ok: false, stale: true, message: t("该请求已失效或已在会话中处理") };
+      }
+      const runner = action === "reject" ? item.reject : action === "always" ? item.always : item.allow;
+      if (typeof runner !== "function") {
+        return { ok: false, stale: true, message: t("该请求不支持此操作") };
+      }
+      inflightInteractions.add(item.key);
+      try {
+        await runner();
+        const message = action === "reject"
+          ? t("已拒绝该操作")
+          : action === "always"
+            ? t("已设为始终允许，会话继续执行")
+            : item.kind === "plan-review"
+              ? t("已批准方案，会话继续执行")
+              : t("已允许一次，会话继续执行");
+        return { ok: true, message };
+      } catch (cause) {
+        const detail = String(cause?.message || cause || "");
+        if (/already settled|no longer answerable|no channel|aborted/i.test(detail)) {
+          return { ok: false, stale: true, message: t("该请求已失效或已在会话中处理") };
+        }
+        return { ok: false, message: t("提交失败：{0}", [detail || t("未知错误")]) };
+      } finally {
+        inflightInteractions.delete(item.key);
+      }
+    }
+
+    function rememberToolCallCache(cacheKey, value) {
+      toolCallCache.delete(cacheKey);
+      toolCallCache.set(cacheKey, value);
+      while (toolCallCache.size > TOOL_CALL_CACHE_LIMIT) {
+        const oldest = toolCallCache.keys().next().value;
+        if (oldest === undefined) break;
+        toolCallCache.delete(oldest);
+      }
+    }
+
+    async function fetchToolCallDetail(sessionId, callId) {
+      const sid = String(sessionId || "");
+      const cid = String(callId || "");
+      if (!sid || !cid) return { found: false, toolCall: null };
+      const cacheKey = `${sid}\0${cid}`;
+      if (toolCallCache.has(cacheKey)) {
+        const cached = toolCallCache.get(cacheKey);
+        rememberToolCallCache(cacheKey, cached);
+        return { found: true, toolCall: cached };
+      }
+      const payload = await apiRequest(`/session/${encodeURIComponent(sid)}/tool-call?callId=${encodeURIComponent(cid)}`);
+      if (payload?.found && payload.toolCall) {
+        rememberToolCallCache(cacheKey, payload.toolCall);
+        return { found: true, toolCall: payload.toolCall };
+      }
+      return { found: false, toolCall: null };
+    }
+
+    function useToolCallDetail(sessionId, callId, enabled = true) {
+      const cacheKey = sessionId && callId ? `${sessionId}\0${callId}` : "";
+      const [state, setState] = React.useState(() => {
+        if (!enabled || !cacheKey) return { status: "idle", toolCall: null };
+        if (toolCallCache.has(cacheKey)) return { status: "ready", toolCall: toolCallCache.get(cacheKey) };
+        return { status: "loading", toolCall: null };
+      });
+      React.useEffect(() => {
+        if (!enabled || !sessionId || !callId) {
+          setState({ status: "idle", toolCall: null });
+          return undefined;
+        }
+        if (toolCallCache.has(cacheKey)) {
+          setState({ status: "ready", toolCall: toolCallCache.get(cacheKey) });
+          return undefined;
+        }
+        let cancelled = false;
+        let retryTimer = null;
+        setState({ status: "loading", toolCall: null });
+        const load = (attempt) => {
+          fetchToolCallDetail(sessionId, callId)
+            .then((result) => {
+              if (cancelled) return;
+              if (result.found && result.toolCall) {
+                setState({ status: "ready", toolCall: result.toolCall });
+              } else if (attempt === 0) {
+                retryTimer = setTimeout(() => load(1), 800);
+              } else {
+                setState({ status: "missing", toolCall: null });
+              }
+            })
+            .catch(() => {
+              if (!cancelled) setState({ status: "missing", toolCall: null });
+            });
+        };
+        load(0);
+        return () => {
+          cancelled = true;
+          if (retryTimer) clearTimeout(retryTimer);
+        };
+      }, [sessionId, callId, enabled, cacheKey]);
+      return state;
+    }
+
     function withSessionStatus(task, statuses, now) {
       if (typeof statuses?.get !== "function") {
         const session = task.sessionContext;
@@ -1275,13 +1669,16 @@ window.__ModuleLoader__.load({
       const primary = primaryId ? statuses.get(primaryId) : null;
       const pendingSessions = [];
       const runningSessionIds = [];
+      const scope = taskScopeLabel(task);
       for (const [id, title] of sessions) {
         const native = statuses.get(id);
         const pending = native?.pendingInteraction;
         if (pending) {
-          const kind = typeof pending === "string" ? pending : pending.kind;
-          const label = Object.hasOwn(INTERACTION_LABELS, kind) ? INTERACTION_LABELS[kind] : t("待处理请求");
-          pendingSessions.push({ id, title: title || t("来源会话"), label });
+          pendingSessions.push(describePendingInteraction(pending, id, title || t("来源会话"), {
+            taskId: task.id,
+            taskTitle: task.title,
+            scope,
+          }));
         } else if (native?.running === true) {
           runningSessionIds.push(id);
         }
@@ -2382,7 +2779,7 @@ window.__ModuleLoader__.load({
   color:var(--sk-ink-2);border-radius:8px;padding:0 22px 0 9px;font-size:11.5px;font-family:inherit;line-height:1;white-space:nowrap;
   background-image:linear-gradient(45deg,transparent 50%,var(--sk-ink-4) 50%),linear-gradient(135deg,var(--sk-ink-4) 50%,transparent 50%);
   background-position:calc(100% - 11px) 52%,calc(100% - 7px) 52%;background-size:4px 4px,4px 4px;background-repeat:no-repeat}
-.sk-select:hover{background-color:var(--sk-hover);border-color:var(--sk-line-strong);color:var(--sk-ink)}
+.sk-select:hover{background-color:color-mix(in srgb,var(--sk-ink) 6%,var(--sk-surface));border-color:var(--sk-line-strong);color:var(--sk-ink)}
 .sk-select option,.sk-select optgroup{background-color:var(--sk-surface);color:var(--sk-ink)}
 .sk-count{font-size:11px;color:var(--sk-ink-4);white-space:nowrap;font-variant-numeric:tabular-nums;flex:none}
 .sk-count b{color:var(--sk-ink-3);font-weight:600}
@@ -2844,9 +3241,9 @@ window.__ModuleLoader__.load({
 .sk-card-v3.is-done .sk-card-meta-v3{color:color-mix(in srgb,var(--sk-ink) 40%,transparent)}
 .sk-ws-picker{position:relative;display:inline-flex;align-items:center;min-width:0;max-width:190px}
 .sk-ws-picker .sk-ws-select{appearance:none;background-image:none;padding:0 22px 0 7px;border-color:transparent;background-color:transparent;color:var(--sk-ink-2);font-size:12px;height:30px;border-radius:6px;cursor:pointer;max-width:100%;min-width:0;text-overflow:ellipsis}
-.sk-ws-picker:hover .sk-ws-select{background-color:color-mix(in srgb,var(--sk-ink) 5%,transparent);color:var(--sk-ink)}
+.sk-ws-picker:hover .sk-ws-select{background-color:color-mix(in srgb,var(--sk-ink) 5%,var(--sk-surface));color:var(--sk-ink)}
 .sk-ws-picker:hover .sk-ws-caret{color:var(--sk-ink)}
-.sk-ws-picker .sk-ws-select:hover{background-color:color-mix(in srgb,var(--sk-ink) 5%,transparent);border-color:transparent;color:var(--sk-ink)}
+.sk-ws-picker .sk-ws-select:hover{background-color:color-mix(in srgb,var(--sk-ink) 5%,var(--sk-surface));border-color:transparent;color:var(--sk-ink)}
 .sk-ws-caret{position:absolute;right:5px;pointer-events:none;color:color-mix(in srgb,var(--sk-ink) 45%,transparent)}
 body[data-ds-dark-theme] .sk-btn.primary,
 body[data-ds-dark-theme] .sk-btn-primary-v3{background:var(--dsw-alias-button-primary-fill)!important;color:var(--dsw-alias-label-primary-foreground)!important}
@@ -3371,6 +3768,62 @@ button.sk-task-row-main{cursor:pointer}
 .sk-timeline-meta time{font-variant-numeric:tabular-nums}
 .sk-timeline-task,.sk-float-task{font-weight:650;text-align:start;overflow-wrap:anywhere}
 .sk-timeline-day p{margin:0;color:var(--sk-ink-2);white-space:pre-line;overflow-wrap:anywhere}
+/* ---------- in-board approvals & live pending interactions ---------- */
+.sk-approval-banner{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap;padding:8px 12px;margin:0 0 10px;
+  border:1px solid color-mix(in srgb,var(--sk-amber) 34%,var(--sk-line));border-inline-start:3px solid var(--sk-amber);
+  border-radius:10px;background:color-mix(in srgb,var(--sk-amber) 7%,var(--sk-surface));font-size:12px;color:var(--sk-ink)}
+.sk-approval-dot{width:7px;height:7px;border-radius:50%;background:var(--sk-amber);flex:none;
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--sk-amber) 22%,transparent)}
+.sk-approval-banner-text{flex:1 1 180px;min-width:0;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.sk-approval-banner-text strong{font-weight:600;white-space:nowrap}
+.sk-approval-banner-preview{min-width:0;color:var(--sk-ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 140px}
+.sk-approval-banner-actions{display:inline-flex;align-items:center;gap:6px;flex:none;margin-inline-start:auto}
+.sk-approval-banner .sk-btn{height:28px;padding:0 10px}
+.sk-approval-list{list-style:none;margin:0;padding:4px 0 0;display:grid;gap:8px}
+.sk-task-row.has-session-actions .sk-approval-list{grid-column:1/-1;margin:0 6px;border-top:1px solid var(--sk-line);padding-top:8px}
+.sk-approval-card{display:grid;gap:8px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--sk-amber) 30%,var(--sk-line));
+  border-inline-start:3px solid var(--sk-amber);border-radius:10px;background:color-mix(in srgb,var(--sk-amber) 5%,var(--sk-surface));min-width:0}
+.sk-approval-card.is-passive{border-color:var(--sk-line);border-inline-start-color:var(--sk-line-strong);background:var(--sk-surface-2)}
+.sk-approval-card.is-compact{padding:8px 10px;gap:6px}
+.sk-approval-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;font-size:12px}
+.sk-approval-badge{display:inline-flex;align-items:center;gap:5px;font-weight:600;color:var(--sk-ink);white-space:nowrap}
+.sk-approval-tool{font-family:var(--dsh-font-family-code,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);font-size:11px;
+  padding:1px 6px;border-radius:5px;border:1px solid var(--sk-line);background:var(--sk-surface);color:var(--sk-ink-2);white-space:nowrap}
+.sk-approval-session{color:var(--sk-ink-3);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 120px}
+.sk-approval-subject{font-size:12px;font-weight:600;color:var(--sk-ink)}
+.sk-approval-reason{margin:0;font-size:12.5px;line-height:1.5;color:var(--sk-ink);overflow-wrap:anywhere}
+.sk-approval-desc{margin:0;font-size:12px;line-height:1.5;color:var(--sk-ink-2);overflow-wrap:anywhere;white-space:pre-line}
+.sk-approval-warn{margin:0;padding:6px 8px;border-radius:6px;font-size:11.5px;line-height:1.45;
+  color:color-mix(in srgb,var(--sk-amber) 82%,var(--sk-ink));background:color-mix(in srgb,var(--sk-amber) 10%,transparent)}
+.sk-approval-cwd{font-family:var(--dsh-font-family-code,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);font-size:11px;
+  color:var(--sk-ink-3);overflow-wrap:anywhere}
+.sk-approval-cmd{border:1px solid var(--sk-line);border-radius:8px;background:var(--sk-surface);overflow:hidden;min-width:0}
+.sk-approval-cmd-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 9px;
+  border-bottom:1px solid var(--sk-line-soft);font-size:11px;color:var(--sk-ink-3)}
+.sk-approval-cmd pre{margin:0;padding:8px 10px;max-height:168px;overflow:auto;font-family:var(--dsh-font-family-code,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);
+  font-size:11.5px;line-height:1.5;color:var(--sk-ink);white-space:pre-wrap;word-break:break-word;tab-size:2}
+.sk-approval-hint{margin:0;font-size:11.5px;line-height:1.45;color:var(--sk-ink-3)}
+.sk-approval-plan{border:1px solid var(--sk-line);border-radius:8px;background:var(--sk-surface);padding:10px 12px;max-height:260px;overflow:auto;font-size:12.5px;line-height:1.55}
+.sk-approval-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px;padding-top:2px}
+.sk-approval-actions .sk-approval-open{margin-inline-end:auto}
+.sk-approval-actions .sk-btn{height:28px;padding:0 11px}
+.sk-approval-err{margin:0;font-size:11.5px;line-height:1.45;color:var(--sk-red)}
+.sk-card-approval{display:flex;align-items:center;gap:6px;margin-top:2px;padding:5px 7px;border-radius:8px;
+  border:1px solid color-mix(in srgb,var(--sk-amber) 34%,var(--sk-line));background:color-mix(in srgb,var(--sk-amber) 8%,var(--sk-surface));min-width:0}
+.sk-card-approval-text{flex:1;min-width:0;font-size:11px;font-weight:500;color:var(--sk-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sk-card-approval .sk-btn{height:24px;padding:0 8px;font-size:11px;border-radius:6px;flex:none}
+.sk-modal.sk-approval-modal{width:min(580px,94vw)}
+.sk-approval-modal-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.sk-approval-pager{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--sk-ink-2);font-variant-numeric:tabular-nums}
+.sk-approval-pager .sk-btn{height:26px;padding:0 8px}
+.sk-pin-card.is-approval{border-color:color-mix(in srgb,var(--sk-amber) 45%,var(--sk-line));
+  background:color-mix(in srgb,var(--sk-amber) 10%,var(--sk-surface))}
+.sk-pin-approval-badge{flex:none;display:inline-flex;align-items:center;justify-content:center;height:24px;padding:0 8px;
+  border:none;border-radius:999px;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);
+  font:inherit;font-size:11px;font-weight:550;cursor:pointer}
+.sk-pin-approval-badge:hover{background:var(--dsw-alias-button-primary-hover)}
+.sk-float-approvals{display:grid;gap:8px;padding:6px 0 8px;border-bottom:1px solid var(--sk-line)}
+.sk-float-approvals-head{font-size:11px;font-weight:600;color:var(--sk-ink-3)}
 @media (prefers-reduced-motion:reduce){
   .sk-run-label::before,.sk-session-line .sk-live-dot.is-live{animation:none!important}
 }
@@ -3701,7 +4154,7 @@ button.sk-task-row-main{cursor:pointer}
 
     /* ================================ cards =============================== */
 
-    function TaskCard({ task, signal, onOpen, taskActions, onDragStart, onDragEnd, dragging }) {
+    function TaskCard({ task, signal, onOpen, onApprove, taskActions, onDragStart, onDragEnd, dragging }) {
       const progress = progressOf(task);
       const subtasks = subtasksOf(task);
       const issueList = Array.isArray(task.issues) ? task.issues : [];
@@ -3720,6 +4173,8 @@ button.sk-task-row-main{cursor:pointer}
         ? [signal.label, signal.text].filter(Boolean).join(" · ")
         : (!done ? task.nextSteps?.[0] : null);
       const running = taskRunningLabel(task);
+      const actionablePending = (task.pendingSessions || []).filter((item) => item?.canAct && item.canAnswer?.());
+      const firstApproval = actionablePending[0] || null;
       return h(
         "article",
         {
@@ -3733,6 +4188,7 @@ button.sk-task-row-main{cursor:pointer}
           },
           onDragEnd: () => onDragEnd(),
           onClick: (event) => {
+            if (event?.target?.closest?.(".sk-card-approval")) return;
             event.currentTarget.querySelector(".sk-card-open")?.focus({ preventScroll: true });
             onOpen(task.id);
           },
@@ -3779,13 +4235,30 @@ button.sk-task-row-main{cursor:pointer}
           running && h("span", { className: cx("sk-run-label", task.sessionContext?.estimated && "is-estimated") }, running),
           task.dueDate && h("span", { title: task.dueDate }, dueLabel(task))) : null,
         summary ? h("div", { className: "sk-card-summary", title: summary }, summary) : null,
+        firstApproval && onApprove
+          ? h("div", { className: "sk-card-approval" },
+              h("span", { className: "sk-approval-dot", "aria-hidden": "true" }),
+              h("span", { className: "sk-card-approval-text", title: firstApproval.headline || firstApproval.label },
+                actionablePending.length > 1
+                  ? t("{0} 项待审批", [actionablePending.length])
+                  : [firstApproval.label, firstApproval.toolName || firstApproval.subject?.name].filter(Boolean).join(" · ")),
+              h("button", {
+                type: "button",
+                className: "sk-btn primary",
+                "aria-label": t("审批：{0}", [task.title]),
+                onClick: (event) => {
+                  event.stopPropagation();
+                  onApprove(firstApproval.key);
+                },
+              }, t("审批")))
+          : null,
         task.progress !== null || subtasks.length
           ? h("div", { className: "sk-card-progress-v3", title: taskProgressLabel(task) }, h("i", { style: { width: `${progress}%` } }))
           : null,
       );
     }
 
-    function ColumnCards({ id, labelledBy, label, className, tasks, signals, onOpen, taskActions, draggingId, onDragStart, onDragEnd, emptyText }) {
+    function ColumnCards({ id, labelledBy, label, className, tasks, signals, onOpen, onApprove, taskActions, draggingId, onDragStart, onDragEnd, emptyText }) {
       const [page, setPage] = React.useState(0);
       const scrollRef = React.useRef(null);
       const pageCount = Math.max(1, Math.ceil(tasks.length / COLUMN_PAGE_SIZE));
@@ -3796,7 +4269,7 @@ button.sk-task-row-main{cursor:pointer}
       return h(React.Fragment, null,
         h("div", { id, ref: scrollRef, className, role: labelledBy ? "tabpanel" : "region", "aria-labelledby": labelledBy, "aria-label": labelledBy ? undefined : label },
           tasks.length ? tasks.slice(start, start + COLUMN_PAGE_SIZE).map((task) => h(TaskCard, {
-            key: task.id, task, signal: signals.get(task.id), onOpen, taskActions, onDragStart, onDragEnd, dragging: draggingId === task.id,
+            key: task.id, task, signal: signals.get(task.id), onOpen, onApprove, taskActions, onDragStart, onDragEnd, dragging: draggingId === task.id,
           })) : h("div", { className: labelledBy ? "sk-narrow-empty" : "sk-col-empty" }, emptyText)),
         pageCount > 1 ? h("nav", { className: "sk-column-pager", "aria-label": t("{0}分页", [label]) },
           h("button", { type: "button", disabled: currentPage === 0, onClick: () => setPage(currentPage - 1), "aria-label": t("{0}上一页", [label]) },
@@ -3806,7 +4279,7 @@ button.sk-task-row-main{cursor:pointer}
             h(Icon, { name: "back", size: 13 }))) : null);
     }
 
-    function Column({ status, tasks, signals, onOpen, taskActions, onAdd, onDropTask, draggingId, onDragStart, onDragEnd, pageKey, collapsed, onToggle }) {
+    function Column({ status, tasks, signals, onOpen, onApprove, taskActions, onAdd, onDropTask, draggingId, onDragStart, onDragEnd, pageKey, collapsed, onToggle }) {
       const meta = STATUS_META[status];
       const [dragOver, setDragOver] = React.useState(false);
       const contentId = React.useId();
@@ -3855,14 +4328,14 @@ button.sk-task-row-main{cursor:pointer}
           ) : null,
         ),
         collapsed ? h("div", { id: contentId, hidden: true }) : h(ColumnCards, {
-          key: pageKey, id: contentId, label: meta.label, className: "sk-col-body", tasks, signals, onOpen, taskActions, draggingId, onDragStart, onDragEnd,
+          key: pageKey, id: contentId, label: meta.label, className: "sk-col-body", tasks, signals, onOpen, onApprove, taskActions, draggingId, onDragStart, onDragEnd,
           emptyText: status === "blocked" ? t("暂无受阻任务") : t("暂无任务，拖拽卡片到这里"),
         }),
       );
     }
 
     /** 窄屏（右侧栏 <620px）：文字状态 tab + 单列卡片。 */
-    function NarrowBoard({ status, setStatus, byStatus, signals, onOpen, taskActions, onAdd, draggingId, onDragStart, onDragEnd, pageKey }) {
+    function NarrowBoard({ status, setStatus, byStatus, signals, onOpen, onApprove, taskActions, onAdd, draggingId, onDragStart, onDragEnd, pageKey }) {
       const list = byStatus[status] || [];
       // Each mounted surface owns its own tab and panel ids.
       const panelId = React.useId();
@@ -3903,7 +4376,7 @@ button.sk-task-row-main{cursor:pointer}
           ),
         ),
         h(ColumnCards, { key: `${status}:${pageKey}`, id: panelId, labelledBy: tabId(status), label: STATUS_META[status].label,
-          className: "sk-narrow-list", tasks: list, signals, onOpen, taskActions, draggingId, onDragStart, onDragEnd,
+          className: "sk-narrow-list", tasks: list, signals, onOpen, onApprove, taskActions, draggingId, onDragStart, onDragEnd,
           emptyText: t("「{0}」暂无任务", [STATUS_META[status].label]) }),
         onAdd ? h(
           "button",
@@ -4382,6 +4855,226 @@ button.sk-task-row-main{cursor:pointer}
       return h("ul", { className: "sk-session-actions", "aria-label": label }, sessions.map(({ id, title, label }) =>
         h("li", { key: id }, h("span", null, `${label} · ${title}`),
           h("button", { className: "sk-btn", type: "button", "aria-label": t("打开会话：{0}（{1}）", [title, label]), onClick: () => openSession(id) }, t("打开会话")))));
+    }
+
+    /**
+     * Inline informed-approval card for one session's pending interaction.
+     * Always shows tool name, reason, and live command/plan detail when available,
+     * keeps "Open session" as a safe escape hatch, and settles through DSH's own carrier.
+     */
+    function PendingInteractionCard({ item, openSession, pushToast, onSettled, compact = false, showContext = false }) {
+      const [busyAction, setBusyAction] = React.useState("");
+      const [errorText, setErrorText] = React.useState("");
+      const [planOpen, setPlanOpen] = React.useState(false);
+      const needsToolCall = item.kind === "approval" && Boolean(item.callId);
+      const detail = useToolCallDetail(item.id, item.callId, needsToolCall);
+      React.useEffect(() => {
+        setBusyAction("");
+        setErrorText("");
+        setPlanOpen(false);
+      }, [item.key]);
+
+      const toolCall = detail.toolCall;
+      const commandText = toolCall?.command || toolCall?.argsPreview || "";
+      const extraJustification = toolCall?.justification && toolCall.justification !== item.headline ? toolCall.justification : "";
+      const liveAnswerable = Boolean(item.canAct && item.canAnswer?.());
+      const notify = (text, tone) => {
+        if (typeof pushToast === "function") pushToast(text, tone);
+      };
+
+      const act = async (action) => {
+        if (busyAction) return;
+        setBusyAction(action);
+        setErrorText("");
+        const result = await settleInteraction(item, action);
+        setBusyAction("");
+        if (result.ok) {
+          notify(result.message, "info");
+          onSettled?.(item, action);
+          return;
+        }
+        setErrorText(result.message);
+        notify(result.message, "error");
+      };
+
+      const copyCommand = () => copyWithToast(commandText, t("执行命令"), (text, tone) => notify(text, tone));
+      const contextMeta = showContext ? [item.taskTitle, item.scope].filter(Boolean).join(" · ") : "";
+      const openLabel = item.kind === "plan-review" ? t("去会话讨论") : t("打开会话");
+
+      return h("div", {
+        className: cx("sk-approval-card", !item.canAct && "is-passive", compact && "is-compact"),
+        "data-interaction-key": item.key,
+        "aria-busy": Boolean(busyAction) || undefined,
+      },
+        h("div", { className: "sk-approval-head" },
+          h("span", { className: "sk-approval-badge" },
+            item.canAct ? h("span", { className: "sk-approval-dot", "aria-hidden": "true" }) : null,
+            item.label),
+          item.toolName ? h("span", { className: "sk-approval-tool" }, item.toolName) : null,
+          h("span", { className: "sk-approval-session", title: contextMeta ? `${item.title} · ${contextMeta}` : item.title },
+            contextMeta ? `${item.title} · ${contextMeta}` : item.title)),
+        item.subject?.name ? h("div", { className: "sk-approval-subject" }, item.subject.name) : null,
+        item.headline ? h("p", { className: "sk-approval-reason" }, item.headline) : null,
+        item.description ? h("p", { className: "sk-approval-desc" }, item.description) : null,
+        item.warning ? h("p", { className: "sk-approval-warn" }, item.warning) : null,
+        extraJustification ? h("p", { className: "sk-approval-desc" }, extraJustification) : null,
+        toolCall?.cwd ? h("div", { className: "sk-approval-cwd", title: toolCall.cwd }, t("工作目录：{0}", [toolCall.cwd])) : null,
+        !commandText && toolCall?.path ? h("div", { className: "sk-approval-cwd", title: toolCall.path }, t("目标文件：{0}", [toolCall.path])) : null,
+        needsToolCall && detail.status === "loading"
+          ? h("p", { className: "sk-approval-hint" }, t("正在读取命令详情…"))
+          : commandText
+            ? h("div", { className: "sk-approval-cmd" },
+                h("div", { className: "sk-approval-cmd-head" },
+                  h("span", null, toolCall?.command ? t("待执行命令") : t("调用参数")),
+                  h("button", { type: "button", className: "sk-text", onClick: copyCommand }, t("复制"))),
+                h("pre", { tabIndex: 0 }, h("code", null, commandText)))
+            : needsToolCall && detail.status === "missing"
+              ? h("p", { className: "sk-approval-hint" }, t("未读取到命令详情，建议打开会话核对后再决定。"))
+              : null,
+        item.planMarkdown
+          ? h(React.Fragment, null,
+              h("div", null, h("button", { type: "button", className: "sk-text sk-link-text", onClick: () => setPlanOpen((value) => !value) },
+                planOpen ? t("收起方案正文") : t("展开完整方案"))),
+              planOpen ? h("div", { className: "sk-approval-plan" },
+                h(MarkdownLite, { text: item.planMarkdown, onCopyCode: (code) => copyWithToast(code, t("代码"), (text, tone) => notify(text, tone)) })) : null)
+          : null,
+        errorText ? h("p", { className: "sk-approval-err", role: "alert" }, errorText) : null,
+        h("div", { className: "sk-approval-actions" },
+          h("button", {
+            className: "sk-btn ghost sk-approval-open",
+            type: "button",
+            "aria-label": t("打开会话：{0}（{1}）", [item.title, item.label]),
+            onClick: () => openSession(item.id),
+          }, openLabel),
+          item.canAct && item.reject
+            ? h("button", {
+                className: "sk-btn",
+                type: "button",
+                disabled: Boolean(busyAction) || !liveAnswerable,
+                onClick: () => act("reject"),
+              }, busyAction === "reject" ? t("处理中…") : item.rejectLabel || t("拒绝"))
+            : null,
+          item.canAct && item.allow
+            ? h("button", {
+                className: cx("sk-btn", !item.always && "primary"),
+                type: "button",
+                disabled: Boolean(busyAction) || !liveAnswerable,
+                onClick: () => act("allow"),
+              }, busyAction === "allow" ? t("处理中…") : item.allowLabel || t("允许一次"))
+            : null,
+          item.canAct && item.always
+            ? h("button", {
+                className: "sk-btn primary",
+                type: "button",
+                disabled: Boolean(busyAction) || !liveAnswerable,
+                onClick: () => act("always"),
+              }, busyAction === "always" ? t("处理中…") : item.alwaysLabel || t("始终允许"))
+            : null));
+    }
+
+    function renderPendingInteractions(sessions, { openSession, pushToast, compact = false, label = t("待处理会话") } = {}) {
+      if (!sessions?.length) return null;
+      const rich = sessions.some((item) => item?.canAct || item?.headline || item?.toolName || item?.planMarkdown);
+      if (!rich) return renderSessionActions(sessions, openSession, label);
+      return h("ul", { className: "sk-approval-list", "aria-label": label }, sessions.map((item) =>
+        h("li", { key: item.key || item.id },
+          h(PendingInteractionCard, { item, openSession, pushToast, compact }))));
+    }
+
+    /** Focused queue modal for informed approval from board cards, banner, or floating launcher. */
+    function ApprovalModal({ items, initialKey, openSession, pushToast, onClose }) {
+      const dialogRef = React.useRef(null);
+      const titleId = React.useId();
+      const [activeKey, setActiveKey] = React.useState(() => initialKey || items[0]?.key || "");
+      useDialogFocus(dialogRef, onClose);
+      useBodyScrollLock();
+      React.useEffect(() => {
+        if (!items.length) {
+          onClose();
+          return;
+        }
+        if (!items.some((item) => item.key === activeKey)) {
+          setActiveKey(items[0].key);
+        }
+      }, [items, activeKey, onClose]);
+      if (!items.length) return null;
+      const currentIndex = Math.max(0, items.findIndex((item) => item.key === activeKey));
+      const current = items[currentIndex] || items[0];
+      const step = (delta) => {
+        const next = items[(currentIndex + delta + items.length) % items.length];
+        if (next) setActiveKey(next.key);
+      };
+      return h("div", {
+        className: "sk-modal-mask",
+        onClick: (event) => { if (event.target === event.currentTarget) onClose(); },
+      },
+        h("div", {
+          ref: dialogRef,
+          className: "sk-modal sk-approval-modal",
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": titleId,
+        },
+          h("div", { className: "sk-approval-modal-head" },
+            h("h3", { id: titleId }, h(Icon, { name: "alert", size: 16 }), t("看板审批")),
+            items.length > 1
+              ? h("div", { className: "sk-approval-pager" },
+                  h("button", { type: "button", className: "sk-btn ghost", onClick: () => step(-1) }, t("上一项")),
+                  h("span", { "aria-live": "polite" }, `${currentIndex + 1} / ${items.length}`),
+                  h("button", { type: "button", className: "sk-btn ghost", onClick: () => step(1) }, t("下一项")))
+              : null),
+          h("div", { className: "sk-modal-body" },
+            h(PendingInteractionCard, {
+              key: current.key,
+              item: current,
+              openSession: (sid) => {
+                onClose();
+                openSession(sid);
+              },
+              pushToast,
+              showContext: true,
+            })),
+          h("div", { className: "sk-modal-foot" },
+            h("span", { className: "sk-note-tiny", style: { marginInlineEnd: "auto" } }, t("按 Esc 仅关闭窗口，不会拒绝待审批请求")),
+            h("button", { type: "button", className: "sk-btn", onClick: onClose }, t("关闭")))));
+    }
+
+    /** Live approval alerts pinned above the floating launcher when background sessions are blocked. */
+    function ApprovalStrip({ items, onApprove }) {
+      if (!items.length) return null;
+      const visible = items.slice(0, REVIEW_STRIP_LIMIT);
+      const hidden = items.length - visible.length;
+      return h("div", { className: "sk-pin-stack", role: "group", "aria-label": t("待审批权限请求") },
+        visible.map((item) => h("article", {
+          key: item.key,
+          className: "sk-pin-card is-approval",
+          role: "button",
+          tabIndex: 0,
+          title: item.headline || item.title,
+          "aria-label": t("处理待审批：{0}", [item.title]),
+          onClick: () => onApprove(item.key),
+          onKeyDown: (event) => {
+            if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+            event.preventDefault();
+            onApprove(item.key);
+          },
+        },
+          h("span", { className: "sk-approval-dot", "aria-hidden": "true" }),
+          h("span", { className: "sk-pin-open" },
+            h("span", { className: "sk-pin-title" }, item.title),
+            h("span", { className: "sk-pin-meta" }, [item.label, item.toolName || item.subject?.name, item.headline].filter(Boolean).join(" · "))),
+          h("button", {
+            type: "button",
+            className: "sk-pin-approval-badge",
+            onClick: (event) => {
+              event.stopPropagation();
+              onApprove(item.key);
+            },
+          }, t("审批")))),
+        hidden > 0
+          ? h("button", { type: "button", className: "sk-pin-more", onClick: () => onApprove(items[0].key) },
+              t("还有 {0} 项待审批", [hidden]))
+          : null);
     }
 
     function TaskPlanningFields({ values, update, projects }) {
@@ -4887,7 +5580,7 @@ button.sk-task-row-main{cursor:pointer}
                           dueLabel(task) || t("设置到期日")),
                         h("button", { type: "button", className: "sk-text sk-planning-action", onClick: () => editPlanning("notes") }, task.notes ? t("编辑备注") : t("添加备注"))),
                       task.notes ? h("div", { className: "sk-overview-item" }, h("h3", null, t("备注")), h("p", { className: "sk-preserve-lines" }, task.notes)) : null,
-                      pending.length ? renderSessionActions(pending, openSourceSession) :
+                      pending.length ? renderPendingInteractions(pending, { openSession: openSourceSession, pushToast }) :
                         !task.writeOverlap && (signal || nextSteps[0]) ? h("div", { className: "sk-overview-item" },
                           h("h3", null, signal?.label || t("下一步")),
                           signal?.taskId && tasks.some((item) => item.id === signal.taskId)
@@ -5967,7 +6660,7 @@ button.sk-task-row-main{cursor:pointer}
                 taskProgressLabel(task), task.priority, signal?.kind === "due" ? "" : dueLabel(task),
                 artifactsOf(task).length ? t("{0} 项产出", [artifactsOf(task).length]) : ""].filter(Boolean).join(" · "))),
           taskActions.button(task),
-          renderSessionActions(pending, openSession));
+          renderPendingInteractions(pending, { openSession, pushToast }));
       };
 
       if (mode === "schedule") {
@@ -6308,6 +7001,7 @@ button.sk-task-row-main{cursor:pointer}
       const [category, setCategory] = React.useState(() => "");
       const [limit, setLimit] = React.useState(0);
       const [continuation, setContinuation] = React.useState(() => null);
+      const [approvalKey, setApprovalKey] = React.useState(() => null);
       const continuationTrigger = React.useRef(null);
       const [busyId, setBusyId] = React.useState("");
       const [message, setMessage] = React.useState("");
@@ -6342,6 +7036,7 @@ button.sk-task-row-main{cursor:pointer}
       }, [data?.tasks, data?.projects]);
       const summary = React.useMemo(() => floatingSummary(tasks, sessionStatuses, data?.settings?.initialDays, now),
         [tasks, sessionStatuses, data?.settings?.initialDays, now]);
+      const liveApprovals = React.useMemo(() => collectLiveApprovals(tasks, sessionStatuses, host), [tasks, sessionStatuses, host]);
       // 当前打开的会话：它自己的待审批卡先收起，切到别的会话再露出来。
       const [currentSessionId, setCurrentSessionId] = React.useState(() => host.currentSession?.() || "");
       const currentSessionGrace = React.useRef(0);
@@ -6356,6 +7051,17 @@ button.sk-task-row-main{cursor:pointer}
         return () => clearInterval(timer);
       }, [host]);
       const titleOf = (row) => host.sessionTitle?.(row.sessionId) || row.task.title;
+      const floatingApprovals = React.useMemo(
+        () => liveApprovals.actionable.filter((item) => !currentSessionId || item.id !== currentSessionId),
+        [liveApprovals.actionable, currentSessionId],
+      );
+      const unlinkedApprovals = React.useMemo(
+        () => liveApprovals.actionable.filter((item) => !item.taskId),
+        [liveApprovals.actionable],
+      );
+      React.useEffect(() => {
+        if (approvalKey !== null && !liveApprovals.actionable.length) setApprovalKey(null);
+      }, [approvalKey, liveApprovals.actionable.length]);
       const allReviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now)
         .map((row) => ({ ...row, title: titleOf(row) })), [tasks, sessionStatuses, now, host]);
       const reviews = React.useMemo(() => floatingReview(tasks, sessionStatuses, now, currentSessionId)
@@ -6407,11 +7113,12 @@ button.sk-task-row-main{cursor:pointer}
       }, [continuation, continueTask]);
       const visibleMetrics = metrics.filter(({ count }) => count > 0);
       const showPanel = open && !onBoardPage;
+      const approvalModalOpen = approvalKey !== null && liveApprovals.actionable.length > 0;
       // 全局或右侧看板正在显示时入口让位：同一时刻只出现一种看板形态。
       const showTrigger = !showPanel && !onBoardPage && sideBoards === 0 && prefs.floatEnabled &&
-        (!prefs.floatHideEmpty || visibleMetrics.length > 0 || reviews.length > 0 || Boolean(activeReview) ||
+        (!prefs.floatHideEmpty || visibleMetrics.length > 0 || reviews.length > 0 || floatingApprovals.length > 0 || Boolean(activeReview) ||
           Boolean(message) || Boolean(error));
-      const showRoot = showPanel || showTrigger || Boolean(notice);
+      const showRoot = showPanel || showTrigger || approvalModalOpen || Boolean(notice);
       const topLayer = typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.showPopover === "function";
       React.useLayoutEffect(() => {
         const node = root.current;
@@ -6437,7 +7144,7 @@ button.sk-task-row-main{cursor:pointer}
           setFloatingOpen(false);
         };
         const closeOnEscape = (event) => {
-          if (event.target?.closest?.(".sk-continue-modal,.sk-quick-menu")) return;
+          if (event.target?.closest?.(".sk-continue-modal,.sk-approval-modal,.sk-quick-menu")) return;
           if (event.key === "Escape" && !event.defaultPrevented && root.current?.contains(document.activeElement)) {
             event.preventDefault();
             event.stopPropagation();
@@ -6553,7 +7260,9 @@ button.sk-task-row-main{cursor:pointer}
       };
       if (!showRoot) return null;
       const reviewCount = reviews.length;
-      const counts = [reviewCount ? t("待审批 {0}", [reviewCount]) : "",
+      const liveApprovalCount = floatingApprovals.length;
+      const counts = [liveApprovalCount ? t("待审批权限 {0}", [liveApprovalCount]) : "",
+        reviewCount ? t("待审批 {0}", [reviewCount]) : "",
         ...metrics.map(({ label, count }) => `${label} ${count}`)].filter(Boolean).join("，");
       const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
       const rows = summary[selected].filter(({ task }) => !terms.length ||
@@ -6561,10 +7270,10 @@ button.sk-task-row-main{cursor:pointer}
       const visibleLimit = limit || (selected === "running" ? 3 : FLOAT_PAGE_SIZE);
       const side = dragPosition?.side || prefs.floatPosition;
       const offset = dragPosition?.offset ?? prefs.floatOffset;
-      const badge = reviewCount || (visibleMetrics[0] || metrics[0]).count;
+      const badge = liveApprovalCount || reviewCount || (visibleMetrics[0] || metrics[0]).count;
       const iconButton = (icon, label, onClick, extra) => h("button", { type: "button", className: "sk-float-icon", title: label, "aria-label": label, onClick, ...extra },
         h(Icon, { name: icon, size: 15 }));
-      const panel = showPanel ? h("section", { id: panelId, className: cx("sk-float-panel", "is-" + prefs.floatSize), role: "dialog", "aria-labelledby": titleId, inert: Boolean(continueTask) },
+      const panel = showPanel ? h("section", { id: panelId, className: cx("sk-float-panel", "is-" + prefs.floatSize), role: "dialog", "aria-labelledby": titleId, inert: Boolean(continueTask || approvalModalOpen) },
         h("header", null,
           h("h2", { ref: heading, tabIndex: -1, id: titleId }, h(Icon, { name: "board", size: 15 }), t("任务看板")),
           h("span", { className: "sk-float-tools" },
@@ -6584,7 +7293,16 @@ button.sk-task-row-main{cursor:pointer}
               onChange: (event) => { setQuery(event.target.value); setLimit(0); } }))),
         h("div", { className: "sk-float-content" },
           error ? h("p", { role: "alert" }, t("连接异常。"), h("button", { type: "button", className: "sk-text", onClick: () => reload(false) }, t("重试"))) : null,
-          !rows.length ? h("p", { className: "sk-float-empty" }, loading ? t("正在加载任务…") : terms.length ? t("没有匹配的任务。") :
+          selected === "attention" && unlinkedApprovals.length > 0 && !terms.length
+            ? h("div", { className: "sk-float-approvals" },
+                h("div", { className: "sk-float-approvals-head" }, t("活跃会话待审批（{0}）", [unlinkedApprovals.length])),
+                renderPendingInteractions(unlinkedApprovals, {
+                  openSession: (id) => navigate(host.openSession, id),
+                  pushToast: (text) => setMessage(text),
+                  compact: true,
+                }))
+            : null,
+          !rows.length && !(selected === "attention" && unlinkedApprovals.length > 0 && !terms.length) ? h("p", { className: "sk-float-empty" }, loading ? t("正在加载任务…") : terms.length ? t("没有匹配的任务。") :
             selected === "recent" ? t("近期还没有任务。在下方随手记一条，或到会话里开始工作。") : t("暂无{0}任务。", [FLOAT_TABS[selected]])) : null,
           rows.slice(0, visibleLimit).map(({ task, signal, artifact }) => {
             const mainSession = task.primarySessionId || sessionContextOf(task).sessionId;
@@ -6625,7 +7343,11 @@ button.sk-task-row-main{cursor:pointer}
                 ready
                   ? h("button", { type: "button", className: "sk-btn", disabled: Boolean(busyId || error),
                       onClick: () => accept(task) }, busyId === task.id ? t("正在验收…") : t("确认验收")) : null),
-              renderSessionActions(pending, (id) => navigate(host.openSession, id)));
+              renderPendingInteractions(pending, {
+                openSession: (id) => navigate(host.openSession, id),
+                pushToast: (text) => setMessage(text),
+                compact: true,
+              }));
           }),
           rows.length > visibleLimit ? h("button", { type: "button", className: "sk-btn sk-float-more",
             onClick: () => setLimit(selected === "running" ? rows.length : visibleLimit + FLOAT_PAGE_SIZE) },
@@ -6636,6 +7358,12 @@ button.sk-task-row-main{cursor:pointer}
             onChange: (event) => setQuickTitle(event.target.value) }),
           quickTitle.trim() ? h("button", { type: "submit", className: "sk-btn" }, t("保存")) : null),
         message ? h("footer", null, h("span", { role: "status" }, message)) : h("span", { className: "sk-sr-only", role: "status" })) : null;
+      const approvalStrip = showTrigger && dialogs === 0 && floatingApprovals.length
+        ? h(ApprovalStrip, {
+            items: floatingApprovals,
+            onApprove: (key) => setApprovalKey(key),
+          })
+        : null;
       const strip = showTrigger && dialogs === 0 && reviews.length
         ? h(ReviewStrip, {
             rows: reviews, busyId, error: Boolean(error), expanded: stripExpanded, message,
@@ -6684,6 +7412,7 @@ button.sk-task-row-main{cursor:pointer}
       return h("div", { ref: root, className: cx("sk-floating", "is-" + side, showPanel && "is-open"), popover: topLayer ? "manual" : undefined,
         style: { "--sk-float-offset": `${showPanel ? 0 : offset}px` } },
         panel,
+        approvalStrip,
         strip,
         floatingStatus,
         activeCheck,
@@ -6692,6 +7421,13 @@ button.sk-task-row-main{cursor:pointer}
           h("button", { type: "button", className: "sk-text", onClick: () => { notice.undo(); setNotice(null); } }, t("撤销")),
           h("button", { type: "button", className: "sk-text", "aria-label": t("关闭提示"), onClick: () => setNotice(null) }, t("知道了"))) : null,
         menuAnchor ? h(QuickMenu, { anchor: menuAnchor, items: entryMenu, label: t("悬浮入口操作"), onClose: () => setMenuAnchor(false) }) : null,
+        approvalModalOpen ? h(ApprovalModal, {
+          items: liveApprovals.actionable,
+          initialKey: approvalKey,
+          openSession: (id) => navigate(host.openSession, id),
+          pushToast: (text) => setMessage(text),
+          onClose: () => setApprovalKey(null),
+        }) : null,
         showPanel && continueTask ? h(ContinueTaskModal, {
           task: continueTask, initialTarget: "session", initialPurpose: continuation.purpose || "verify", initialSessionId: continuation.sessionId,
           ctxProps: { host }, workspaces: data?.workspaces, pushToast: setMessage, feedback: message,
@@ -7570,6 +8306,7 @@ button.sk-task-row-main{cursor:pointer}
         }
       };
       const [settingsOpen, setSettingsOpen] = React.useState(false);
+      const [approvalKey, setApprovalKey] = React.useState(null);
       const [draggingId, setDraggingId] = React.useState(null);
       const [scanBusy, setScanBusy] = React.useState(false);
       const [nowTick, setNowTick] = React.useState(Date.now);
@@ -7635,7 +8372,8 @@ button.sk-task-row-main{cursor:pointer}
             target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable),
           );
           if (event.key === "Escape") {
-            if (settingsOpen) setSettingsOpen(false);
+            if (approvalKey !== null) setApprovalKey(null);
+            else if (settingsOpen) setSettingsOpen(false);
             else if (newTaskStatus !== null) setNewTaskStatus(null);
             else if (drawerId) setDrawerId(null);
             else if (moreAnchor) setMoreAnchor(null);
@@ -7661,7 +8399,7 @@ button.sk-task-row-main{cursor:pointer}
         };
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
-      }, [settingsOpen, newTaskStatus, drawerId, moreAnchor, filterOpen, surface, isNarrow, mode, selectedProject?.archived]);
+      }, [approvalKey, settingsOpen, newTaskStatus, drawerId, moreAnchor, filterOpen, surface, isNarrow, mode, selectedProject?.archived]);
 
       React.useEffect(() => {
         writeFilters(filters, surface);
@@ -7787,6 +8525,10 @@ button.sk-task-row-main{cursor:pointer}
       }, [visible]);
 
       const taskIndex = React.useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+      const liveApprovals = React.useMemo(() => collectLiveApprovals(tasks, ctxProps.sessionStatuses, host), [tasks, ctxProps.sessionStatuses, host]);
+      React.useEffect(() => {
+        if (approvalKey !== null && !liveApprovals.actionable.length) setApprovalKey(null);
+      }, [approvalKey, liveApprovals.actionable.length]);
       const signals = React.useMemo(() => {
         const result = new Map();
         const now = Date.now();
@@ -7939,6 +8681,7 @@ button.sk-task-row-main{cursor:pointer}
       const menuTask = quickTask && visible.find((task) => task.id === quickTask.id);
       const taskMenuItems = (task) => {
         const source = sessionContextOf(task).sessionId;
+        const actionable = (task.pendingSessions || []).filter((item) => item?.canAct && item.canAnswer?.());
         const changeFlag = async (flag, message) => {
           try {
             await command(flag === "pinned" ? "task.pin" : "task.archive", { id: task.id, [flag]: !task[flag] });
@@ -7949,6 +8692,7 @@ button.sk-task-row-main{cursor:pointer}
           }
         };
         return [
+          actionable.length > 0 && { label: t("处理待审批请求"), icon: "alert", run: () => setApprovalKey(actionable[0].key) },
           { label: t("查看任务详情"), icon: "board", run: () => setDrawerId(task.id) },
           source && { label: t("打开来源会话"), icon: "chat", run: () => openAttentionSession(source) },
           { label: t("复制任务标题"), icon: "copy", run: () => copyWithToast(task.title, t("任务标题"), pushToast) },
@@ -8277,6 +9021,21 @@ button.sk-task-row-main{cursor:pointer}
               : null,
           ),
         ),
+        liveApprovals.actionable.length > 0
+          ? h("div", { className: "sk-approval-banner", role: "region", "aria-label": t("待审批权限请求") },
+              h("span", { className: "sk-approval-dot", "aria-hidden": "true" }),
+              h("div", { className: "sk-approval-banner-text" },
+                h("strong", null, t("{0} 项待审批", [liveApprovals.actionable.length])),
+                h("span", { className: "sk-approval-banner-preview", title: liveApprovals.actionable[0].headline || liveApprovals.actionable[0].title },
+                  [liveApprovals.actionable[0].taskTitle || liveApprovals.actionable[0].title,
+                    liveApprovals.actionable[0].toolName || liveApprovals.actionable[0].subject?.name,
+                    liveApprovals.actionable[0].headline].filter(Boolean).join(" · "))),
+              h("div", { className: "sk-approval-banner-actions" },
+                liveApprovals.actionable.length === 1
+                  ? h("button", { type: "button", className: "sk-btn ghost", onClick: () => openAttentionSession(liveApprovals.actionable[0].id) }, t("打开会话"))
+                  : null,
+                h("button", { type: "button", className: "sk-btn primary", onClick: () => setApprovalKey(liveApprovals.actionable[0].key) }, t("立即审批"))))
+          : null,
         data.storage?.writable === false
           ? h("div", { className: "sk-board-notice", role: "alert" }, t("看板存储暂不可写"),
               h("button", { type: "button", className: "sk-btn", onClick: () => setMode("maintenance") }, t("查看维护")))
@@ -8342,6 +9101,7 @@ button.sk-task-row-main{cursor:pointer}
                   signals,
                   pageKey,
                   onOpen: (id) => setDrawerId(id),
+                  onApprove: setApprovalKey,
                   taskActions,
                   onAdd: selectedProject?.archived ? null : setNewTaskStatus,
                   draggingId,
@@ -8358,6 +9118,7 @@ button.sk-task-row-main{cursor:pointer}
                       tasks: byStatus[status] || [],
                       signals,
                       onOpen: (id) => setDrawerId(id),
+                      onApprove: setApprovalKey,
                       taskActions,
                       pageKey,
                       collapsed: status === "done" && doneCollapsed,
@@ -8371,6 +9132,15 @@ button.sk-task-row-main{cursor:pointer}
                   ),
                 ),
         menuTask ? h(QuickMenu, { anchor: quickTask.anchor, items: taskMenuItems(menuTask), label: t("任务操作：{0}", [menuTask.title]), onClose: () => setQuickTask(null) }) : null,
+        approvalKey !== null && liveApprovals.actionable.length > 0
+          ? h(ApprovalModal, {
+              items: liveApprovals.actionable,
+              initialKey: approvalKey,
+              openSession: openAttentionSession,
+              pushToast,
+              onClose: () => setApprovalKey(null),
+            })
+          : null,
         drawerTask
           ? h(TaskDrawer, { key: drawerTask.id, task: drawerTask, signal: signals.get(drawerTask.id), tasks, workspaces, projects, onOpenTask: setDrawerId, ctxProps, settings, desktopFiles,
               onClose: () => setDrawerId((id) => id === drawerTask.id ? null : id), onChanged: () => reload(true),

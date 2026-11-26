@@ -3031,3 +3031,61 @@ test("board.reset saves a restore point, clears auto cards, preserves manual/usa
   assert.ok(persisted.tasks.some((task) => task.primarySessionId === "sess-recent"), "recent session within 3 days is rescanned");
   assert.ok(!persisted.tasks.some((task) => task.primarySessionId === "sess-old"), "10-day-old session stays outside 3-day window");
 });
+
+test("GET /session/:id/tool-call resolves live session/event calls and falls back to disk logs", async (t) => {
+  let emitSessionEvent = null;
+  const { service } = await setup(t, {
+    withSessions: true,
+    ctx: {
+      on(name, listener) {
+        if (name === "session/event") emitSessionEvent = listener;
+        return () => {};
+      },
+    },
+  });
+
+  // Invalid inputs fail with 400.
+  assert.equal((await request(service, { route: "/session/sess-alpha/tool-call" })).status, 400);
+  assert.equal((await request(service, { route: "/session/..%2Fetc/tool-call", search: "?callId=c1" })).status, 400);
+  assert.equal((await request(service, { route: "/session/sess-alpha/tool-call", search: "?callId=bad%00id" })).status, 400);
+
+  // Disk log fallback finds the seeded callId from session.v4.jsonl.zstd.
+  const fromDisk = await request(service, { route: "/session/sess-alpha/tool-call", search: "?callId=call-1" });
+  assert.equal(fromDisk.status, 200);
+  assert.equal(fromDisk.json.ok, true);
+  assert.equal(fromDisk.json.found, true);
+  assert.equal(fromDisk.json.toolCall.name, "write");
+  assert.equal(fromDisk.json.toolCall.path, "README.md");
+
+  // Unknown callId returns found: false (200, no noisy 404).
+  const missing = await request(service, { route: "/session/sess-alpha/tool-call", search: "?callId=call-unknown" });
+  assert.equal(missing.status, 200);
+  assert.equal(missing.json.found, false);
+  assert.equal(missing.json.toolCall, null);
+
+  // Live tool/call events on a brand-new session (not on disk yet) are served immediately.
+  assert.equal(typeof emitSessionEvent, "function");
+  emitSessionEvent({ id: "sess-live-new", header: { cwd: "/repo/root" } }, {
+    type: "working-directory/change",
+    seq: 2,
+    time: Date.now(),
+    data: { cwd: "/repo/root/pkg" },
+  });
+  emitSessionEvent({ id: "sess-live-new", header: { cwd: "/repo/root" } }, {
+    type: "tool/call",
+    seq: 3,
+    time: Date.now(),
+    data: {
+      callId: "live-call-42",
+      name: "bash",
+      arguments: JSON.stringify({ command: "rm -rf dist && npm run build", justification: "Rebuild cleanly" }),
+    },
+  });
+  const live = await request(service, { route: "/session/sess-live-new/tool-call", search: "?callId=live-call-42" });
+  assert.equal(live.status, 200);
+  assert.equal(live.json.found, true);
+  assert.equal(live.json.toolCall.name, "bash");
+  assert.equal(live.json.toolCall.command, "rm -rf dist && npm run build");
+  assert.equal(live.json.toolCall.cwd, "/repo/root/pkg");
+  assert.equal(live.json.toolCall.justification, "Rebuild cleanly");
+});

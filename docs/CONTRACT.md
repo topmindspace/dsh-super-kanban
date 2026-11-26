@@ -383,6 +383,33 @@ DSH 模型变更事件可使缓存失效。`?refresh=1` 可主动刷新，距上
 }
 ```
 
+### GET `/session/:sessionId/tool-call`
+
+查询单次工具调用的结构化只读详情，供看板内「知情审批」展示待执行命令、工作目录与参数摘要。
+必选 query：`?callId=<callId>`（长度 1–200 且不含控制字符）；`sessionId` 同样经 `decodeId` 校验，非法参数返回 `400 invalid-input`。
+
+Host 优先从 `ctx.on("session/event")` 维护的有界内存 LRU（最多 200 条实时 `tool/call` 与 `working-directory/change`）即时返回，未命中时回退解析该会话的 `session.v4.jsonl.zstd` 日志；均未找到时返回 `200` 与 `found: false`（不返回 404）。
+
+```jsonc
+{
+  "ok": true,
+  "found": true,
+  "toolCall": {
+    "callId": "call_...",
+    "name": "bash",
+    "command": "npm test && npm run validate",  // bash/shell/pwsh 取 command/script/code，terminal_send 取 text（≤4000 字）
+    "path": null,                              // 文件工具的目标路径（≤400 字）
+    "cwd": "/path/to/workspace",               // 工具调用时的工作目录（≤400 字）
+    "description": null,
+    "justification": "Run verification suite", // 模型给出的越权理由（≤600 字）
+    "sandboxPermissions": "workspace-write",
+    "argsPreview": null,                       // 无 command 时返回裁剪后的参数摘要（≤2000 字）
+    "seq": 14,
+    "time": 1793694532136
+  }
+}
+```
+
 ### GET `/export`
 
 `Content-Disposition: attachment; filename="super-kanban-YYYYMMDD.json"`，返回完整 state + sessions-cache 摘要（**不含 token / 凭证**）。
@@ -511,6 +538,10 @@ data: {"reason":"init"|"scan"|"task"|"settings","tasksChanged":2}
 ```js
 // 打开已有会话
 ctx.get("uiWorkspace").openSession(sessionId);
+// 实时状态与原生待交互（通过 slot 提供的 useSessionStatus 获取；仅在对象携带 answer 方法且仍可作答时提供看板内审批）
+// - 工具审批：pending.kind === "approval" → pending.answer("allowed-once" | "rejected")
+// - 方案审阅：pending.kind === "plan-review" → pending.answer({ answers: [{ id, selected: [approve.label] }] })（RPC 通道补调 dismiss）
+// - 应用授权：pending.kind === "question" 且 questions[0].intent.kind === "approval" → pending.answer(...)
 // 新建会话并预置提示词
 ctx.get("uiWorkspace").startSession(workspaceId, { prompt });
 // 把提示词放入输入框（不发送）

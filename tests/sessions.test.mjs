@@ -20,6 +20,7 @@ import {
   decompressSessionBuffer,
   extractArtifacts,
   extractSubtasks,
+  extractToolCallDetail,
   isoDay,
   latestTodos,
   parseJsonlEvents,
@@ -1238,4 +1239,70 @@ test("loadParsed: an owner quoting the marker inline on the opening line stays a
 
   assert.equal(parsed.delegatedTask, null);
   assert.equal(parsed.users.length, 1);
+});
+
+test("extractToolCallDetail extracts commands, targets, justifications and bounded previews safely", (t) => {
+  assert.equal(extractToolCallDetail(null), null);
+  assert.equal(extractToolCallDetail({ callId: "c0" }), null);
+
+  const bash = extractToolCallDetail({
+    callId: "call-bash",
+    name: "bash",
+    cwd: "/workspace/app",
+    seq: 14,
+    time: T0,
+    args: JSON.stringify({
+      command: "npm test && npm run validate",
+      justification: "Run the full verification suite",
+      sandbox_permissions: "workspace-write",
+    }),
+  });
+  assert.equal(bash.callId, "call-bash");
+  assert.equal(bash.name, "bash");
+  assert.equal(bash.command, "npm test && npm run validate");
+  assert.equal(bash.cwd, "/workspace/app");
+  assert.equal(bash.justification, "Run the full verification suite");
+  assert.equal(bash.sandboxPermissions, "workspace-write");
+  assert.equal(bash.argsPreview, null);
+  assert.equal(bash.seq, 14);
+
+  const term = extractToolCallDetail({
+    callId: "call-term",
+    name: "terminal_send",
+    args: JSON.stringify({ text: "git status\n" }),
+  });
+  assert.equal(term.command, "git status\n");
+
+  const write = extractToolCallDetail({
+    callId: "call-write",
+    name: "write",
+    args: JSON.stringify({ path: "src/index.mjs", content: "x".repeat(500) }),
+  });
+  assert.equal(write.command, null);
+  assert.equal(write.path, "src/index.mjs");
+  assert.ok(write.argsPreview.includes("src/index.mjs"));
+  assert.ok(write.argsPreview.length < 400, "large string fields are clipped in argsPreview");
+
+  const malformed = extractToolCallDetail({ callId: "call-bad", name: "custom_tool", args: "{unterminated" });
+  assert.equal(malformed.command, null);
+  assert.equal(malformed.argsPreview, "{unterminated");
+
+  // findToolCall resolves a call from parsed session logs and falls back to session.cwd.
+  const home = tempDir(t);
+  const { dir, file } = writeSessionAt(home, "demo", "sess-tool-detail", framesOf([
+    evt("session", 1, T0, { id: "sess-tool-detail", createdAt: T0, cwd: "/projects/alpha" }),
+    evt("working-directory/change", 2, T0 + 500, { cwd: "/projects/alpha/sub" }),
+    evt("tool/call", 3, T0 + 1000, {
+      name: "bash",
+      callId: "call-99",
+      arguments: JSON.stringify({ command: "ls -la", justification: "Inspect folder" }),
+    }),
+  ]));
+  const source = createSessionSource({ dshHome: home });
+  const stat = fs.statSync(file);
+  const parsed = source.loadParsed({ id: "sess-tool-detail", dir, file, title: null, sigKey: `${stat.size}:${stat.mtimeMs}` });
+  const found = source.findToolCall(parsed, "call-99");
+  assert.equal(found.command, "ls -la");
+  assert.equal(found.cwd, "/projects/alpha/sub");
+  assert.equal(source.findToolCall(parsed, "missing-call"), null);
 });
