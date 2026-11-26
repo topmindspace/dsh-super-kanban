@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-26
+
+### 修复与改进
+
+- 取消扫描或重启后，增量扫描会继续更新已读取但尚未应用的近期会话。补齐已有 AI 结论的会话在预算不足或失败冷却结束后的增量研判重试。
+- 会话目录读取不全时保留已有索引，异常投影、重复会话和过大的日志各自处理。无法读取的主状态文件及新版看板数据保持只读，避免启动或退出时覆盖。
+- 看板首次加载超时可重试，实时连接不可用时继续轮询。顶部显示取消进度、首次和全量扫描结论、空结果及失败状态，可按原范围重试。
+- 全局看板在 700px 以下切换为单列。安装和卸载脚本原子更新 profile 清单，避免写入中断造成损坏。
+- Incremental scans resume pending card updates after cancellation or restart and retry eligible AI work. Discovery retains the existing index when directories are unavailable, and unreadable or newer board files are protected from overwrite. The board now recovers from stalled state requests and shows scan outcomes and retry actions in place.
+
 ## [0.11.0] - 2026-11-26
 
 ### 新增
@@ -576,7 +586,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.8...v0.11.0
 [0.10.8]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.7...v0.10.8
 [0.10.7]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.6...v0.10.7

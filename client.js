@@ -1058,6 +1058,11 @@ window.__ModuleLoader__.load({
   "失败": "Failed",
   "中止": "Aborted",
   "等待首次扫描": "Waiting for first scan",
+  "看板连接超时，请重试": "The board connection timed out. Try again.",
+  "无法读取看板存储，请检查后重启 DSH": "The board data could not be loaded. Check the data and restart DSH.",
+  "会话目录暂不可读，请检查 DSH 数据目录后重试": "The session directory is unavailable. Check the DSH data directory and try again.",
+  " · 部分会话目录无法读取，请检查后重试": " · Some session directories could not be read. Check them and retry.",
+  "本次扫描没有找到可建卡的会话。": "This scan found no sessions to turn into tasks.",
   "state v{0} → v{1}（任务 {2} 个）": "state v{0} → v{1} (task {2} items)",
   "迁移失败，已备份并重建：{0}": "Migration failed; original file preserved and state rebuilt: {0}",
   "上次扫描未完成（进程重启）": "Last scan was interrupted by process restart",
@@ -1876,6 +1881,7 @@ window.__ModuleLoader__.load({
       try {
         payload = await response.json();
       } catch {
+        if (options.signal?.aborted) throw options.signal.reason;
         payload = null;
       }
       if (!response.ok || !payload || payload.ok === false) {
@@ -4058,9 +4064,14 @@ button.sk-task-row-main{cursor:pointer}
       const language = activeLanguage();
       if (sharedStateRequest?.generation !== stateGeneration || sharedStateRequest.language !== language) {
         const entry = { generation: stateGeneration, language };
-        entry.promise = apiRequest("/state").finally(() => {
-          if (sharedStateRequest === entry) sharedStateRequest = null;
-        });
+        entry.promise = apiRequest("/state", { signal: AbortSignal.timeout(12_000) })
+          .catch((error) => {
+            if (error?.name === "TimeoutError") throw new Error(t("看板连接超时，请重试"));
+            throw error;
+          })
+          .finally(() => {
+            if (sharedStateRequest === entry) sharedStateRequest = null;
+          });
         sharedStateRequest = entry;
       }
       return sharedStateRequest;
@@ -4088,10 +4099,17 @@ button.sk-task-row-main{cursor:pointer}
           if (document.hidden || eventTimer) return;
           eventTimer = setTimeout(() => { eventTimer = null; refresh(); }, 180);
         };
-        const eventsUrl = new URL(`${API}/events`, document.baseURI);
-        const stream = typeof EventSource === "function" ? new EventSource(eventsUrl) : null;
-        stream?.addEventListener("changed", invalidateBoardState);
-        stream?.addEventListener("scan", notify);
+        let stream = null;
+        try {
+          if (typeof EventSource === "function") {
+            stream = new EventSource(new URL(`${API}/events`, document.baseURI));
+            stream.addEventListener("changed", invalidateBoardState);
+            stream.addEventListener("scan", notify);
+          }
+        } catch {
+          stream?.close();
+          stream = null;
+        }
         document.addEventListener("visibilitychange", visible);
         boardRefresh = {
           notify,
@@ -8149,6 +8167,7 @@ button.sk-task-row-main{cursor:pointer}
     }
 
     function scanProgressInfo(scan, usage, settings) {
+      if (scan.cancelling) return { label: t("正在取消扫描…") };
       if (scan.phase === "discover") return { label: t("正在发现会话…") };
       if (scan.phase === "ai") {
         const value = scan.aiBudgetUsed || 0;
@@ -8217,11 +8236,12 @@ button.sk-task-row-main{cursor:pointer}
           h("h3", null, t("扫描与存储")),
           data.scan?.state !== "running" ? h("p", null, data.scan?.message || t("尚未扫描"),
             maintenance.parseFailures ? t(" · {0} 个会话读取失败", [maintenance.parseFailures]) : "") : null,
-          h("p", null, data.storage?.writable === false ? t("存储暂不可写") : t("存储可用"),
+          h("p", null, data.storage?.requiresRestart ? t("无法读取看板存储，请检查后重启 DSH")
+            : data.storage?.writable === false ? t("存储暂不可写") : t("存储可用"),
             data.storage?.savedAt ? t(" · 最近保存 {0}", [relTimeValue(data.storage.savedAt)]) : ""),
           h("div", { className: "sk-batchbar" },
             h("button", { className: "sk-btn", type: "button", onClick: () => startScan("full"), disabled: data.scan?.state === "running" || busy }, t("扫描全部历史")),
-            data.storage?.writable === false ? h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => run(() => command("storage.retry"), t("看板已保存")) }, t("重试保存")) : null,
+            data.storage?.writable === false && !data.storage?.requiresRestart ? h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => run(() => command("storage.retry"), t("看板已保存")) }, t("重试保存")) : null,
             h("button", { className: "sk-btn", type: "button", disabled: busy, onClick: () => run(downloadExport, t("已导出看板备份")) }, t("导出备份"))),
           h("div", { className: "sk-batchbar" },
             h("label", { className: "sk-inline-actions" }, t("重置并重扫范围"),
@@ -8320,7 +8340,7 @@ button.sk-task-row-main{cursor:pointer}
       }, []);
 
       const tier = surface === "side" ? (rootWidth >= 980 ? "wide" : rootWidth >= 620 ? "medium" : "narrow")
-        : rootWidth > 0 && rootWidth < 620 ? "narrow" : "wide";
+        : rootWidth > 0 && rootWidth < 700 ? "narrow" : "wide";
       const isNarrow = tier === "narrow";
       const compactHeader = isNarrow || (rootWidth > 0 && rootWidth < 850);
       const pageClass = cx("sk-page", surface === "side" && "is-side", "sk-tier-" + tier, compactHeader && "sk-compact-header");
@@ -8661,7 +8681,7 @@ button.sk-task-row-main{cursor:pointer}
       const scanRunning = scan.state === "running";
       // 运行中 AI 进度：Host 已把 aiBudgetMode 解析成 scan.aiBudget；旧 Host 无该字段时只显示已用次数。
       const scanProgress = scanRunning ? scanProgressInfo(scan, data?.usage, settings) : null;
-      const scanHeading = scan.first ? t("首次扫描") : scan.mode === "full" ? t("扫描全部历史") : t("扫描会话");
+      const scanHeading = scan.mode === "full" ? t("扫描全部历史") : scan.first ? t("首次扫描") : t("扫描会话");
       // 完成播报补「剩余 N 个下次继续」：scan.aiPending 含失败待重试（Host 可选字段）。
       const scanPending = Number(scan.aiPending) > 0 ? Math.round(Number(scan.aiPending)) : 0;
       // 读屏播报扫描状态（可见区已有文字，这里不重复显示）。
@@ -8674,18 +8694,19 @@ button.sk-task-row-main{cursor:pointer}
             : "";
 
       // 扫描从 running 结束时给一次结论 toast（轮询里状态会先 running 后 done/error）。
-      const prevScanState = React.useRef(null);
+      const prevScan = React.useRef(null);
       React.useEffect(() => {
-        const previous = prevScanState.current;
-        prevScanState.current = scan.state;
-        if (previous !== "running") return;
+        if (!data) return;
+        const previous = prevScan.current;
+        prevScan.current = { finishedAt: scan.finishedAt };
+        if (!previous || previous.finishedAt === scan.finishedAt) return;
         if (scan.state === "done") {
           pushToast(scan.cancelled ? t("扫描已取消（已完成部分保留）")
             : t("扫描完成：新增 {0} · 更新 {1}", [scan.newTasks || 0, scan.updatedTasks || 0]), "info");
         } else if (scan.state === "error") {
           pushToast(t("扫描失败：{0}", [scan.error || scan.message || t("未知错误")]), "error");
         }
-      }, [scan.state]);
+      }, [Boolean(data), scan.state, scan.finishedAt]);
 
       const startScan = async (mode) => {
         setScanBusy(true);
@@ -8838,7 +8859,7 @@ button.sk-task-row-main{cursor:pointer}
       // Host 的 scan.message 已是完整结论（含 AI 调用 / 跳过 / 合并等信息），客户端不再拼接。
       const scanOutcomeText =
         scan.state === "done" ? String(scan.message || t("扫描完成：{0}/{1} 个会话", [scan.processed || 0, scan.total || 0])) : "";
-      const scanErrorText = scan.state === "error" ? String(scan.message || scan.error || t("未知错误")) : "";
+      const scanErrorText = scan.state === "error" ? String(scan.error || scan.message || t("未知错误")) : "";
       const scanTitleText =
         scan.state === "done" && Number(scan.aiCalls) > 0 && !/tokens/.test(scanOutcomeText)
           ? `${scanOutcomeText} · ${fmtTokens(scan.tokens)} tokens`
@@ -8870,7 +8891,9 @@ button.sk-task-row-main{cursor:pointer}
       ];
 
       const scanFailed = scan.state === "error";
-      const scanLabel = scanFailed ? t("重试扫描") : settings.aiEnabled === false ? t("扫描（仅规则）") : t("扫描会话");
+      const scanInterrupted = scan.state === "idle" && Boolean(scan.startedAt);
+      const retryScan = scanFailed || scanInterrupted || scan.cancelled || scan.discoveryIncomplete;
+      const scanLabel = retryScan ? t("重试扫描") : settings.aiEnabled === false ? t("扫描（仅规则）") : t("扫描会话");
       const scanTooltip = scanFailed ? t("上次扫描失败：{0} · 点击重试", [scanErrorText])
         : [settings.aiEnabled === false ? scanLabel : t("AI 扫描"), scanLastAt ? t("上次扫描 {0}", [relTime(scanLastAt)]) : "", scanTitleText].filter(Boolean).join(" · ");
       const scanButton = h(
@@ -8880,11 +8903,11 @@ button.sk-task-row-main{cursor:pointer}
           className: cx("sk-iconbtn-v3", "sk-scan-button", scanFailed && "is-failed"),
           title: scanTooltip,
           "aria-label": scanLabel,
-          onClick: () => startScan(scanFailed && scan.mode === "full" ? "full" : "incremental"),
+          onClick: () => startScan(retryScan && scan.mode === "full" ? "full" : "incremental"),
           disabled: scanBusy,
         },
         h(Icon, { name: scanFailed ? "alert" : "refresh", size: 15 }),
-        scanFailed ? h("span", null, t("重试")) : null,
+        retryScan ? h("span", null, t("重试")) : null,
       );
       const actionIcon = (name, title, onClick, extraClass) =>
         h(
@@ -8954,15 +8977,15 @@ button.sk-task-row-main{cursor:pointer}
           h("span", null, scanProgress.label),
           h("progress", { className: "sk-scan-progress", "aria-label": scanProgress.label,
             max: scanProgress.total || 1, value: scanProgress.total ? scanProgress.value : undefined }),
-          h("button", { className: "sk-btn", type: "button", disabled: scanBusy, onClick: cancelScan }, t("取消扫描")))
-          : scan.state === "done" && (scan.first || scan.mode === "full") && scan.newTasks > 0 && mode !== "list"
-            ? h("div", { className: "sk-board-notice" },
-              h("span", null, scan.cancelled ? t("取消前已新增 {0} 项任务", [scan.newTasks]) : t("{0}完成，新增 {1} 项任务", [scanHeading, scan.newTasks])),
-              h("button", { className: "sk-btn", type: "button", onClick: () => {
+          h("button", { className: "sk-btn", type: "button", disabled: scanBusy || scan.cancelling, onClick: cancelScan }, t("取消扫描")))
+          : mode !== "maintenance" && (retryScan || (scan.state === "done" && (scan.first || scan.mode === "full")))
+            ? h("div", { className: "sk-board-notice", role: scanFailed ? "alert" : undefined },
+              h("span", null, scan.message || scanAnnounce),
+              scan.state === "done" && scan.newTasks > 0 && mode !== "list" ? h("button", { className: "sk-btn", type: "button", onClick: () => {
                 setCurrentOnly(false);
                 setFilters({ ...EMPTY_FILTERS, activity: "all" });
                 setMode("list");
-              } }, t("在列表中整理"))) : null,
+              } }, t("在列表中整理")) : null) : null,
         error
           ? h(
               "div",
@@ -9109,7 +9132,8 @@ button.sk-task-row-main{cursor:pointer}
                 h("button", { type: "button", className: "sk-btn primary", onClick: () => setApprovalKey(liveApprovals.actionable[0].key) }, t("立即审批"))))
           : null,
         data.storage?.writable === false
-          ? h("div", { className: "sk-board-notice", role: "alert" }, t("看板存储暂不可写"),
+          ? h("div", { className: "sk-board-notice", role: "alert" }, data.storage.requiresRestart
+            ? t("无法读取看板存储，请检查后重启 DSH") : t("看板存储暂不可写"),
               h("button", { type: "button", className: "sk-btn", onClick: () => setMode("maintenance") }, t("查看维护")))
           : null,
         selectedProject?.archived && mode !== "projects"
@@ -9161,7 +9185,7 @@ button.sk-task-row-main{cursor:pointer}
                 h(
                   "div",
                   { className: "sk-empty-v3" },
-                  t("看板还是空的，扫描会话后会自动建卡。"),
+                  scan.state === "done" && !retryScan ? t("本次扫描没有找到可建卡的会话。") : t("看板还是空的，扫描会话后会自动建卡。"),
                   h("button", { type: "button", className: "sk-text", disabled: scanBusy, onClick: () => startScan("incremental") }, t("扫描近期会话")),
                 ),
               )

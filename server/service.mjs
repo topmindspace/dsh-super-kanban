@@ -214,7 +214,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   const sseClients = new Set();
   let lastScanBroadcast = 0;
   let scanBroadcastTimer = null;
-  let storageFailed = false;
+  let storageFailed = loaded.stateWriteBlocked;
   let scanDigestBytes = []; // digest byte sizes of the current scan (usage.lastScan.digestBytesAvg)
   let scanRetiredMaintenanceCards = 0;
 
@@ -407,6 +407,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
    */
   function acquireAiTask() {
     if (stopped) throw Object.assign(new Error(t("服务已停止")), { code: "stopped" });
+    if (loaded.stateWriteBlocked) throw Object.assign(new Error(t("无法读取看板存储，请检查后重启 DSH")), { code: "storage-unavailable" });
     if (scanPromise) throw conflict(t("扫描进行中，请稍后再试"));
     if (aiBusy) throw conflict(t("其他 AI 任务进行中，请稍后再试"));
     aiBusy = true;
@@ -647,6 +648,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   /** Synchronous commit boundary: publish changes only after the atomic write. */
   function commitState(change, reason = "task") {
+    if (loaded.stateWriteBlocked) throw Object.assign(new Error(t("无法读取看板存储，请检查后重启 DSH")), { code: "storage-unavailable" });
     const previous = state;
     state = structuredClone(previous);
     try {
@@ -836,7 +838,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         task.sessions.every(({ id }) => isCasualSession(cache.sessions[id]?.meta)) ? { ...task, casualConversation: true } : task),
       projects: state.projects,
       writeOverlaps: fileWriteOverlaps(),
-      storage: { writable: !storageFailed, savedAt: state.savedAt },
+      storage: { writable: !storageFailed, savedAt: state.savedAt, requiresRestart: loaded.stateWriteBlocked },
       maintenance: {
         recovery: state.recovery.map((entry) => ({ id: entry.task.id, title: textProjection.text(entry.task.title), at: entry.at, kind: entry.kind })),
         ignoredSessions: state.ignoredSessions.map((id) => ({ id, title: metaForSessionId(id)?.title || id })),
@@ -847,7 +849,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       workspaces: boardWorkspaces(),
       scan: {
         ...scan,
-        message: scan.state === "idle" ? t("等待首次扫描")
+        message: scan.state === "idle" && !scan.startedAt ? t("等待首次扫描")
           : hasCurrentScanText ? scanMessages.localized[currentLanguage()] : textProjection.text(scan.message),
       },
       settings: state.settings,
@@ -1184,9 +1186,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   }
 
   function persistExplicitAiUsage(result) {
+    if (stopped) return;
     if (!readAnalyzerBudget().calls) return;
     if (result.ok) recordUsage({ calls: 1, tokens: result.usage?.totalTokens || 0 });
-    if (!stopped && persistState()) emitChanged("settings");
+    if (persistState()) emitChanged("settings");
   }
 
   function applyAiMeta(metaId, meta, { digestBytes = 0 } = {}) {
@@ -1900,6 +1903,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   function scanNow(mode = "incremental") {
     if (stopped) return { ok: false, error: "stopped", message: t("服务已停止") };
+    if (loaded.stateWriteBlocked) return { ok: false, error: "storage-unavailable", message: t("无法读取看板存储，请检查后重启 DSH") };
     // The analyzer instance (budget/transport) is shared with explicit AI
     // commands, so a scan must never overlap task.analyze/task.polishPrompt.
     if (aiBusy) return { ok: false, error: "busy", message: t("AI 任务进行中，请稍后再试") };
@@ -1922,7 +1926,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       state: "running",
       phase: "discover",
       mode: scanMode,
-      first: !state.settings.lastScanAt || (state.scan.first && (state.scan.state === "error" || state.scan.cancelled)),
+      first: !state.settings.lastScanAt || (state.scan.first && (state.scan.state !== "done" || state.scan.cancelled)),
       startedAt: startedAt.toISOString(),
     };
     setScanMessage((t) => t("正在发现会话…"));
@@ -1942,7 +1946,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         // throw here would leave every future scan permanently "busy" and emit
         // an unhandled rejection into the host process.
         try {
-          finalizeScan(failure, startedAt);
+          if (!stopped) finalizeScan(failure, startedAt);
         } catch (error) {
           logWarn(`[super-kanban] scan finalize failed: ${String(error?.message || error)}`);
         } finally {
@@ -1959,6 +1963,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const finishedAt = new Date();
     state.scan.state = failure ? "error" : "done";
     state.scan.phase = null;
+    state.scan.cancelling = false;
     state.scan.cancelled = scanCancel;
     state.scan.finishedAt = finishedAt.toISOString();
     state.scan.error = failure ? String(failure?.message || failure) : null;
@@ -1997,6 +2002,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   async function runScanBody(mode) {
     const discovery = source.discover();
+    state.scan.discoveryIncomplete = discovery.inaccessible;
+    if (!discovery.complete && discovery.sessions.length === 0 &&
+        (!discovery.missingRoot || Object.keys(cache.sessions).length || sessionsById.size)) {
+      throw new Error(t("会话目录暂不可读，请检查 DSH 数据目录后重试"));
+    }
     parentToChildren = indexSessionChildren(discovery.childToParent || []);
     const discoverySessions = discovery.sessions;
     state.scan.phase = "read";
@@ -2018,6 +2028,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const childSummaries = new Map();
     let lowValueSkipped = 0;
     let aiBudgetExhausted = false;
+    const hasAnalyzer = analyzerHasService();
     scanDigestBytes = [];
     /** @type {Array<{meta:object, digest:string, rules:object, context:object, needsAi:boolean}>} */
     const analysisJobs = [];
@@ -2036,7 +2047,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       }
       try {
         const cached = cache.sessions[discovered.id];
-        const changed = !cached || cached.sigKey !== discovered.sigKey;
+        const changed = !cached || cached.sigKey !== discovered.sigKey || cached.meta.file !== discovered.file;
         let meta = hydrationSafe(discovered);
         let parsed = null;
         const activityAt = Math.max(Number(discovered.lastActivityAt) || 0, Number(meta?.lastActivityAt) || 0);
@@ -2059,15 +2070,17 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         }
         const preEligible = meta ? isEligibleForAutoTask(meta, cutoff) : false;
         const bound = findTaskBySession(discovered.id);
-        // "aiMissing" re-parses a session that never got an AI verdict. Only
-        // worth the parse when an AI service exists; otherwise every incremental
-        // scan would re-parse every unchanged session forever.
         const supporting = isSupportingSession(bound, discovered.id);
-        const aiMissing = !supporting && state.settings.aiEnabled && analyzerHasService() && !cached?.meta?.aiAt;
+        const failureCooling = cached?.meta?.aiErrorAt &&
+          Date.now() - (Date.parse(cached.meta.aiErrorAt) || 0) < AI_ERROR_COOLDOWN_MS;
+        // Revisit unchanged logs whose latest turn still needs an AI verdict,
+        // including retries for a turn newer than an existing verdict.
+        const aiDueBeforeParse = preEligible && !supporting && state.settings.aiEnabled && hasAnalyzer &&
+          !failureCooling && !isLowValueForAi(meta) && shouldRunAi(meta, cached?.meta);
         const cachedCasual = isCasualSession(meta);
         const forceMainParse =
           preEligible && (mode === "full" || (!meta.parseError && (
-            (!cachedCasual && (!bound || aiMissing)) ||
+            (!cachedCasual && (!bound || aiDueBeforeParse || cached?.pendingApply)) ||
             typeof meta.hasOpenTurn !== "boolean" || source.sessionLiveness(meta) !== meta.isLive
           )));
         // Earlier caches lack the preferred title or the conversation verdict.
@@ -2077,7 +2090,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         // for that reason). A later file change still retries via `changed`.
         const metadataStale =
           Boolean(cached?.meta) && (cached.meta.titleRev !== 2 || typeof cached.meta.casualConversation !== "boolean" || cached.meta.delegatedRev !== 1) && !cached.meta.parseError;
-        if (changed || cached?.unparsed || forceMainParse || metadataStale) {
+        if (changed || cached?.unparsed || forceMainParse || metadataStale || (mode === "full" && meta?.parseError)) {
           try {
             const result = parseDiscovered(discovered);
             parsed = result.parsed;
@@ -2112,6 +2125,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           continue;
         }
         if (parsed && eligible) {
+          // Persist this marker with the parse signature until the card has
+          // actually consumed the result. A cancel/restart can happen in between.
+          cache.sessions[meta.id].pendingApply = true;
           parsed.evidence = source.collectEvidence(parsed);
           const workspaceTitle = meta.workspaceTitle;
           const rules = analyzeSessionRules(parsed, {
@@ -2127,8 +2143,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           if (lowValue) lowValueSkipped += 1;
           // A session whose last analysis failed cools down before it burns
           // another budget unit (upstream outages must not drain the daily budget).
-          const failureCooling =
-            cachedMeta?.aiErrorAt && Date.now() - (Date.parse(cachedMeta.aiErrorAt) || 0) < AI_ERROR_COOLDOWN_MS;
           const aiDue = !supporting && state.settings.aiEnabled && !lowValue && !failureCooling && shouldRunAi(meta, cachedMeta);
           let digest = "";
           let digestBytes = 0;
@@ -2302,8 +2316,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       try {
         const bound = findTaskBySession(meta.id);
         if (isSupportingSession(bound, meta.id)) {
-          const analysis = foldChildEvidence(rules.tasks[0], meta, childSummaries);
-          if (updateSupportingSession(bound, meta, context, analysis.evidence)) changes = { updated: [bound.id] };
+          const analysis = rules.tasks[0] && foldChildEvidence(rules.tasks[0], meta, childSummaries);
+          if (updateSupportingSession(bound, meta, context, analysis?.evidence || [])) changes = { updated: [bound.id] };
         } else if (job.llm) {
           if (job.llm.ignore) {
             applyAiMeta(meta.id, meta, { digestBytes: job.digestBytes });
@@ -2313,6 +2327,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
               addedReviews += 1;
               schedulePersist();
             }
+            delete cache.sessions[meta.id].pendingApply;
             continue;
           }
           const llmModel = job.llm.model || "";
@@ -2369,6 +2384,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           state.scan.newTasks += changes.created || 0;
           if (changes.updated.length || changes.created) schedulePersist();
         }
+        delete cache.sessions[meta.id].pendingApply;
       } catch (error) {
         logWarn(`[super-kanban] merge failed for ${meta.id}: ${String(error?.message || error)}`);
       }
@@ -2385,12 +2401,14 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     // sessions (they used to look like ordinary top-level sessions). Their
     // source session is re-classified above, so the card has no owner meaning
     // and must go; the sessions are suppressed so no later scan rebuilds them.
-    if (!scanCancel) {
+    if (!scanCancel && discovery.complete) {
       scanRetiredMaintenanceCards = retireMaintenanceCards(state.scan.processed, discoveredById) + retireStaleReviewAttention();
     }
     // Phase D: persist derived board data + the human-readable scan conclusion.
-    state.workspaces = computeWorkspaces(discovery.workspaces, [...sessionsById.values()]);
-    state.activity = computeActivity();
+    if (discovery.complete) pruneCache(discoverySessions);
+    const workspaces = new Map(discovery.complete ? [] : state.workspaces.map((workspace) => [workspace.id, workspace]));
+    for (const workspace of discovery.workspaces) workspaces.set(workspace.id, workspace);
+    state.workspaces = computeWorkspaces([...workspaces.values()], [...sessionsById.values()]);
     if (scanCancel) {
       setScanMessage((t) => t("扫描已取消"));
     } else {
@@ -2401,7 +2419,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         aiBudget: state.scan.aiBudget,
         aiPending: state.scan.aiPending,
         aiFailureCount,
-      }));
+      }) + (discovery.inaccessible ? t(" · 部分会话目录无法读取，请检查后重试") : ""));
       scanHasConclusion = true;
     }
     broadcastScan(true);
@@ -2411,7 +2429,6 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         cache.sessions[discovered.id] = { sigKey: discovered.sigKey, meta: hydrateMeta(discovered), unparsed: true };
       }
     }
-    pruneCache(discoverySessions);
   }
 
   function hydrationSafe(discovered) {
@@ -2897,12 +2914,11 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   function refreshSessionIndex() {
     try {
       const discovery = source.discover();
-      parentToChildren = new Map();
-      for (const [childId, parentId] of discovery.childToParent || []) {
-        if (!parentToChildren.has(parentId)) parentToChildren.set(parentId, []);
-        parentToChildren.get(parentId).push(childId);
+      if (discovery.complete) {
+        parentToChildren = indexSessionChildren(discovery.childToParent || []);
+        sessionsById = new Map();
       }
-      sessionsById = new Map(discovery.sessions.map((discovered) => [discovered.id, hydrateMeta(discovered)]));
+      for (const discovered of discovery.sessions) sessionsById.set(discovered.id, hydrateMeta(discovered));
       if (!state.workspaces.length) {
         state.workspaces = computeWorkspaces(discovery.workspaces, [...sessionsById.values()]);
       }
@@ -3843,6 +3859,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     "scan.cancel"() {
       if (!scanPromise) return { cancelling: false };
       scanCancel = true;
+      state.scan.cancelling = true;
       try {
         scanAbort?.abort();
       } catch {
@@ -4125,6 +4142,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
       }
       if ((route === "/command" || route === "/backup") && method === "POST") {
         const body = await readBody(req, route === "/backup" ? { limit: 16 * 1024 * 1024 } : undefined);
+        if (stopped) throw Object.assign(new Error(t("服务已停止")), { code: "stopped" });
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           json(res, 400, { ok: false, error: "invalid-input", message: "command body must be a JSON object" });
           return;
@@ -4238,7 +4256,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
   /* ------------------------------ lifecycle ------------------------ */
 
   function maybeAutoScan() {
-    if (stopped || scanPromise) return;
+    if (stopped || scanPromise || loaded.stateWriteBlocked) return;
     if (aiBusy) {
       // Never queue a scan behind an explicit AI command: retry on a later tick
       // and log at most once a minute so a long re-judge cannot spam the host log.
@@ -4340,7 +4358,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     // First scan should happen within ~8s of plugin boot.
     startupTimer = setTimeout(() => {
       startupTimer = null;
-      if (stopped || scanPromise || aiBusy) return;
+      if (stopped || scanPromise || aiBusy || loaded.stateWriteBlocked) return;
       if (state.settings.autoScan) startScan("incremental");
     }, 3000);
     if (typeof startupTimer.unref === "function") startupTimer.unref();
@@ -4378,10 +4396,9 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     for (const client of [...sseClients]) removeSseClient(client);
     recentToolCalls.clear();
     liveSessionCwd.clear();
-    // Flush any state the running scan already produced; the scan itself stops at
-    // its next checkpoint and its finalizer is exception-isolated.
-    persistState();
-    persistCache();
+    // Flush once before another host instance can open the store. The old
+    // scan's finalizer must never overwrite changes from the new instance.
+    if (persistState()) persistCache();
     logInfo("[super-kanban] host service stopped");
   }
 

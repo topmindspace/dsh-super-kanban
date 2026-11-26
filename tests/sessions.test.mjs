@@ -95,6 +95,44 @@ function writeWorkspaceRegistry(home, { workspaces, order = null }) {
   );
 }
 
+test("discovery isolates malformed metadata and resolves duplicate logs deterministically", (t) => {
+  const home = tempDir(t);
+  const events = framesOf([evt("session", 1, T0)]);
+  const older = writeSessionAt(home, "old-project", "sess-alpha", events);
+  const newer = writeSessionAt(home, "new-project", "sess-alpha", events);
+  const malformed = writeSessionAt(home, "new-project", "sess-malformed", events);
+  fs.utimesSync(older.file, new Date(T0), new Date(T0));
+  fs.utimesSync(newer.file, new Date(T0 + 1000), new Date(T0 + 1000));
+  writeProjcache(home, "sess-malformed", { record: { rows: { workingDirectory: { val: { invalid: true } } } } });
+  writeWorkspaceRegistry(home, { workspaces: [
+    { id: "first", title: { unexpected: true }, path: "/projects/first", sessionIds: ["sess-alpha"] },
+    { id: "second", title: "Second", path: "/projects/second", sessionIds: ["sess-malformed"] },
+  ] });
+  const invalid = writeSessionAt(home, "new-project", "sess-invalid", events);
+  fs.unlinkSync(invalid.file);
+  fs.mkdirSync(invalid.file);
+  const discovery = createSessionSource({ dshHome: home }).discover();
+  assert.equal(discovery.complete, true);
+  assert.equal(discovery.sessions.length, 2);
+  assert.equal(discovery.sessions.find((session) => session.id === "sess-alpha").file, newer.file);
+  assert.equal(discovery.sessions.find((session) => session.id === "sess-malformed").file, malformed.file);
+  assert.equal(discovery.sessions.find((session) => session.id === "sess-malformed").cwd, null);
+  assert.equal(discovery.workspaces.find((workspace) => workspace.id === "first").title, "first");
+  assert.equal(discovery.workspaces.find((workspace) => workspace.id === "first").sessionCount, 1);
+});
+
+test("an oversized session is rejected before loading while a neighboring log remains readable", (t) => {
+  const home = tempDir(t);
+  const events = framesOf([evt("session", 1, T0)]);
+  const oversized = writeSessionAt(home, "demo", "sess-large", events);
+  writeSessionAt(home, "demo", "sess-small", events);
+  fs.truncateSync(oversized.file, 64 * 1024 * 1024 + 1);
+  const source = createSessionSource({ dshHome: home });
+  const { sessions } = source.discover();
+  assert.throws(() => source.loadParsed(sessions.find((session) => session.id === "sess-large")), /session-log-too-large/);
+  assert.equal(source.loadParsed(sessions.find((session) => session.id === "sess-small")).eventCount, 1);
+});
+
 /** A realistic synthetic main-session event log (10 events, one completed turn). */
 function mainSessionEvents() {
   return [

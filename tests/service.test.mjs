@@ -262,6 +262,52 @@ async function waitForScan(service, { timeoutMs = 3000 } = {}) {
   }
 }
 
+test("an unreadable session root preserves the board and its index until a retry", async (t) => {
+  const { home, service } = await setup(t, { withSessions: true });
+  const root = path.join(home, "sessions");
+  const moved = `${root}.old`;
+  await command(service, "scan.start");
+  assert.equal((await waitForScan(service)).state, "done");
+  const before = (await request(service, {})).json;
+  const cached = readCacheFile(home).sessions;
+
+  fs.renameSync(root, moved);
+  fs.writeFileSync(root, "temporarily unavailable");
+  await command(service, "scan.start", { mode: "full" });
+  const failed = await waitForScan(service);
+  assert.equal(failed.state, "error");
+  assert.equal(failed.discoveryIncomplete, true);
+  assert.deepEqual(readCacheFile(home).sessions, cached);
+  const retained = (await request(service, {})).json;
+  assert.deepEqual(retained.tasks, before.tasks);
+  assert.deepEqual(retained.workspaces, before.workspaces);
+  assert.equal((await request(service, { route: "/sessions" })).json.total, 1);
+
+  fs.unlinkSync(root);
+  fs.renameSync(moved, root);
+  await command(service, "scan.start", { mode: "full" });
+  const completed = await waitForScan(service);
+  assert.equal(completed.state, "done");
+  assert.equal(completed.discoveryIncomplete, false);
+  assert.equal(completed.total, 1);
+});
+
+test("an interrupted first scan remains visible after restart and retries as a first scan", async (t) => {
+  const { service } = await setup(t, { prepare(home) {
+    const state = createEmptyState();
+    const startedAt = new Date(T0).toISOString();
+    state.settings.lastScanAt = startedAt;
+    state.scan = { ...state.scan, state: "running", phase: "ai", startedAt, first: true, cancelling: true };
+    writeFileDeep(path.join(home, "storages", "super-kanban", "state.json"), JSON.stringify(state));
+  } });
+  const before = (await request(service, {})).json.scan;
+  assert.equal(before.state, "idle");
+  assert.equal(before.cancelling, false);
+  assert.match(before.message, /上次扫描未完成/);
+  await command(service, "scan.start");
+  assert.equal((await waitForScan(service)).first, true);
+});
+
 /* ------------------------------------------------------------------ */
 /* Basic routes                                                        */
 /* ------------------------------------------------------------------ */

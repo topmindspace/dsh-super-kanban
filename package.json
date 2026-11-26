@@ -1,6 +1,6 @@
 {
   "name": "dsh-super-kanban",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "DSH AI 任务看板：从会话提取任务，跟踪进度和验收。 / AI task board for DSH: turn sessions into tasks, track progress, and review deliverables.",
   "type": "module",
   "main": "./index.mjs",

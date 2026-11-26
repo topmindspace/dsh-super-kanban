@@ -887,6 +887,46 @@ test("board snapshots reconcile a local model update even after a switch back el
   assert.deepEqual(updates, ["previous", "previous"]);
 });
 
+test("a state response that stalls shows a retryable timeout and frees the shared request", async () => {
+  const updates = [];
+  const controller = new AbortController();
+  let calls = 0;
+  const { plugin } = loadClient({}, { inspect: true, onState: (value) => updates.push(value),
+    browser: { AbortSignal: { timeout: () => controller.signal } },
+    fetch: async (_url, { signal }) => ++calls === 1 ? { ok: true, status: 200, json: () => new Promise((resolve, reject) => {
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }) } : Response.json({ ok: true, tasks: [] }),
+  });
+  const board = plugin.useBoardData();
+  const initial = board.reload(true);
+  await Promise.resolve();
+  controller.abort(new DOMException("timed out", "TimeoutError"));
+  assert.equal(await initial, null);
+  assert.ok(updates.includes("看板连接超时，请重试"));
+  assert.deepEqual((await board.reload(false)).tasks, []);
+  assert.equal(calls, 2);
+});
+
+test("a failed EventSource constructor leaves visibility refresh and polling available", () => {
+  const timers = new Map();
+  const listeners = new Map();
+  const { plugin } = loadClient({}, { inspect: true, browser: {
+    EventSource: class { constructor() { throw new Error("unavailable"); } },
+    document: { baseURI: "http://plugin.local/", hidden: false,
+      addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: (name) => listeners.delete(name) },
+    setTimeout(callback, delay) { const key = Symbol(); timers.set(key, { callback, delay }); return key; },
+    clearTimeout: (key) => timers.delete(key),
+  } });
+  let loads = 0;
+  const dispose = plugin.subscribeBoardRefresh(() => { loads += 1; });
+  assert.equal(timers.size, 1);
+  listeners.get("visibilitychange")();
+  assert.equal(loads, 1);
+  dispose();
+  assert.equal(timers.size + listeners.size, 0);
+});
+
 test("quick chat only supplies recent contiguous turns from the selected model", () => {
   const { plugin } = loadClient({}, { inspect: true });
   const route = { ok: true, provider: "demo", model: "selected" };

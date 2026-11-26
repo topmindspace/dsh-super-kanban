@@ -40,11 +40,11 @@ fi
 
 if [ -f "$PKG" ]; then
   python3 - "$PKG" <<'PY'
-import json, sys
+import json, os, stat, sys, tempfile
+from pathlib import Path
 
-path = sys.argv[1]
-with open(path, encoding="utf-8") as fh:
-    data = json.load(fh)
+path = Path(sys.argv[1]).resolve(strict=True)
+data = json.loads(path.read_text(encoding="utf-8"))
 
 # Targeted removal: keep every other dependency / bundle / profile setting, so
 # plugins installed after Super Kanban are never lost.
@@ -54,12 +54,14 @@ if isinstance(deps, dict):
 dsh = data.get("dsh")
 profile = dsh.get("profile") if isinstance(dsh, dict) else None
 bundles = profile.get("bundles") if isinstance(profile, dict) else None
-if isinstance(bundles, list) and "dsh-super-kanban" in bundles:
-    bundles.remove("dsh-super-kanban")
+if isinstance(bundles, list):
+    bundles[:] = [bundle for bundle in bundles if bundle != "dsh-super-kanban"]
 
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=2, ensure_ascii=False)
-    fh.write("\n")
+with tempfile.TemporaryDirectory(dir=path.parent) as temp:
+    staged = Path(temp) / "package.json"
+    staged.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    staged.chmod(stat.S_IMODE(path.stat().st_mode))
+    os.replace(staged, path)
 print("  profile : dependency + bundle selection removed")
 PY
 else

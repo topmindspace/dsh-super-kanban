@@ -34,6 +34,8 @@ const PROJCACHE_DIR = ["storages", "session_projcache", "sessions"];
  * because each parsed log retains its full event-derived structure in memory.
  */
 const PARSED_CACHE_LIMIT = 6;
+const MAX_COMPRESSED_SESSION_BYTES = 64 * 1024 * 1024;
+const MAX_DECODED_SESSION_BYTES = 128 * 1024 * 1024;
 /** Injected user-role events that are useful context but not human requests. */
 const ASYNC_SIGNAL_KINDS = new Set(["agent-message", "subagent-settled", "tool-jobs", "model-selection"]);
 
@@ -68,56 +70,56 @@ export function decompressSessionBuffer(buf) {
     if (buf instanceof Uint8Array) buf = Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
     else return "";
   }
-  const starts = [];
-  let cursor = 0;
-  while ((cursor = buf.indexOf(ZSTD_MAGIC, cursor)) !== -1) {
-    starts.push(cursor);
-    cursor += ZSTD_MAGIC.length;
-  }
-  if (starts.length === 0) {
+  if (buf.length > MAX_COMPRESSED_SESSION_BYTES) throw new Error("session-log-too-large");
+  const decompress = (input, remaining = MAX_DECODED_SESSION_BYTES) =>
+    zlib.zstdDecompressSync(input, { maxOutputLength: Math.max(1, remaining) });
+  let start = buf.indexOf(ZSTD_MAGIC);
+  if (start === -1) {
     // Future/uncompressed logs: a plain JSONL file starts with '{'.
     const head = buf.subarray(0, 32).toString("utf8").trimStart();
     if (head.startsWith("{")) return buf.toString("utf8");
-    return zlib.zstdDecompressSync(buf).toString("utf8");
+    return decompress(buf).toString("utf8");
   }
 
   const outputs = [];
+  let decodedBytes = 0;
   let lastError = null;
-  let i = 0;
-  while (i < starts.length) {
-    const start = starts[i];
+  const nextFrame = (offset) => buf.indexOf(ZSTD_MAGIC, offset + ZSTD_MAGIC.length);
+  while (start !== -1) {
     let out = null;
-    let next = i + 1;
-    let end = next < starts.length ? starts[next] : buf.length;
+    const firstBoundary = nextFrame(start);
+    let boundary = firstBoundary;
     // A magic sequence may also occur inside compressed payload: if a segment
     // fails, widen it across the next boundary and retry (bounded attempts).
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        out = zlib.zstdDecompressSync(buf.subarray(start, end));
+        out = decompress(buf.subarray(start, boundary === -1 ? buf.length : boundary), MAX_DECODED_SESSION_BYTES - decodedBytes);
         break;
       } catch (error) {
+        if (error?.code === "ERR_BUFFER_TOO_LARGE") throw new Error("session-log-too-large");
         lastError = error;
       }
-      if (next >= starts.length) break;
-      next += 1;
-      end = next < starts.length ? starts[next] : buf.length;
+      if (boundary === -1 || attempt === 3) break;
+      boundary = nextFrame(boundary);
     }
     if (out) {
+      decodedBytes += out.length;
+      if (decodedBytes > MAX_DECODED_SESSION_BYTES) throw new Error("session-log-too-large");
       outputs.push(out);
-      i = next;
+      start = boundary;
     } else {
-      i += 1;
+      start = firstBoundary;
     }
   }
   if (outputs.length === 0) {
     // Empty/corrupt file: fall back to the first-frame-only decoder.
     try {
-      return zlib.zstdDecompressSync(buf).toString("utf8");
+      return decompress(buf).toString("utf8");
     } catch {
       throw lastError || new Error("zstd-decompress-failed");
     }
   }
-  return Buffer.concat(outputs).toString("utf8");
+  return Buffer.concat(outputs, decodedBytes).toString("utf8");
 }
 
 /** Parse JSONL text into events; malformed lines are counted, not fatal. */
@@ -644,7 +646,7 @@ export function createSessionSource({ dshHome } = {}) {
         if (!entry || typeof entry.path !== "string" || !entry.path) continue;
         const workspace = {
           id,
-          title: entry.title || basenameOf(entry.path),
+          title: typeof entry.title === "string" && entry.title.trim() ? entry.title : basenameOf(entry.path),
           path: entry.path,
           sessionIds: Array.isArray(entry.sessionIds) ? entry.sessionIds : [],
           createdAt: Date.parse(entry.createdAt || "") || 0,
@@ -701,7 +703,8 @@ export function createSessionSource({ dshHome } = {}) {
       return {
         title: typeof rows.title?.val === "string" ? rows.title.val : null,
         createdAt: Number(record.identity?.createdAt) || 0,
-        cwd: typeof record.identity?.cwd === "string" ? record.identity.cwd : rows.workingDirectory?.val || null,
+        cwd: typeof record.identity?.cwd === "string" && record.identity.cwd ? record.identity.cwd
+          : typeof rows.workingDirectory?.val === "string" && rows.workingDirectory.val ? rows.workingDirectory.val : null,
         turns: Number(rows.sessionStats?.val?.turns) || 0,
         turnOutline: Array.isArray(rows.turnOutline?.val?.turns) ? rows.turnOutline.val.turns : [],
         blank: rows.sessionListMetadata?.val?.blank === true,
@@ -722,7 +725,8 @@ export function createSessionSource({ dshHome } = {}) {
   function discover() {
     const registry = readWorkspaceRegistry();
     const diagnostics = [...registry.diagnostics];
-    const discovered = [];
+    const discovered = new Map();
+    let inaccessible = false;
     let sessionDirs = [];
     try {
       sessionDirs = fs.readdirSync(sessionsRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory());
@@ -731,7 +735,8 @@ export function createSessionSource({ dshHome } = {}) {
         kind: "sessions-root",
         message: error?.code === "ENOENT" ? "sessions directory not found" : String(error?.message || error),
       });
-      return { workspaces: registry.workspaces.map((w) => ({ ...w })), sessions: [], diagnostics };
+      const missingRoot = error?.code === "ENOENT";
+      return { workspaces: registry.workspaces, sessions: [], diagnostics, complete: false, missingRoot, inaccessible: !missingRoot };
     }
 
     const projcache = new Map();
@@ -740,7 +745,8 @@ export function createSessionSource({ dshHome } = {}) {
       let names = [];
       try {
         names = fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
-      } catch {
+      } catch (error) {
+        if (error?.code !== "ENOENT") inaccessible = true;
         continue;
       }
       for (const entry of names) {
@@ -748,13 +754,18 @@ export function createSessionSource({ dshHome } = {}) {
         const file = path.join(sessionDir, SESSION_FILE_NAME);
         let stat;
         try {
-          stat = fs.statSync(file);
-        } catch {
+          stat = fs.lstatSync(file);
+        } catch (error) {
+          if (error?.code !== "ENOENT") inaccessible = true;
           continue; // dir without a log (e.g. lock-only) — not a session
         }
-        const cache = readProjcache(entry.name);
+        if (!stat.isFile()) continue;
+        const previous = discovered.get(entry.name);
+        if (previous && (previous.sig.mtimeMs > stat.mtimeMs ||
+            (previous.sig.mtimeMs === stat.mtimeMs && previous.file <= file))) continue;
+        const cache = projcache.has(entry.name) ? projcache.get(entry.name) : readProjcache(entry.name);
         projcache.set(entry.name, cache);
-        discovered.push({
+        discovered.set(entry.name, {
           id: entry.name,
           file,
           dir: sessionDir,
@@ -825,7 +836,7 @@ export function createSessionSource({ dshHome } = {}) {
     };
 
     /** @type {SessionMeta[]} */
-    const sessions = discovered.map((item) => {
+    const sessions = [...discovered.values()].map((item) => {
       const cache = item.projcache;
       const createdAt = cache?.createdAt || 0;
       const cwd = cache?.cwd || null;
@@ -865,20 +876,20 @@ export function createSessionSource({ dshHome } = {}) {
     const workspaces = [...registry.workspaces.map((workspace) => ({ ...workspace, synthetic: false }))];
     for (const candidate of synthetic.values()) workspaces.push({ ...candidate, synthetic: true });
 
-    const byWorkspace = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+    const byWorkspace = new Map(workspaces.map((workspace) => [workspace.id, new Set(workspace.sessionIds)]));
+    const mainCounts = new Map();
     for (const session of sessions) {
-      const workspace = session.workspaceId ? byWorkspace.get(session.workspaceId) : null;
-      if (!workspace) continue;
-      workspace.sessionIds = workspace.sessionIds || [];
-      if (!workspace.sessionIds.includes(session.id)) workspace.sessionIds.push(session.id);
+      byWorkspace.get(session.workspaceId)?.add(session.id);
+      if (session.workspaceId && session.origin === "main") {
+        mainCounts.set(session.workspaceId, (mainCounts.get(session.workspaceId) || 0) + 1);
+      }
     }
     for (const workspace of workspaces) {
-      workspace.sessionCount = sessions.filter(
-        (session) => session.workspaceId === workspace.id && session.origin === "main",
-      ).length;
+      workspace.sessionIds = [...byWorkspace.get(workspace.id)];
+      workspace.sessionCount = mainCounts.get(workspace.id) || 0;
     }
     workspaces.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0) || a.title.localeCompare(b.title, "zh"));
-    return { workspaces, sessions, diagnostics, childToParent };
+    return { workspaces, sessions, diagnostics, childToParent, complete: !inaccessible, inaccessible };
   }
 
   /** Current `${size}:${mtimeMs}` signature of a session file ("" when unreadable). */
@@ -964,6 +975,9 @@ export function createSessionSource({ dshHome } = {}) {
     const diagnostics = [];
     let text = "";
     try {
+      const stat = fs.lstatSync(meta.file);
+      if (!stat.isFile()) throw new Error("invalid-session-file");
+      if (stat.size > MAX_COMPRESSED_SESSION_BYTES) throw new Error("session-log-too-large");
       text = decompressSessionBuffer(fs.readFileSync(meta.file));
     } catch (error) {
       throw new Error(`decompress-failed: ${String(error?.message || error)}`);

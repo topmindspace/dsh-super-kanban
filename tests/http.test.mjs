@@ -101,6 +101,15 @@ test("readBody: stream errors reject as invalid-input", async () => {
   await assert.rejects(pending, (error) => error.code === "invalid-input" && /socket reset/.test(error.message));
 });
 
+test("readBody: an incomplete request rejects immediately on close", async () => {
+  const req = mockReq();
+  const pending = readBody(req, { timeoutMs: 0 });
+  req.emit("data", Buffer.from("{"));
+  req.destroy();
+  await assert.rejects(pending, { code: "invalid-input", message: "request-closed" });
+  await assert.rejects(readBody(req, { timeoutMs: 0 }), /request-closed/);
+});
+
 test("classifyError maps the plugin error taxonomy to HTTP statuses", () => {
   assert.equal(classifyError(badRequest("x")), 400);
   assert.equal(classifyError(notFound("x")), 404);

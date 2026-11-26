@@ -98,7 +98,7 @@ git checkout v0.11.0        # 安装特定版本：固定到目标 Release；跟
 脚本会：
 
 1. 把本目录链接到 `~/.dsh/profiles/desktop/node_modules/dsh-super-kanban`；
-2. 在 profile 的 `package.json` 中登记依赖（`link:/path/to/checkout`）与 bundle；
+2. 原子更新 profile 的 `package.json`，登记依赖（`link:/path/to/checkout`）与 bundle；
 3. 首次安装时把原 profile 清单快照到 `super-kanban-profile-backup.json`；该文件**仅作快照保留**，卸载时不会用它整体覆盖 profile（见第 5 节）。
 
 源码安装链接的是工作区本身：`client.js` 改动刷新窗口即生效；host 半（`index.mjs` / `server/**`）改动需重载 profile

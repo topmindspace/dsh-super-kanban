@@ -48,35 +48,54 @@ if [ "$YES" -ne 1 ]; then
   case "$answer" in y|Y|yes|YES) ;; *) echo "aborted"; exit 0 ;; esac
 fi
 
-# 1. Link the package where the profile resolves bundle dependencies.
-mkdir -p "$PROFILE_DIR/node_modules"
-ln -sfn "$PLUGIN_DIR" "$MODULE"
+python3 - "$PKG" "$BACKUP" "$PLUGIN_DIR" "$MODULE" <<'PY'
+import json, os, stat, sys, tempfile
+from pathlib import Path
 
-# 2. Record the dependency + select the bundle in the profile manifest.
-python3 - "$PKG" "$BACKUP" "$PLUGIN_DIR" <<'PY'
-import json, os, sys
-
-pkg_path, backup_path, plugin_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(pkg_path, encoding="utf-8") as fh:
-    data = json.load(fh)
-
-# First install only: keep a pre-install snapshot for manual recovery. It is not
-# overwritten on re-install and never auto-restored by uninstall.sh.
-if not os.path.exists(backup_path):
-    with open(backup_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
-    print(f"  backup  : {backup_path} (first-install snapshot; not auto-restored)")
+pkg_path, backup_path, plugin_dir, module = map(Path, sys.argv[1:])
+pkg_path = pkg_path.resolve(strict=True)
+original = pkg_path.read_text(encoding="utf-8")
+data = json.loads(original)
 
 data.setdefault("dependencies", {})["dsh-super-kanban"] = f"link:{plugin_dir}"
 profile = data.setdefault("dsh", {}).setdefault("profile", {})
 bundles = profile.setdefault("bundles", [])
+if not isinstance(bundles, list):
+    raise ValueError("profile bundles must be a list")
 if "dsh-super-kanban" not in bundles:
     bundles.append("dsh-super-kanban")
 
-with open(pkg_path, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=2, ensure_ascii=False)
-    fh.write("\n")
+with tempfile.TemporaryDirectory(dir=pkg_path.parent) as temp:
+    staged_manifest = Path(temp) / "package.json"
+    staged_manifest.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    staged_manifest.chmod(stat.S_IMODE(pkg_path.stat().st_mode))
+    module.parent.mkdir(exist_ok=True)
+    previous_link = os.readlink(module) if module.is_symlink() else None
+    if previous_link is None and module.exists():
+        raise FileExistsError("a package directory already exists")
+    with tempfile.TemporaryDirectory(dir=backup_path.parent) as profile_temp:
+        staged_backup = Path(profile_temp) / "backup.json"
+        staged_backup.write_text(original, encoding="utf-8")
+        staged_backup.chmod(0o600)
+        try:
+            os.link(staged_backup, backup_path)
+            print(f"  backup  : {backup_path} (first-install snapshot; not auto-restored)")
+        except FileExistsError:
+            pass
+
+    with tempfile.TemporaryDirectory(dir=module.parent) as module_temp:
+        staged_link = Path(module_temp) / "plugin"
+        staged_link.symlink_to(plugin_dir, target_is_directory=True)
+        os.replace(staged_link, module)
+        try:
+            os.replace(staged_manifest, pkg_path)
+        except OSError:
+            if previous_link is None:
+                module.unlink()
+            else:
+                staged_link.symlink_to(previous_link, target_is_directory=True)
+                os.replace(staged_link, module)
+            raise
 
 print("  profile : dependency + bundle selection written")
 PY

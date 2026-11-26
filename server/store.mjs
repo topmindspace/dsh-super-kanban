@@ -212,7 +212,9 @@ export function emptyScanState() {
     conversationSkipped: 0,
     applyTotal: 0,
     applyProcessed: 0,
+    cancelling: false,
     cancelled: false,
+    discoveryIncomplete: false,
     newTasks: 0,
     updatedTasks: 0,
     aiCalls: 0,
@@ -614,10 +616,11 @@ export function createStore({ dshHome, logger } = {}) {
   const stateFile = path.join(dir, "state.json");
   const cacheFile = path.join(dir, "sessions-cache.json");
   const log = logger || console;
+  let stateWriteBlocked = false;
 
   function ensureDirs() {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.mkdirSync(backupsDir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(backupsDir, { recursive: true, mode: 0o700 });
   }
 
   function backupCorrupt(file, error, label = "corrupt") {
@@ -638,8 +641,10 @@ export function createStore({ dshHome, logger } = {}) {
           /* ignore */
         }
       }
+      return true;
     } catch (backupError) {
       log.warn?.(`[super-kanban] could not back up ${file}: ${String(backupError?.message || backupError)}`);
+      return false;
     }
   }
 
@@ -647,23 +652,29 @@ export function createStore({ dshHome, logger } = {}) {
     try {
       ensureDirs();
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      fs.copyFileSync(file, path.join(backupsDir, `${path.basename(file)}.${stamp}.${label}`));
+      const target = path.join(backupsDir, `${path.basename(file)}.${stamp}.${label}`);
+      fs.copyFileSync(file, target);
+      fs.chmodSync(target, 0o600);
       return true;
     } catch {
       return false;
     }
   }
 
-  function readJson(file, fallback, { allowBackup = true } = {}) {
+  function readJson(file, fallback) {
+    let text;
     try {
-      const text = fs.readFileSync(file, "utf8");
+      text = fs.readFileSync(file, "utf8");
+    } catch (error) {
+      if (error?.code === "ENOENT") return { data: fallback, error: null };
+      return { data: fallback, error, blocked: true };
+    }
+    try {
       const data = JSON.parse(text);
-      if (!data || typeof data !== "object") throw new Error("not-an-object");
+      if (!isRecord(data)) throw new Error("not-an-object");
       return { data, error: null };
     } catch (error) {
-      if (error?.code === "ENOENT") return { data: fallback, error: null, missing: true };
-      if (allowBackup) backupCorrupt(file, error);
-      return { data: fallback, error };
+      return { data: fallback, error, blocked: !backupCorrupt(file, error) };
     }
   }
 
@@ -672,7 +683,7 @@ export function createStore({ dshHome, logger } = {}) {
     ensureDirs();
     const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
     try {
-      fs.writeFileSync(tmp, JSON.stringify(data), "utf8");
+      fs.writeFileSync(tmp, JSON.stringify(data), { encoding: "utf8", mode: 0o600 });
       fs.renameSync(tmp, file);
     } catch (error) {
       try {
@@ -687,6 +698,7 @@ export function createStore({ dshHome, logger } = {}) {
   function load() {
     const diagnostics = [];
     const stateRead = readJson(stateFile, null);
+    stateWriteBlocked = stateRead.blocked === true;
     if (stateRead.error) diagnostics.push({ kind: "state", message: String(stateRead.error.message || stateRead.error) });
     const cacheRead = readJson(cacheFile, null);
     if (cacheRead.error) diagnostics.push({ kind: "cache", message: String(cacheRead.error.message || cacheRead.error) });
@@ -698,15 +710,16 @@ export function createStore({ dshHome, logger } = {}) {
         if (version >= STORE_VERSION) {
           state = createEmptyState();
           copyFields(state, stateRead.data);
+          if (version > STORE_VERSION) stateWriteBlocked = true;
         } else {
           // Keep a pristine copy of the v1 document before rewriting it.
-          copyToBackup(stateFile, "v1");
+          if (!copyToBackup(stateFile, "v1")) stateWriteBlocked = true;
           state = migrateStateV1V2(stateRead.data);
           diagnostics.push({ kind: "migrate", message: t("state v{0} → v{1}（任务 {2} 个）", [version, STORE_VERSION, state.tasks.length]) });
         }
       } catch (error) {
         // Migration must never brick the board: back up and rebuild.
-        backupCorrupt(stateFile, error, "migrate-failed");
+        stateWriteBlocked = version > STORE_VERSION || !backupCorrupt(stateFile, error, "migrate-failed");
         state = createEmptyState();
         diagnostics.push({ kind: "migrate", message: t("迁移失败，已备份并重建：{0}", [String(error?.message || error)]) });
       }
@@ -714,6 +727,7 @@ export function createStore({ dshHome, logger } = {}) {
       if (state.scan && state.scan.state === "running") {
         state.scan.state = "idle";
         state.scan.phase = null;
+        state.scan.cancelling = false;
         state.scan.finishedAt = new Date().toISOString();
         state.scan.message = t("上次扫描未完成（进程重启）");
       }
@@ -748,7 +762,7 @@ export function createStore({ dshHome, logger } = {}) {
         diagnostics.push({ kind: "migrate", message: t("sessions-cache v{0} → v{1}（AI 门控标记已重置，首扫将重新研判）", [cacheVersion, STORE_VERSION]) });
       }
     }
-    return { state, cache, diagnostics };
+    return { state, cache, diagnostics, stateWriteBlocked };
   }
 
   function copyFields(target, raw, projects = normalizeProjects(raw.projects)) {
@@ -790,6 +804,7 @@ export function createStore({ dshHome, logger } = {}) {
   }
 
   function saveState(state) {
+    if (stateWriteBlocked) throw Object.assign(new Error("state-file-unavailable"), { code: "storage-unavailable" });
     state.version = STORE_VERSION;
     state.savedAt = new Date(Math.max(Date.now(), (Date.parse(state.savedAt) || 0) + 1)).toISOString();
     state.usage = rolloverUsage(state.usage);

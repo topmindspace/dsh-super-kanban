@@ -61,6 +61,27 @@ test("load: corrupt sessions-cache.json is backed up and replaced with an empty 
   assert.ok(backupNames(home).some((name) => name.endsWith(".corrupt")));
 });
 
+test("load preserves unreadable state and refuses to overwrite it", (t) => {
+  const home = tempHome(t);
+  const store = createStore({ dshHome: home });
+  fs.mkdirSync(store.stateFile, { recursive: true });
+  const loaded = store.load();
+  assert.equal(loaded.stateWriteBlocked, true);
+  assert.throws(() => store.saveState(loaded.state), { code: "storage-unavailable" });
+  assert.ok(fs.statSync(store.stateFile).isDirectory());
+});
+
+test("a board from a newer storage version remains readable without destructive downgrade", (t) => {
+  const home = tempHome(t);
+  const store = createStore({ dshHome: home });
+  const original = { ...createEmptyState(), version: STORE_VERSION + 1, futureField: { value: true } };
+  writeJsonFile(store.stateFile, original);
+  const loaded = store.load();
+  assert.equal(loaded.stateWriteBlocked, true);
+  assert.throws(() => store.saveState(loaded.state), { code: "storage-unavailable" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(store.stateFile, "utf8")), original);
+});
+
 test("load: v1 state migrates to v2, keeps a v1 backup and derives v2 fields", (t) => {
   const home = tempHome(t);
   const v1 = {

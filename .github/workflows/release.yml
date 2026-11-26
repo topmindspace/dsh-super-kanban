@@ -49,6 +49,9 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Check browser i18n catalog sync
+        run: npm run check:i18n
+
       - name: Repository validation
         run: npm run validate
 

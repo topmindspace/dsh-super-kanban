@@ -47,6 +47,7 @@ export function readBody(req, { limit = DEFAULT_BODY_LIMIT, timeoutMs = DEFAULT_
         clearTimeout(timer);
         timer = null;
       }
+      chunks.length = 0;
       fn(value);
     };
     const fail = (error) => settle(reject)(error);
@@ -89,6 +90,8 @@ export function readBody(req, { limit = DEFAULT_BODY_LIMIT, timeoutMs = DEFAULT_
       }
     });
     req.on("error", (error) => fail(Object.assign(error || new Error("request-error"), { code: "invalid-input" })));
+    req.once("close", () => fail(badRequest("request-closed")));
+    if (req.destroyed) fail(badRequest("request-closed"));
   });
 }
 

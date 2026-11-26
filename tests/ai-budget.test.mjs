@@ -244,6 +244,35 @@ function ignoreScript() {
   ];
 }
 
+test("a cancelled scan resumes unapplied updates even when the log is unchanged and AI is disabled", async (t) => {
+  const held = deferredScript(okScript());
+  const host = makeHost({ scripts: [okScript(), held.script] });
+  const { home, service } = await setup(t, { sessionIds: ["sess-a-refresh", "sess-z-hold"], host,
+    state: { settings: { dailyAiCallLimit: 10 }, usage: { date: todayKey(), calls: 9, tokens: 0 } } });
+  const first = await runScan(service);
+  const existing = first.tasks.find((task) => task.primarySessionId === "sess-a-refresh");
+  assert.equal(existing?.ai?.engine, "llm");
+  const log = path.join(home, "sessions", "escaped-demo", "sess-a-refresh", SESSION_FILE_NAME);
+  fs.appendFileSync(log, zlib.zstdCompressSync(Buffer.from(JSON.stringify(event(
+    "session/title", 11, T0 + 10000, { title: "取消后仍应应用的新标题", source: { kind: "provider" } },
+  )) + "\n")));
+  await command(service, "settings.update", { patch: { dailyAiCallLimit: 12 } });
+  assert.equal((await command(service, "scan.start", { mode: "incremental" })).status, 200);
+  try {
+    await waitFor(() => host.streams.length === 2);
+    assert.equal((await command(service, "scan.cancel")).json.data.cancelling, true);
+    const cancelled = await waitForScan(service);
+    assert.equal(cancelled.scan.cancelled, true);
+    assert.equal(cancelled.tasks.find((task) => task.id === existing.id).sessions[0].title, existing.sessions[0].title);
+  } finally {
+    held.resolve();
+  }
+  await command(service, "settings.update", { patch: { aiEnabled: false } });
+  assert.equal((await command(service, "scan.start", { mode: "incremental" })).status, 200);
+  const recovered = await waitForScan(service);
+  assert.equal(recovered.tasks.find((task) => task.id === existing.id).sessions[0].title, "取消后仍应应用的新标题");
+});
+
 function errorScript(code) {
   return [
     { type: "usage", usage: { inputTokens: 10, outputTokens: 0, totalTokens: 10 } },
@@ -629,6 +658,31 @@ test("a failed analysis cools down and then retries after the cooldown", async (
   assert.equal(thirdHost.streams.length, 1);
   const cards = aiTasks(retried, "llm");
   assert.equal(cards.length, 1);
+});
+
+test("an unchanged log with an older AI verdict is retried after a failed newer verdict", async (t) => {
+  const host = makeHost({ scripts: [okScript()] });
+  const { home, service } = await setup(t, { sessionIds: ["sess-01"], host });
+  await runScan(service);
+  service.stop();
+
+  const { sessions } = readCacheFile(home);
+  const meta = sessions["sess-01"].meta;
+  meta.aiLastSeq = 1;
+  meta.aiAt = new Date(Date.now() - 900_000).toISOString();
+  meta.aiErrorAt = new Date(Date.now() - 600_000).toISOString();
+  meta.llmError = "llm-failed";
+  writeCacheFile(home, sessions);
+
+  const reopened = createKanbanService({ ctx: host.ctx });
+  t.after(() => reopened.stop());
+  host.queue.push(okScript());
+  assert.equal((await command(reopened, "scan.start", { mode: "incremental" })).status, 200);
+  const result = await waitForScan(reopened);
+  assert.equal(result.scan.aiDue, 1);
+  assert.equal(result.scan.aiCalls, 1);
+  assert.equal(result.tasks.length, 1);
+  assert.equal(readCacheFile(home).sessions["sess-01"].meta.llmError, null);
 });
 
 /* ------------------------------------------------------------------ */

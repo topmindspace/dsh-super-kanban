@@ -169,6 +169,7 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   "ok": true,
   "generatedAt": "ISO",
   "tasks": [ /* 含归档任务，客户端按 archived 过滤 */ ],
+  "storage": { "writable": true, "savedAt": "ISO|null", "requiresRestart": false },
   "stats": {
     "total": 10, "archived": 0,
     "byStatus": { "backlog": 2, "in_progress": 3, "blocked": 1, "done": 4 },
@@ -189,7 +190,9 @@ type Priority = "P0" | "P1" | "P2" | "P3";
     "phase": "discover|read|ai|apply|null",
     "mode": "incremental|full|null",
     "first": false,                         // 首次扫描或其重试
+    "cancelling": false,                    // 已收到取消请求，等待扫描退出
     "cancelled": false,                     // 结束时是否由用户取消
+    "discoveryIncomplete": false,           // 至少一部分会话目录不可读
     "startedAt": "ISO|null", "finishedAt": "ISO|null",
     "processed": 10, "total": 10,
     "historicalSkipped": 0,                  // 增量扫描未读取的历史会话数
@@ -249,6 +252,8 @@ type Priority = "P0" | "P1" | "P2" | "P3";
   看板根据 `phase` 显示发现会话、读取会话、AI 研判或更新看板的进度。维护视图展示最终结论。
 
 `updatedTasks` 统计本轮研判或会话刷新实际更新的任务数。同一任务由多个会话更新时只计一次。规则重扫结果未变化时保留任务版本。
+
+取消或服务重启后，增量扫描可继续应用已读取但尚未写入卡片的近期会话，即使日志签名未变。历史范围继续使用全量扫描。目录读取不全时保留已有索引，已成功发现的会话仍可更新；无法发现任何会话且目录不可用时报告扫描失败。
 
 `scan.message` 的口径（Host 保证）：
 

@@ -90,6 +90,7 @@ discover()                     workspace.json + sessions 目录 + projcache
    ▼
 loadParsed()                   zstd 多帧解压 → JSONL → 事件模型
    │                           （成功结果按签名 + meta 指纹进入有界 LRU，最多 6 条）
+   │                           （单会话文件 ≤64 MiB，解压输出 ≤128 MiB）
    │                           （用户请求 / AI 回复 / 工具调用 / todo /
    │                             交付物 / 错误 / 轮次结束原因 / 标题）
    ▼
@@ -107,7 +108,8 @@ LLM 门控（可选）                 meaningful-change 门控 + 单次/每日�
    │
    ▼
 store.saveState()              原子写（tmp + rename）；经 SSE 通知刷新，并保留轮询恢复
-   │                           （浏览器端用轻量 stateSignature 判断是否需要重渲染）
+   │                           （缓存标记尚未应用的会话，供取消或重启后的扫描恢复）
+   │                           （浏览器共享 /state 请求，12 秒超时后可重试）
 ```
 
 关键行为：
