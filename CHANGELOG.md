@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 修复与改进
+
+- 修复深色主题下看板内原生下拉展开后选项列表被画成白底、选项文字难以辨认的问题：选项浮层由 UA 以白色底座绘制，再叠加 select 自身的 `background-color`，此前 `transparent` 与半透明的悬停底色会把整个列表冲成白色。现在下拉展开时改用不透明的 `--sk-surface` 底色，筛选栏的工作区下拉与「任务时间范围」等普通下拉一并覆盖（0.10.8 的 `option` 规则只覆盖选项本身，滚动条与分组区域仍是白色）。
+- Fixed white option lists when a native `<select>` opens in dark themes: the UA paints the list on a white surface and composites the select's own translucent background over it, so the list now uses an opaque `--sk-surface` while `:open`.
+
 ## [0.10.8] - 2026-11-24
 
 ### 修复与改进

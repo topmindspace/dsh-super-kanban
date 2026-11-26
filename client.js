@@ -2995,6 +2995,12 @@ body[data-ds-dark-theme] .sk-btn-primary-v3:hover{background:var(--dsw-alias-but
 /* 抽屉 AI 研判块：provider / model 过长时省略，避免挤掉置信度与时间 */
 .sk-ai-review-model{max-width:min(280px,48vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* Native <select> option lists are painted by the UA on a white surface, with the
+   select's own background-color composited over it, so the transparent and
+   translucent backgrounds above turn the list white in dark themes. Use an opaque
+   token surface while the list is open. */
+.sk-select:open{background-color:var(--sk-surface)}
+.sk-ws-picker .sk-ws-select:open{background-color:var(--sk-surface)}
 `;
 
     const WORKFLOW_CSS = `
