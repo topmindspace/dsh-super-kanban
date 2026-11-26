@@ -7,18 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-26
+
 ### 新增
 
 - **看板内知情审批**：支持在全局看板、右侧看板、任务详情抽屉、悬浮看板与悬浮入口直接处理 DSH 会话的待审批请求，不再必须「点卡片 → 打开会话 → 在会话中审批」：
-  - **工具权限审批**：通过 DSH 原生 `useSessionStatus` 交互载体直接「允许一次」或「拒绝」，并新增 Host 侧只读接口 `GET /super-kanban/api/session/:id/tool-call`（内存实时 `tool/call` LRU 缓存优先、日志回退）展示待执行的完整命令、工作目录与越权理由，杜绝盲批；
-  - **方案审阅与应用授权**：支持在看板内展开完整 Markdown 方案正文后一键「批准方案」，并支持 CUA 应用/系统授权（允许、拒绝、显式「始终允许」及风险提示）；普通提问展示问题摘要并保留一键「打开会话」；
-  - **全形态触达与连续审核**：全局/右侧看板顶部实时提醒条（覆盖尚未扫描建卡的新活跃会话）、任务卡底部「审批」按钮与右键菜单「处理待审批请求」、悬浮入口上方后台待审批提醒卡，支持轻量审批队列弹窗按 `1 / N` 连续审核（`Esc` 仅关闭弹窗不误拒），并在旧版 DSH 上自动平滑降级为「打开会话」。
-- **In-board informed approvals**: handle DSH pending approvals, plan reviews, and application authorization prompts directly across the full-page board, sidebar, task drawer, floating board, and floating launcher without switching away to the session. A new read-only host endpoint `GET /super-kanban/api/session/:id/tool-call` (backed by a bounded live `tool/call` cache with session-log fallback) surfaces the exact command, working directory, and justification before deciding, while preserving one-click session navigation and graceful fallback on older DSH versions.
+  - **工具权限审批**：通过 DSH 原生 `useSessionStatus` 交互载体直接「允许一次」或「拒绝」，并新增 Host 侧只读接口 `GET /super-kanban/api/session/:id/tool-call`（内存实时 `tool/call` LRU 缓存优先、日志回退）展示待执行的完整命令、工作目录、工具说明、越权理由与高权限级别警示（如 `require_escalated` / `danger-full-access`），支持命令复制与详情未命中时「重试读取」，杜绝盲批；
+  - **方案审阅与应用授权**：支持在看板内展开完整 Markdown 方案正文后一键「批准方案」，并支持 CUA 应用/系统授权（保持最小权限「允许」为主按钮，「始终允许」为次级选项并附风险提示）；普通提问展示问题摘要并保留一键「打开会话」；
+  - **全形态触达与连续审核**：全局/右侧看板顶部实时提醒条、「待处理」视图与悬浮面板未建卡活跃会话置顶区块、任务卡底部「审批」按钮与右键菜单「处理待审批请求」、悬浮入口各样式（角标/胶囊/状态条）及上方后台待审批提醒卡，支持轻量审批队列弹窗按 `1 / N` 连续审核（`Esc` 仅关闭弹窗不误拒，提交后即时锁定防重并自动归还焦点），并在旧版 DSH 上自动平滑降级为「打开会话」。
+- **In-board informed approvals**: handle DSH pending approvals, plan reviews, and application authorization prompts directly across the full-page board, sidebar, task drawer, floating board, and floating launcher without switching away to the session. A new read-only owner-authenticated host endpoint `GET /super-kanban/api/session/:id/tool-call` (backed by a bounded pre-clipped live `tool/call` cache with session-log fallback) surfaces the exact command, working directory, justification, and elevated sandbox warnings with retry support before deciding, keeping least-privilege Allow as the primary action and graceful fallback on older DSH versions.
 
 ### 修复与改进
 
 - 修复深色主题下看板内原生下拉展开后选项列表被画成白底、选项文字难以辨认的问题：选项浮层由 UA 以白色底座绘制，再叠加 select 自身的 `background-color`，此前 `transparent` 与半透明的悬停底色会把整个列表冲成白色。现在下拉展开时改用不透明的 `--sk-surface` 底色，并将 `.sk-select` 与筛选栏下拉的悬停背景改为基于 `--sk-surface` 混合的不透明等价色，兼顾不支持 `:open` 伪类的旧版浏览器内核，并补齐自动化 CSS 回归测试。
-- Fixed white option lists when a native `<select>` opens in dark themes: the UA paints the list on a white surface and composites the select's own translucent background over it, so the list now uses an opaque `--sk-surface` while `:open` and opaque hover surface blends for older engines without `:open`, with CSS regression coverage added.
+- 全面代码与体验加固：实时 `tool/call` 缓存改为写入前即刻裁剪并兼容 `workdir`/`working_directory` 与不可序列化对象兜底，避免大文件写入参数占用内存；修复悬浮面板展开时底部状态提示重复渲染问题；增强弹窗关闭焦点兜底归还、浅深色警示文本对比度与窄右侧栏审批条排版；修正多处英文翻译空格与按钮文案歧义。
+- Fixed white option lists when a native `<select>` opens in dark themes (opaque `--sk-surface` on `:open` plus opaque hover surface blends for older engines without `:open`), clipped live `tool/call` payloads before caching, fixed duplicate floating status banners when the floating panel is open, improved dialog focus restoration and warning contrast, and polished English copy and tests.
 
 感谢 [@cinvymoe](https://github.com/cinvymoe) 深入定位并修复深色主题原生下拉白底问题（[#20](https://github.com/topmindspace/dsh-super-kanban/issues/20)、[#21](https://github.com/topmindspace/dsh-super-kanban/pull/21)），以及 [@FantDing](https://github.com/FantDing) 提出看板审批功能建议（[#22](https://github.com/topmindspace/dsh-super-kanban/issues/22)）。
 
@@ -573,7 +576,8 @@ workspace into a maintainable task board.
   v0.5.0 model requests go through the DSH native model service — see the
   current SECURITY.md.)*
 
-[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.8...HEAD
+[Unreleased]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.8...v0.11.0
 [0.10.8]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.7...v0.10.8
 [0.10.7]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.6...v0.10.7
 [0.10.6]: https://github.com/topmindspace/dsh-super-kanban/compare/v0.10.5...v0.10.6

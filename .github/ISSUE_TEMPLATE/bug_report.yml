@@ -33,7 +33,7 @@ body:
     id: plugin-version
     attributes:
       label: Super Kanban version
-      placeholder: e.g. 0.10.8 (see package.json or the plugin market entry)
+      placeholder: e.g. 0.11.0 (see package.json or the plugin market entry)
     validations:
       required: true
 
@@ -58,6 +58,8 @@ body:
       options:
         - Task board / cards
         - Task drawer
+        - In-board approvals
+        - Floating board / review strip
         - Session analysis (AI or rules)
         - Session hand-off ("continue this task")
         - Subtasks / artifacts / goals

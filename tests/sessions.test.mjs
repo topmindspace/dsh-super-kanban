@@ -1287,6 +1287,24 @@ test("extractToolCallDetail extracts commands, targets, justifications and bound
   assert.equal(malformed.command, null);
   assert.equal(malformed.argsPreview, "{unterminated");
 
+  // Object-shaped args and workdir/working_directory fallbacks are normalized cleanly.
+  const objectArgs = extractToolCallDetail({
+    callId: "call-obj",
+    name: "bash",
+    args: { command: "pwd", workdir: "/workspace/sub", description: "Check current folder", sandbox_permissions: "require_escalated" },
+  });
+  assert.equal(objectArgs.command, "pwd");
+  assert.equal(objectArgs.cwd, "/workspace/sub");
+  assert.equal(objectArgs.description, "Check current folder");
+  assert.equal(objectArgs.sandboxPermissions, "require_escalated");
+
+  const workingDir = extractToolCallDetail({
+    callId: "call-wd",
+    name: "bash",
+    args: { script: "echo hi", working_directory: "/workspace/alt" },
+  });
+  assert.equal(workingDir.cwd, "/workspace/alt");
+
   // findToolCall resolves a call from parsed session logs and falls back to session.cwd.
   const home = tempDir(t);
   const { dir, file } = writeSessionAt(home, "demo", "sess-tool-detail", framesOf([

@@ -3088,4 +3088,40 @@ test("GET /session/:id/tool-call resolves live session/event calls and falls bac
   assert.equal(live.json.toolCall.command, "rm -rf dist && npm run build");
   assert.equal(live.json.toolCall.cwd, "/repo/root/pkg");
   assert.equal(live.json.toolCall.justification, "Rebuild cleanly");
+
+  // Oversized write arguments are clipped immediately on ingest, and hostile/circular objects never throw.
+  emitSessionEvent({ id: "sess-live-new", header: { cwd: "/repo/root" } }, {
+    type: "tool/call",
+    seq: 4,
+    time: Date.now(),
+    data: {
+      callId: "live-call-big",
+      name: "write",
+      arguments: { path: "big.txt", content: "A".repeat(20_000) },
+    },
+  });
+  const big = await request(service, { route: "/session/sess-live-new/tool-call", search: "?callId=live-call-big" });
+  assert.equal(big.status, 200);
+  assert.equal(big.json.found, true);
+  assert.equal(big.json.toolCall.path, "big.txt");
+  assert.ok(big.json.toolCall.argsPreview.length <= 2000, "cached live tool call must stay bounded");
+
+  const circular = [];
+  circular.push(circular);
+  assert.doesNotThrow(() => {
+    emitSessionEvent({ id: "sess-live-new" }, {
+      type: "tool/call",
+      seq: 5,
+      time: Date.now(),
+      data: { callId: "live-call-circular", name: "custom_tool", arguments: circular },
+    });
+  });
+  const circ = await request(service, { route: "/session/sess-live-new/tool-call", search: "?callId=live-call-circular" });
+  assert.equal(circ.status, 200);
+  assert.equal(circ.json.found, true);
+  assert.equal(circ.json.toolCall.name, "custom_tool");
+
+  // Degenerate /session/tool-call must not collide with /session/:id/tool-call.
+  const degenerate = await request(service, { route: "/session/tool-call", search: "?callId=c1" });
+  assert.equal(degenerate.status, 404);
 });

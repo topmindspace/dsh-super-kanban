@@ -196,6 +196,24 @@ test("a throwing admission probe fails closed with 403 and no rejected promise",
   assert.match(json.message, /持有者/);
 });
 
+test("GET /session/:id/tool-call enforces owner admission end-to-end through index.mjs", async (t) => {
+  const { captured } = setup(t, () => ({ rejection: 401 }));
+  const allowed = await callHandler(captured.registered, {
+    url: `${API_PREFIX}/session/sess-demo/tool-call?callId=call-1`,
+    peer: { principal: { kind: "owner" }, signal: new AbortController().signal },
+  });
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.json.ok, true);
+  assert.equal(allowed.json.found, false);
+
+  const denied = await callHandler(captured.registered, {
+    url: `${API_PREFIX}/session/sess-demo/tool-call?callId=call-1`,
+    peer: { principal: { kind: "guest" } },
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.json.error, "unauthorized");
+});
+
 test("malformed admission shapes fail closed", async (t) => {
   for (const admission of [null, "owner", [], { peer: {} }, { peer: { principal: {} } }]) {
     const { captured } = setup(t, () => admission);

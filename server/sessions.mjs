@@ -298,7 +298,11 @@ export function extractToolCallDetail(call) {
         preserveText(args.script, TOOL_CALL_COMMAND_LIMIT) ||
         preserveText(args.code, TOOL_CALL_COMMAND_LIMIT);
   const targetPath = nonEmpty(args.path || args.file_path || args.filePath || args.file, 400);
-  const cwd = nonEmpty(call.cwd, 400) || nonEmpty(args.cwd, 400);
+  const cwd =
+    nonEmpty(call.cwd, 400) ||
+    nonEmpty(args.cwd, 400) ||
+    nonEmpty(args.workdir, 400) ||
+    nonEmpty(args.working_directory, 400);
   const description = nonEmpty(args.description, TOOL_CALL_TEXT_LIMIT);
   const justification = nonEmpty(args.justification, TOOL_CALL_TEXT_LIMIT);
   const sandboxPermissions = nonEmpty(args.sandbox_permissions, 80);

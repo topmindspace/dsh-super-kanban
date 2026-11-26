@@ -4,11 +4,11 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.10.x | ✅ (current release line) |
-| 0.9.x | 🟡 (previous line, best-effort fixes) |
-| < 0.9 | ❌ (end of support) |
+| 0.11.x | ✅ (current release line) |
+| 0.10.x | 🟡 (previous line, best-effort fixes) |
+| < 0.10 | ❌ (end of support) |
 
-Security fixes land on `0.10.x`. The `0.9.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
+Security fixes land on `0.11.x`. The `0.10.x` line receives best-effort fixes. See [INSTALL.md](./docs/INSTALL.md).
 
 ## Reporting a vulnerability
 
@@ -97,6 +97,11 @@ does not collect telemetry.
   peers are rejected with `403`. The model-catalogue endpoint (`GET
   /super-kanban/api/ai/models`) is read-only and exposes model ids/names only —
   never credentials.
+- The tool-call preview endpoint (`GET /super-kanban/api/session/:id/tool-call`)
+  is also read-only and owner-only. It serves bounded, clipped command and
+  working-directory details from an in-memory LRU cache (with read-only session
+  log fallback) strictly to power informed in-board approvals; it never persists
+  tool payloads to board storage or exposes credentials.
 - The browser half renders task content as text (no HTML injection from session
   data).
 

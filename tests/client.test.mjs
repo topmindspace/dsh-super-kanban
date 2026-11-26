@@ -1652,4 +1652,95 @@ test("board banner, task card action bar, attention card, and floating strip wir
   assert.equal(firstFetch.toolCall.command, "ls -la");
   assert.equal(secondFetch.toolCall.command, "ls -la");
   assert.equal(fetchCount, 1, "cached tool-call hits do not re-fetch");
+  const freshFetch = await fetchPlugin.fetchToolCallDetail("sess-1", "call-99", { fresh: true });
+  assert.equal(freshFetch.found, true);
+  assert.equal(fetchCount, 2, "fresh reload bypasses cache");
+});
+
+test("approval audit hardening: CUA least-privilege primary button, elevated sandbox warning, unlinked attention, and floating launcher consistency", async () => {
+  // 1. CUA approval keeps least-privilege Allow as primary and Always allow as secondary.
+  const { plugin } = loadClient({}, { inspect: true });
+  const cuaItem = plugin.describePendingInteraction({
+    key: "question:cua-sec",
+    kind: "question",
+    questions: [{
+      id: "cua-app-access",
+      question: "Allow Mail?",
+      intent: { kind: "approval", approve: "once", reject: "deny", always: "always", subject: { name: "Mail" } },
+    }],
+    snapshot: () => ({ channel: "waterfall", closed: false }),
+    async answer() {},
+  }, "sess-cua", "邮件会话");
+  const cuaCard = plugin.PendingInteractionCard({ item: cuaItem, openSession: () => {}, pushToast: () => {} });
+  const allowBtn = [...elements(cuaCard)].find((node) => node.type === "button" && renderedText(node) === "once");
+  const alwaysBtn = [...elements(cuaCard)].find((node) => node.type === "button" && renderedText(node) === "始终允许");
+  assert.ok(allowBtn && alwaysBtn);
+  assert.match(allowBtn.props.className, /\bprimary\b/, "least-privilege Allow must be the primary button");
+  assert.doesNotMatch(alwaysBtn.props.className, /\bprimary\b/, "Always allow must not be styled as primary");
+
+  // 2. Elevated sandboxPermissions triggers a visible risk warning and badge when toolCall detail is cached.
+  const { plugin: permPlugin } = loadClient({}, {
+    inspect: true,
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        found: true,
+        toolCall: {
+          callId: "call-elev",
+          name: "bash",
+          command: "chmod -R 777 /tmp/demo",
+          description: "Modify directory permissions",
+          sandboxPermissions: "danger-full-access",
+        },
+      }),
+    }),
+  });
+  await permPlugin.fetchToolCallDetail("sess-elev", "call-elev");
+  const elevItem = permPlugin.describePendingInteraction({
+    key: "approval:elev",
+    kind: "approval",
+    toolName: "bash",
+    callId: "call-elev",
+    reason: "Escalated command",
+    answerable: true,
+    async answer() {},
+  }, "sess-elev", "提权会话");
+  const elevCard = permPlugin.PendingInteractionCard({ item: elevItem, openSession: () => {}, pushToast: () => {} });
+  const elevText = renderedText(elevCard);
+  assert.match(elevText, /danger-full-access/);
+  assert.match(elevText, /高权限执行：danger-full-access/);
+  assert.match(elevText, /Modify directory permissions/);
+
+  // 3. TaskCollection in attention mode renders unlinked active pending sessions instead of an empty state.
+  const unlinkedAttention = plugin.TaskCollection({
+    mode: "attention",
+    tasks: [],
+    signals: new Map(),
+    unlinkedPending: [elevItem],
+    taskActions: { handlers: () => ({}), button: () => null },
+    openSession: () => {},
+    pushToast: () => {},
+  });
+  assert.match(renderedText(unlinkedAttention), /活跃会话待处理（1）/);
+  assert.doesNotMatch(renderedText(unlinkedAttention), /当前没有待处理事项/);
+
+  // 4. Floating launcher pill/bar styles surface live pending approval counts and expanded panel does not duplicate floatingStatus.
+  const liveStatuses = new Map([["sess-bg", {
+    pendingInteraction: { key: "approval:bg", kind: "approval", toolName: "bash", reason: "Run tests", answerable: true, async answer() {} },
+  }]]);
+  for (const floatStyle of ["pill", "bar"]) {
+    const { registrations } = loadClient({}, {
+      snapshot: { tasks: [] },
+      prefs: { floatEnabled: true, floatStyle, floatHideEmpty: false },
+    });
+    const entry = registrations.get("shell.overlay").render({ useSessionStatus: (select) => select(liveStatuses) }).children[0];
+    const withStatus = entry.type(entry.props);
+    const panel = withStatus.type(withStatus.props);
+    const view = panel.type(panel.props);
+    const trigger = [...elements(view)].find((node) => node.type === "button" && node.props?.className?.includes("sk-float-trigger"));
+    assert.ok(trigger, `launcher renders in ${floatStyle} style`);
+    assert.match(renderedText(trigger), /待审批权限\s*1/);
+  }
+  assert.match(source, /const floatingStatus = message && !showPanel && !reviews\.length/);
 });

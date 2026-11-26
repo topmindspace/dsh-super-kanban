@@ -183,7 +183,10 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
 
   function rememberLiveToolCall(sessionId, call) {
     if (!sessionId || !call?.callId || !call?.name) return;
-    rememberBounded(recentToolCalls, `${sessionId}\0${call.callId}`, call, RECENT_TOOL_CALLS_LIMIT);
+    // Normalize & clip before caching so large file writes never bloat memory.
+    const detail = extractToolCallDetail(call);
+    if (!detail) return;
+    rememberBounded(recentToolCalls, `${sessionId}\0${detail.callId || call.callId}`, detail, RECENT_TOOL_CALLS_LIMIT);
   }
 
   let scanPromise = null;
@@ -4010,11 +4013,8 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
     const live = recentToolCalls.get(liveKey);
     if (live) {
       rememberBounded(recentToolCalls, liveKey, live, RECENT_TOOL_CALLS_LIMIT);
-      const detail = extractToolCallDetail({
-        ...live,
-        cwd: live.cwd || liveSessionCwd.get(sessionId) || metaForSessionId(sessionId)?.cwd || null,
-      });
-      if (detail) return { ok: true, found: true, toolCall: detail };
+      const cwd = live.cwd || liveSessionCwd.get(sessionId) || metaForSessionId(sessionId)?.cwd || null;
+      return { ok: true, found: true, toolCall: cwd && cwd !== live.cwd ? { ...live, cwd } : live };
     }
     const meta = findSessionMeta(sessionId);
     if (!meta || typeof meta.file !== "string" || !meta.file) {
@@ -4179,7 +4179,7 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
         handleSse(req, res);
         return;
       }
-      if (route.startsWith("/session/") && route.endsWith("/tool-call") && method === "GET") {
+      if (route.startsWith("/session/") && route.endsWith("/tool-call") && route.length > "/session/".length + "/tool-call".length && method === "GET") {
         const encodedSessionId = route.slice("/session/".length, -"/tool-call".length);
         const sessionId = decodeId(encodedSessionId);
         const callId = String(url?.searchParams?.get("callId") || "").trim();
@@ -4277,15 +4277,20 @@ export function createKanbanService({ ctx, aiScanMaxMs, aiCatalogTimeoutMs } = {
           const callId = typeof data.callId === "string" ? data.callId.trim() : "";
           const name = typeof data.name === "string" ? data.name.trim() : "";
           if (id && callId && name) {
-            const rawArgs = typeof data.arguments === "string"
-              ? data.arguments
-              : data.arguments === undefined
-                ? ""
-                : JSON.stringify(data.arguments);
+            let args = "";
+            if (typeof data.arguments === "string") args = data.arguments;
+            else if (data.arguments && typeof data.arguments === "object" && !Array.isArray(data.arguments)) args = data.arguments;
+            else if (data.arguments !== undefined) {
+              try {
+                args = JSON.stringify(data.arguments);
+              } catch {
+                args = "";
+              }
+            }
             rememberLiveToolCall(id, {
               callId,
               name,
-              args: rawArgs,
+              args,
               cwd: liveSessionCwd.get(id) || session?.header?.cwd || metaForSessionId(id)?.cwd || null,
               seq: Number(event.seq) > 0 ? Number(event.seq) : null,
               time: Number(event.time) > 0 ? Number(event.time) : Date.now(),
